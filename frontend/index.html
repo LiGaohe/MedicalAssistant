@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>中文门诊病历生成系统</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>中文门诊病历生成系统</h1>
+        
+        <div class="upload-section">
+            <div class="drop-zone" id="dropZone">
+                <p>拖拽音频文件到此处</p>
+                <p>或点击选择文件</p>
+                <p class="hint">支持: wav, mp3</p>
+                <input type="file" id="audioFile" accept=".wav,.mp3" hidden>
+            </div>
+            
+            <div class="form-group">
+                <label for="patientName">患者姓名:</label>
+                <input type="text" id="patientName" placeholder="可选">
+            </div>
+            
+            <div class="form-group">
+                <label for="visitDate">就诊日期:</label>
+                <input type="date" id="visitDate">
+            </div>
+            
+            <button id="uploadBtn" class="btn-primary" disabled>开始上传</button>
+            
+            <div class="progress-section" id="progressSection" style="display: none;">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <p id="progressText">上传进度: 0%</p>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/static/js/upload.js"></script>
+</body>
+</html>
