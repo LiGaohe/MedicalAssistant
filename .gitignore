@@ -1,0 +1,5 @@
+%TEMP%install-qwen.bat
+/.qwen
+/.trae
+*.0
+/docs
