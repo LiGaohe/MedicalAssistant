@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>转写结果 - 中文门诊病历生成系统</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>转写结果</h1>
+        
+        <div class="info-section">
+            <p><strong>就诊记录:</strong> <span id="visitId"></span></p>
+            <p><strong>状态:</strong> <span id="status"></span></p>
+            <p><strong>音频时长:</strong> <span id="audioDuration"></span></p>
+        </div>
+        
+        <div class="actions">
+            <button id="startTranscribe" class="btn-primary">开始转写</button>
+            <button id="refreshStatus" class="btn-secondary" style="display: none;">刷新状态</button>
+        </div>
+        
+        <div class="turns-section" id="turnsSection" style="display: none;">
+            <h2>转写结果</h2>
+            <div id="turnsList"></div>
+        </div>
+        
+        <div class="loading" id="loadingSection" style="display: none;">
+            <p>正在转写中，请稍候...</p>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/static/js/result.js"></script>
+</body>
+</html>
