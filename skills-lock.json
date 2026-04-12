@@ -1,6 +1,11 @@
 {
   "version": 1,
   "skills": {
+    "finishing-a-development-branch": {
+      "source": "obra/superpowers",
+      "sourceType": "github",
+      "computedHash": "9edba9a38684c060fdc38290f640e1dc0c37de286723ac9be73bacacf7cd6f3d"
+    },
     "subagent-driven-development": {
       "source": "obra/superpowers",
       "sourceType": "github",

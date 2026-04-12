@@ -1,5 +1,11 @@
+import os
 from pathlib import Path
 from typing import Optional
+
+_DEFAULT_CACHE_DIR = Path("D:/models/modelscope_cache")
+_DEFAULT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MODELSCOPE_CACHE", str(_DEFAULT_CACHE_DIR))
+
 import torch
 
 from .base import ASRBase, ASRResult
