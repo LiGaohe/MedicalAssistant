@@ -15,6 +15,7 @@ class ASRResult:
     word_error_rate: Optional[float] = None
     confidence: Optional[float] = None
     segments: Optional[list] = field(default_factory=list)
+    speaker_segments: Optional[list] = field(default_factory=list)
     
     @property
     def real_time_factor(self) -> float:

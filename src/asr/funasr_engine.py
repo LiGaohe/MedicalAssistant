@@ -18,12 +18,14 @@ class FunASREngine(ASRBase):
         model_id: str = "paraformer-zh",
         vad_model: str = "fsmn-vad",
         punc_model: str = "ct-punc",
+        spk_model: Optional[str] = None,
         hotword_path: Optional[str] = None,
     ):
         super().__init__(model_name="FunASR-Paraformer", device=device)
         self.model_id = model_id
         self.vad_model = vad_model
         self.punc_model = punc_model
+        self.spk_model = spk_model
         self.hotword_path = hotword_path
         self._audio_duration = 0.0
     
@@ -42,6 +44,9 @@ class FunASREngine(ASRBase):
             "device": self.device,
         }
         
+        if self.spk_model:
+            model_kwargs["spk_model"] = self.spk_model
+        
         if self.hotword_path and Path(self.hotword_path).exists():
             model_kwargs["hotword"] = self.hotword_path
         
@@ -58,28 +63,37 @@ class FunASREngine(ASRBase):
         
         self._audio_duration = self._get_audio_duration(audio_path)
         
-        generate_kwargs = {
-            "input": str(audio_path),
-            "output_conf": True,
-        }
-        generate_kwargs.update(kwargs)
-        
         result, inference_time = self._measure_time(
             self._model.generate,
-            **generate_kwargs
+            input=str(audio_path),
+            **kwargs
         )
         
         text = ""
         segments = []
+        speaker_segments = []
+        
         if result and len(result) > 0:
             text = result[0].get("text", "")
-            if "sentences" in result[0]:
+            
+            if "sentence_info" in result[0]:
+                segments = result[0]["sentence_info"]
+            elif "sentences" in result[0]:
                 segments = result[0]["sentences"]
-            elif "timestamp" in result[0]:
-                segments = self._parse_timestamp_segments(
-                    result[0].get("timestamp", []),
-                    result[0].get("text", "")
-                )
+            
+            if self.spk_model and segments:
+                for sentence in segments:
+                    if "spk" in sentence:
+                        start_ms = sentence.get("start", 0)
+                        end_ms = sentence.get("end", 0)
+                        
+                        speaker_segments.append({
+                            "speaker": f"spk{sentence.get('spk', 0)}",
+                            "text": sentence.get("text", ""),
+                            "start_ms": start_ms,
+                            "end_ms": end_ms,
+                            "confidence": sentence.get("confidence", 0.0)
+                        })
         
         return ASRResult(
             text=text,
@@ -88,60 +102,8 @@ class FunASREngine(ASRBase):
             inference_time=inference_time,
             model_name=self.model_name,
             segments=segments,
+            speaker_segments=speaker_segments,
         )
-    
-    def _parse_timestamp_segments(self, timestamps: list, full_text: str) -> list:
-        """将 FunASR 的 timestamp 格式转换为标准 segment 格式
-        
-        Args:
-            timestamps: [[start_ms, end_ms], ...] 格式的时间戳列表
-            full_text: 完整的转写文本
-            
-        Returns:
-            标准格式的 segments 列表，每个 segment 包含 text, start, end, confidence
-        """
-        segments = []
-        
-        for i, ts in enumerate(timestamps):
-            if len(ts) >= 2:
-                start_ms, end_ms = ts[0], ts[1]
-                segment = {
-                    "text": full_text if i == 0 and len(timestamps) == 1 else "",
-                    "start": start_ms / 1000.0,
-                    "end": end_ms / 1000.0,
-                    "confidence": 0.0
-                }
-                segments.append(segment)
-        
-        if segments and len(timestamps) > 1:
-            text_parts = self._split_text_by_timestamps(full_text, len(timestamps))
-            for i, segment in enumerate(segments):
-                if i < len(text_parts):
-                    segment["text"] = text_parts[i]
-        
-        return segments
-    
-    def _split_text_by_timestamps(self, text: str, num_segments: int) -> list:
-        """根据段落数量将文本分割成多个部分"""
-        import re
-        
-        sentences = re.split(r'([。！？；\.\!\?;])', text)
-        sentences = [''.join(sentences[i:i+2]) for i in range(0, len(sentences)-1, 2)]
-        
-        if not sentences or sentences == ['']:
-            sentences = [text]
-        
-        if len(sentences) >= num_segments:
-            return sentences[:num_segments]
-        
-        avg_len = len(text) // num_segments
-        parts = []
-        for i in range(num_segments):
-            start = i * avg_len
-            end = start + avg_len if i < num_segments - 1 else len(text)
-            parts.append(text[start:end])
-        
-        return parts
     
     def _get_audio_duration(self, audio_path: Path) -> float:
         try:
@@ -149,14 +111,25 @@ class FunASREngine(ASRBase):
             duration, _ = librosa.duration(path=str(audio_path))
             return duration
         except Exception:
-            return 0.0
+            try:
+                from pydub import AudioSegment
+                audio = AudioSegment.from_file(str(audio_path))
+                return len(audio) / 1000.0
+            except Exception:
+                try:
+                    import soundfile as sf
+                    info = sf.info(str(audio_path))
+                    return info.duration
+                except Exception:
+                    return 0.0
     
     @classmethod
-    def create_medical_version(cls, hotword_path: Optional[str] = None, device: str = "cpu"):
+    def create_medical_version(cls, hotword_path: Optional[str] = None, device: str = "cpu", enable_diarization: bool = True):
         return cls(
             device=device,
             model_id="paraformer-zh",
             vad_model="fsmn-vad",
             punc_model="ct-punc",
+            spk_model="cam++" if enable_diarization else None,
             hotword_path=hotword_path,
         )

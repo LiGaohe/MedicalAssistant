@@ -14,9 +14,11 @@ class ASRService:
     
     def initialize(self):
         if self.engine is None:
+            enable_diarization = self.config.get("enable_diarization", True)
             self.engine = FunASREngine(
                 device=self.config.get("device", "cpu"),
-                hotword_path=self.config.get("hotword_path")
+                hotword_path=self.config.get("hotword_path"),
+                spk_model="cam++" if enable_diarization else None
             )
             self.engine.load_model()
     
@@ -40,12 +42,26 @@ class ASRService:
         result = self.engine.transcribe(audio_path)
         
         turns = []
-        if result.segments:
+        if result.speaker_segments:
+            for i, segment in enumerate(result.speaker_segments):
+                speaker_id = segment.get("speaker", "unknown")
+                speaker = self._map_speaker_id(speaker_id, i)
+                turns.append({
+                    "turn_index": i,
+                    "speaker": speaker,
+                    "speaker_id": speaker_id,
+                    "text": segment.get("text", ""),
+                    "start_ms": segment.get("start_ms", 0),
+                    "end_ms": segment.get("end_ms", 0),
+                    "confidence": segment.get("confidence", 0.0)
+                })
+        elif result.segments:
             for i, segment in enumerate(result.segments):
                 speaker = self._map_speaker(i)
                 turns.append({
                     "turn_index": i,
                     "speaker": speaker,
+                    "speaker_id": "unknown",
                     "text": segment.get("text", ""),
                     "start_ms": int(segment.get("start", 0) * 1000),
                     "end_ms": int(segment.get("end", 0) * 1000),
@@ -55,6 +71,7 @@ class ASRService:
             turns.append({
                 "turn_index": 0,
                 "speaker": "unknown",
+                "speaker_id": "unknown",
                 "text": result.text,
                 "start_ms": 0,
                 "end_ms": int(result.duration_seconds * 1000),
@@ -72,3 +89,18 @@ class ASRService:
             return "doctor"
         else:
             return "patient"
+    
+    def _map_speaker_id(self, speaker_id: str, index: int) -> str:
+        if speaker_id == "unknown":
+            return self._map_speaker(index)
+        
+        try:
+            spk_num = int(speaker_id.replace("spk", ""))
+            if spk_num == 0:
+                return "doctor"
+            elif spk_num == 1:
+                return "patient"
+            else:
+                return f"speaker_{spk_num}"
+        except (ValueError, AttributeError):
+            return self._map_speaker(index)

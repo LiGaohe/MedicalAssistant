@@ -17,7 +17,8 @@ router = APIRouter(prefix="/api/asr", tags=["asr"])
 
 asr_service = ASRService({
     "device": settings.ASR_DEVICE,
-    "hotword_path": settings.HOTWORD_PATH
+    "hotword_path": settings.HOTWORD_PATH,
+    "enable_diarization": settings.ENABLE_DIARIZATION
 })
 
 postprocessor = ASRPostprocessor()

@@ -117,17 +117,13 @@ document.addEventListener('DOMContentLoaded', async function() {
                     const speakerClass = turn.speaker === 'doctor' ? 'doctor-turn' : 'patient-turn';
                     const speakerText = turn.speaker === 'doctor' ? '医生' : '患者';
                     
-                    const confidenceHtml = turn.confidence > 0
-                        ? `<div class="turn-confidence">置信度: ${turn.confidence.toFixed(2)}</div>`
-                        : '';
-                    
                     turnDiv.innerHTML = `
                         <div class="turn-header ${speakerClass}">
                             <span class="time">[${formatTime(turn.start_ms)} - ${formatTime(turn.end_ms)}]</span>
                             <span class="speaker">${speakerText}</span>
                         </div>
                         <div class="turn-text">${turn.text}</div>
-                        ${confidenceHtml}
+                        <div class="turn-confidence">置信度: ${turn.confidence.toFixed(2)}</div>
                     `;
                     
                     turnsList.appendChild(turnDiv);
