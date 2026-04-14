@@ -58,10 +58,15 @@ class FunASREngine(ASRBase):
         
         self._audio_duration = self._get_audio_duration(audio_path)
         
+        generate_kwargs = {
+            "input": str(audio_path),
+            "output_conf": True,
+        }
+        generate_kwargs.update(kwargs)
+        
         result, inference_time = self._measure_time(
             self._model.generate,
-            input=str(audio_path),
-            **kwargs
+            **generate_kwargs
         )
         
         text = ""
@@ -70,6 +75,11 @@ class FunASREngine(ASRBase):
             text = result[0].get("text", "")
             if "sentences" in result[0]:
                 segments = result[0]["sentences"]
+            elif "timestamp" in result[0]:
+                segments = self._parse_timestamp_segments(
+                    result[0].get("timestamp", []),
+                    result[0].get("text", "")
+                )
         
         return ASRResult(
             text=text,
@@ -79,6 +89,59 @@ class FunASREngine(ASRBase):
             model_name=self.model_name,
             segments=segments,
         )
+    
+    def _parse_timestamp_segments(self, timestamps: list, full_text: str) -> list:
+        """将 FunASR 的 timestamp 格式转换为标准 segment 格式
+        
+        Args:
+            timestamps: [[start_ms, end_ms], ...] 格式的时间戳列表
+            full_text: 完整的转写文本
+            
+        Returns:
+            标准格式的 segments 列表，每个 segment 包含 text, start, end, confidence
+        """
+        segments = []
+        
+        for i, ts in enumerate(timestamps):
+            if len(ts) >= 2:
+                start_ms, end_ms = ts[0], ts[1]
+                segment = {
+                    "text": full_text if i == 0 and len(timestamps) == 1 else "",
+                    "start": start_ms / 1000.0,
+                    "end": end_ms / 1000.0,
+                    "confidence": 0.0
+                }
+                segments.append(segment)
+        
+        if segments and len(timestamps) > 1:
+            text_parts = self._split_text_by_timestamps(full_text, len(timestamps))
+            for i, segment in enumerate(segments):
+                if i < len(text_parts):
+                    segment["text"] = text_parts[i]
+        
+        return segments
+    
+    def _split_text_by_timestamps(self, text: str, num_segments: int) -> list:
+        """根据段落数量将文本分割成多个部分"""
+        import re
+        
+        sentences = re.split(r'([。！？；\.\!\?;])', text)
+        sentences = [''.join(sentences[i:i+2]) for i in range(0, len(sentences)-1, 2)]
+        
+        if not sentences or sentences == ['']:
+            sentences = [text]
+        
+        if len(sentences) >= num_segments:
+            return sentences[:num_segments]
+        
+        avg_len = len(text) // num_segments
+        parts = []
+        for i in range(num_segments):
+            start = i * avg_len
+            end = start + avg_len if i < num_segments - 1 else len(text)
+            parts.append(text[start:end])
+        
+        return parts
     
     def _get_audio_duration(self, audio_path: Path) -> float:
         try:
