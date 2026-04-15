@@ -123,7 +123,6 @@ document.addEventListener('DOMContentLoaded', async function() {
                             <span class="speaker">${speakerText}</span>
                         </div>
                         <div class="turn-text">${turn.text}</div>
-                        <div class="turn-confidence">置信度: ${turn.confidence.toFixed(2)}</div>
                     `;
                     
                     turnsList.appendChild(turnDiv);

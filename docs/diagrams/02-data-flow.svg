@@ -1,0 +1,424 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="850"
+   height="180"
+   viewBox="0 0 850 180"
+   version="1.1"
+   id="svg23"
+   sodipodi:docname="02-data-flow.svg"
+   inkscape:version="1.4.2 (f4327f4, 2025-05-13)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview23"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="1.4142136"
+     inkscape:cx="541.29024"
+     inkscape:cy="108.18734"
+     inkscape:window-width="1440"
+     inkscape:window-height="830"
+     inkscape:window-x="-6"
+     inkscape:window-y="-6"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="g22" />
+  <!-- 背景 -->
+  <rect
+     width="850"
+     height="180"
+     fill="#F8F7F2"
+     id="rect1" />
+  <!-- 输入节点 -->
+  <g
+     transform="translate(30, 60)"
+     id="g3">
+    <rect
+       x="0"
+       y="0"
+       width="100"
+       height="60"
+       rx="8"
+       fill="#E8F4FD"
+       stroke="#1E3A8A"
+       stroke-width="2"
+       id="rect2" />
+    <!-- 麦克风图标 -->
+    <svg
+       x="38"
+       y="8"
+       width="24"
+       height="24"
+       viewBox="0 0 24 24"
+       version="1.1"
+       id="svg2">
+      <path
+         fill="none"
+         stroke="#1E3A8A"
+         stroke-linecap="round"
+         stroke-linejoin="round"
+         stroke-width="1.5"
+         d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3"
+         id="path2" />
+    </svg>
+    <text
+       x="50"
+       y="42"
+       text-anchor="middle"
+       font-size="9"
+       fill="#1E3A8A"
+       font-weight="bold"
+       font-family="Noto Serif SC, serif"
+       id="text2">门诊录音</text>
+    <text
+       x="50"
+       y="54"
+       text-anchor="middle"
+       font-size="7"
+       fill="#666"
+       font-family="Noto Serif SC, serif"
+       id="text3">mp3/wav格式</text>
+  </g>
+  <!-- 箭头1 -->
+  <g
+     transform="translate(135, 85)"
+     id="g4">
+    <line
+       x1="0"
+       y1="0"
+       x2="20"
+       y2="0"
+       stroke="#333"
+       stroke-width="2"
+       marker-end="url(#arrow1)"
+       id="line3" />
+  </g>
+  <!-- ASR模块 -->
+  <g
+     transform="translate(160, 50)"
+     id="g7">
+    <rect
+       x="0"
+       y="0"
+       width="120"
+       height="80"
+       rx="8"
+       fill="#E8F8F0"
+       stroke="#27AE60"
+       stroke-width="2"
+       id="rect4" />
+    <text
+       x="60"
+       y="18"
+       text-anchor="middle"
+       font-size="10"
+       fill="#196F3D"
+       font-weight="bold"
+       font-family="Noto Serif SC, serif"
+       id="text4">医疗ASR</text>
+    <text
+       x="60"
+       y="35"
+       text-anchor="middle"
+       font-size="8"
+       fill="#666"
+       font-family="Noto Serif SC, serif"
+       id="text5">FunASR</text>
+    <text
+       x="60"
+       y="48"
+       text-anchor="middle"
+       font-size="8"
+       fill="#666"
+       font-family="Noto Serif SC, serif"
+       id="text6">VAD+标点+热词</text>
+    <text
+       x="60"
+       y="61"
+       text-anchor="middle"
+       font-size="8"
+       fill="#666"
+       font-family="Noto Serif SC, serif"
+       id="text7">说话人分离</text>
+  </g>
+  <!-- 箭头2 -->
+  <g
+     transform="translate(285, 85)"
+     id="g8">
+    <line
+       x1="0"
+       y1="0"
+       x2="30"
+       y2="0"
+       stroke="#333"
+       stroke-width="2"
+       marker-end="url(#arrow1)"
+       id="line7" />
+  </g>
+  <!-- 术语纠错 -->
+  <g
+     transform="translate(320, 50)"
+     id="g11">
+    <rect
+       x="0"
+       y="0"
+       width="120"
+       height="80"
+       rx="8"
+       fill="#FEF9E7"
+       stroke="#F39C12"
+       stroke-width="2"
+       id="rect8" />
+    <text
+       x="60"
+       y="18"
+       text-anchor="middle"
+       font-size="10"
+       fill="#D68910"
+       font-weight="bold"
+       font-family="Noto Serif SC, serif"
+       id="text8">术语纠错</text>
+    <text
+       x="60"
+       y="35"
+       text-anchor="middle"
+       font-size="8"
+       fill="#666"
+       font-family="Noto Serif SC, serif"
+       id="text9">词典检索</text>
+    <text
+       x="60"
+       y="48"
+       text-anchor="middle"
+       font-size="8"
+       fill="#666"
+       font-family="Noto Serif SC, serif"
+       id="text10">拼音匹配</text>
+    <text
+       x="60"
+       y="61"
+       text-anchor="middle"
+       font-size="8"
+       fill="#666"
+       font-family="Noto Serif SC, serif"
+       id="text11">实体链接</text>
+  </g>
+  <!-- 箭头3 -->
+  <g
+     transform="translate(445, 85)"
+     id="g12">
+    <line
+       x1="0"
+       y1="0"
+       x2="30"
+       y2="0"
+       stroke="#333"
+       stroke-width="2"
+       marker-end="url(#arrow1)"
+       id="line11" />
+  </g>
+  <!-- 病历生成 -->
+  <g
+     transform="translate(480, 50)"
+     id="g15">
+    <rect
+       x="0"
+       y="0"
+       width="120"
+       height="80"
+       rx="8"
+       fill="#F5EEF8"
+       stroke="#9B59B6"
+       stroke-width="2"
+       id="rect12" />
+    <text
+       x="60"
+       y="18"
+       text-anchor="middle"
+       font-size="10"
+       fill="#7D3C98"
+       font-weight="bold"
+       font-family="Noto Serif SC, serif"
+       id="text12">病历生成</text>
+    <text
+       x="60"
+       y="35"
+       text-anchor="middle"
+       font-size="8"
+       fill="#666"
+       font-family="Noto Serif SC, serif"
+       id="text13">大模型抽取</text>
+    <text
+       x="60"
+       y="48"
+       text-anchor="middle"
+       font-size="8"
+       fill="#666"
+       font-family="Noto Serif SC, serif"
+       id="text14">章节约束</text>
+    <text
+       x="60"
+       y="61"
+       text-anchor="middle"
+       font-size="8px"
+       fill="#666666"
+       font-family="'Noto Serif SC', serif"
+       id="text15">格式约束</text>
+  </g>
+  <!-- 箭头4 -->
+  <g
+     transform="translate(605, 85)"
+     id="g16">
+    <line
+       x1="0"
+       y1="0"
+       x2="30"
+       y2="0"
+       stroke="#333"
+       stroke-width="2"
+       marker-end="url(#arrow1)"
+       id="line15" />
+  </g>
+  <!-- 错误检测 -->
+  <g
+     transform="translate(640, 50)"
+     id="g19">
+    <rect
+       x="0"
+       y="0"
+       width="100"
+       height="80"
+       rx="8"
+       fill="#FDEDEC"
+       stroke="#E74C3C"
+       stroke-width="2"
+       id="rect16" />
+    <text
+       x="50"
+       y="18"
+       text-anchor="middle"
+       font-size="10"
+       fill="#C0392B"
+       font-weight="bold"
+       font-family="Noto Serif SC, serif"
+       id="text16">错误检测</text>
+    <text
+       x="50"
+       y="35"
+       text-anchor="middle"
+       font-size="8"
+       fill="#666"
+       font-family="Noto Serif SC, serif"
+       id="text17">事实校验</text>
+    <text
+       x="50"
+       y="48"
+       text-anchor="middle"
+       font-size="8"
+       fill="#666"
+       font-family="Noto Serif SC, serif"
+       id="text18">候选比对</text>
+    <text
+       x="50"
+       y="61"
+       text-anchor="middle"
+       font-size="8"
+       fill="#666"
+       font-family="Noto Serif SC, serif"
+       id="text19">回写修正</text>
+  </g>
+  <!-- 输出箭头 -->
+  <g
+     transform="translate(745, 85)"
+     id="g20">
+    <line
+       x1="0"
+       y1="0"
+       x2="25"
+       y2="0"
+       stroke="#333"
+       stroke-width="2"
+       marker-end="url(#arrow1)"
+       id="line19" />
+  </g>
+  <!-- 输出 -->
+  <g
+     transform="translate(775, 65)"
+     id="g21">
+    <rect
+       x="0"
+       y="0"
+       width="70"
+       height="40"
+       rx="8"
+       fill="#E8FDF8"
+       stroke="#1ABC9C"
+       stroke-width="2"
+       id="rect20" />
+    <text
+       x="35"
+       y="18"
+       text-anchor="middle"
+       font-size="10px"
+       fill="#16a085"
+       font-weight="bold"
+       font-family="'Noto Serif SC', serif"
+       id="text20">标准病历</text>
+  </g>
+  <!-- 反馈箭头 -->
+  <g
+     id="g22"
+     transform="matrix(1,-6.1158238e-4,0,1,0,0.32737764)">
+    <path
+       d="m 375.87354,129.9025 v 14.61554 14.61554 l 324.56224,0.39699 v -29.23108"
+       stroke="#e74c3c"
+       stroke-width="1.63349"
+       stroke-dasharray="4, 2"
+       fill="none"
+       marker-start="url(#redArrowStart)"
+       id="path21"
+       sodipodi:nodetypes="ccccc" />
+    <text
+       x="530"
+       y="170"
+       text-anchor="middle"
+       font-size="8px"
+       fill="#c0392b"
+       font-family="'Noto Serif SC', serif"
+       id="text22">检测到错误 → 返回术语纠错重新处理</text>
+  </g>
+  <!-- 箭头定义 -->
+  <defs
+     id="defs23">
+    <marker
+       id="arrow1"
+       markerWidth="10"
+       markerHeight="8"
+       refX="9"
+       refY="4"
+       orient="auto">
+      <polygon
+         points="0 0, 10 4, 0 8"
+         fill="#333"
+         id="polygon22" />
+    </marker>
+    <marker
+       id="redArrowStart"
+       markerWidth="10"
+       markerHeight="8"
+       refX="1"
+       refY="4"
+       orient="auto">
+      <polygon
+         points="10 0, 0 4, 10 8"
+         fill="#E74C3C"
+         id="polygon23" />
+    </marker>
+  </defs>
+</svg>

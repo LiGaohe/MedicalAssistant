@@ -1,0 +1,420 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="800"
+   height="280"
+   viewBox="0 0 800 280"
+   version="1.1"
+   id="svg25"
+   sodipodi:docname="03-asr-class.svg"
+   inkscape:version="1.4.2 (f4327f4, 2025-05-13)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview25"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="0.83875"
+     inkscape:cx="234.2772"
+     inkscape:cy="251.56483"
+     inkscape:window-width="1440"
+     inkscape:window-height="830"
+     inkscape:window-x="-6"
+     inkscape:window-y="-6"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg25" />
+  <!-- 背景 -->
+  <rect
+     width="800"
+     height="280"
+     fill="#F8F7F2"
+     id="rect1" />
+  <!-- ASRBase 抽象类 -->
+  <g
+     transform="translate(300, 20)"
+     id="g7">
+    <rect
+       x="0"
+       y="0"
+       width="200"
+       height="80"
+       rx="8"
+       fill="#EBEDEF"
+       stroke="#2C3E50"
+       stroke-width="2"
+       id="rect2" />
+    <rect
+       x="0"
+       y="0"
+       width="200"
+       height="25"
+       rx="8"
+       fill="#2C3E50"
+       id="rect3" />
+    <text
+       x="100"
+       y="17"
+       text-anchor="middle"
+       font-size="11"
+       fill="#FFFFFF"
+       font-weight="bold"
+       font-family="Noto Serif SC, serif"
+       id="text3">ASRBase</text>
+    <text
+       x="10"
+       y="17"
+       font-size="9"
+       fill="#AAAAAA"
+       font-family="monospace"
+       id="text4">&lt;&lt;abstract&gt;&gt;</text>
+    <text
+       x="100"
+       y="45"
+       text-anchor="middle"
+       font-size="10"
+       fill="#2C3E50"
+       font-family="monospace"
+       id="text5">+ transcribe(audio)</text>
+    <text
+       x="100"
+       y="60"
+       text-anchor="middle"
+       font-size="10"
+       fill="#2C3E50"
+       font-family="monospace"
+       id="text6">+ get_confidence()</text>
+    <text
+       x="100"
+       y="75"
+       text-anchor="middle"
+       font-size="10"
+       fill="#2C3E50"
+       font-family="monospace"
+       id="text7">+ set_hotwords(list)</text>
+  </g>
+  <!-- 实现关系箭头 -->
+  <g
+     transform="translate(400, 100)"
+     id="g8">
+    <line
+       x1="0"
+       y1="0"
+       x2="0"
+       y2="25"
+       stroke="#666"
+       stroke-width="1.5"
+       stroke-dasharray="4,2"
+       id="line7" />
+  </g>
+  <text
+     x="415"
+     y="118"
+     font-size="9"
+     fill="#666"
+     font-family="Noto Serif SC, serif"
+     id="text8">implements</text>
+  <!-- FunASREngine -->
+  <g
+     transform="translate(148,130)"
+     id="g11">
+    <rect
+       x="0"
+       y="0"
+       width="160"
+       height="70"
+       rx="8"
+       fill="#e8f8f0"
+       stroke="#27ae60"
+       stroke-width="2"
+       id="rect8" />
+    <rect
+       x="0"
+       y="0"
+       width="160"
+       height="22"
+       rx="8"
+       fill="#27ae60"
+       id="rect9" />
+    <text
+       x="80"
+       y="15"
+       text-anchor="middle"
+       font-size="10px"
+       fill="#ffffff"
+       font-weight="bold"
+       font-family="'Noto Serif SC', serif"
+       id="text9">FunASREngine</text>
+    <text
+       x="10"
+       y="40"
+       font-size="9px"
+       fill="#333333"
+       font-family="monospace"
+       id="text10">- model_path</text>
+    <text
+       x="10"
+       y="55"
+       font-size="9px"
+       fill="#333333"
+       font-family="monospace"
+       id="text11">- vad_enabled</text>
+  </g>
+  <!-- WeNetEngine -->
+  <g
+     transform="translate(314,130)"
+     id="g14">
+    <rect
+       x="0"
+       y="0"
+       width="160"
+       height="70"
+       rx="8"
+       fill="#ebf5fb"
+       stroke="#3498db"
+       stroke-width="2"
+       id="rect11" />
+    <rect
+       x="0"
+       y="0"
+       width="160"
+       height="22"
+       rx="8"
+       fill="#3498db"
+       id="rect12" />
+    <text
+       x="80"
+       y="15"
+       text-anchor="middle"
+       font-size="10px"
+       fill="#ffffff"
+       font-weight="bold"
+       font-family="'Noto Serif SC', serif"
+       id="text12">WeNetEngine</text>
+    <text
+       x="10"
+       y="40"
+       font-size="9px"
+       fill="#333333"
+       font-family="monospace"
+       id="text13">- streaming_mode</text>
+    <text
+       x="10"
+       y="55"
+       font-size="9px"
+       fill="#333333"
+       font-family="monospace"
+       id="text14">- context_bias</text>
+  </g>
+  <!-- WhisperEngine -->
+  <g
+     transform="translate(480, 130)"
+     id="g17">
+    <rect
+       x="0"
+       y="0"
+       width="160"
+       height="70"
+       rx="8"
+       fill="#F5EEF8"
+       stroke="#9B59B6"
+       stroke-width="2"
+       id="rect14" />
+    <rect
+       x="0"
+       y="0"
+       width="160"
+       height="22"
+       rx="8"
+       fill="#9B59B6"
+       id="rect15" />
+    <text
+       x="80"
+       y="15"
+       text-anchor="middle"
+       font-size="10"
+       fill="#FFFFFF"
+       font-weight="bold"
+       font-family="Noto Serif SC, serif"
+       id="text15">WhisperEngine</text>
+    <text
+       x="10"
+       y="40"
+       font-size="9"
+       fill="#333"
+       font-family="monospace"
+       id="text16">- model_size</text>
+    <text
+       x="10"
+       y="55"
+       font-size="9"
+       fill="#333"
+       font-family="monospace"
+       id="text17">- language</text>
+  </g>
+  <!-- 虚线连接 -->
+  <g
+     id="g18">
+    <line
+       x1="312.77374"
+       y1="101.41441"
+       x2="250.36342"
+       y2="128.23303"
+       stroke="#666666"
+       stroke-width="0.977974"
+       stroke-dasharray="3, 2"
+       id="line17" />
+    <line
+       x1="487.93088"
+       y1="101.41592"
+       x2="547.46472"
+       y2="133.04118"
+       stroke="#666666"
+       stroke-width="1.03724"
+       stroke-dasharray="3, 2"
+       id="line18"
+       inkscape:transform-center-x="12.776256"
+       inkscape:transform-center-y="0.53863781" />
+  </g>
+  <!-- ASRFactory -->
+  <g
+     transform="translate(316,220)"
+     id="g20">
+    <rect
+       x="0"
+       y="0"
+       width="160"
+       height="50"
+       rx="8"
+       fill="#fef5e7"
+       stroke="#e67e22"
+       stroke-width="2"
+       id="rect18" />
+    <rect
+       x="0"
+       y="0"
+       width="160"
+       height="20"
+       rx="8"
+       fill="#e67e22"
+       id="rect19" />
+    <text
+       x="80"
+       y="14"
+       text-anchor="middle"
+       font-size="10px"
+       fill="#ffffff"
+       font-weight="bold"
+       font-family="'Noto Serif SC', serif"
+       id="text19">ASRFactory</text>
+    <text
+       x="80"
+       y="38"
+       text-anchor="middle"
+       font-size="9px"
+       fill="#333333"
+       font-family="monospace"
+       id="text20">+ create_engine(type)</text>
+  </g>
+  <!-- Factory到Engine的箭头 -->
+  <g
+     id="g22"
+     transform="translate(43.749627,0.46199702)">
+    <line
+       x1="270.83008"
+       y1="243.30057"
+       x2="184.70901"
+       y2="201.70963"
+       stroke="#e67e22"
+       stroke-width="2.39928"
+       marker-end="url(#orangeArrow)"
+       id="line20" />
+    <line
+       x1="360"
+       y1="220"
+       x2="360"
+       y2="200"
+       stroke="#e67e22"
+       stroke-width="1.5"
+       marker-end="url(#orangeArrow)"
+       id="line21" />
+    <line
+       x1="432.25037"
+       y1="244.53801"
+       x2="516.68542"
+       y2="202.41444"
+       stroke="#e67e22"
+       stroke-width="2.00033"
+       marker-end="url(#orangeArrow)"
+       id="line22" />
+  </g>
+  <!-- 图例 -->
+  <g
+     transform="translate(680, 30)"
+     id="g24">
+    <text
+       x="0"
+       y="0"
+       font-size="10"
+       fill="#666"
+       font-weight="bold"
+       font-family="Noto Serif SC, serif"
+       id="text22">图例</text>
+    <line
+       x1="0"
+       y1="15"
+       x2="30"
+       y2="15"
+       stroke="#666"
+       stroke-width="1.5"
+       stroke-dasharray="4,2"
+       id="line23" />
+    <text
+       x="40"
+       y="19"
+       font-size="9"
+       fill="#666"
+       font-family="Noto Serif SC, serif"
+       id="text23">实现</text>
+    <line
+       x1="0"
+       y1="40"
+       x2="30"
+       y2="40"
+       stroke="#E67E22"
+       stroke-width="1.5"
+       id="line24" />
+    <polygon
+       points="30,35 30,45 40,40"
+       fill="#E67E22"
+       id="polygon24" />
+    <text
+       x="45"
+       y="44"
+       font-size="9"
+       fill="#666"
+       font-family="Noto Serif SC, serif"
+       id="text24">创建</text>
+  </g>
+  <!-- 箭头定义 -->
+  <defs
+     id="defs25">
+    <marker
+       id="orangeArrow"
+       markerWidth="8"
+       markerHeight="6"
+       refX="8"
+       refY="3"
+       orient="auto">
+      <polygon
+         points="0 0, 8 3, 0 6"
+         fill="#E67E22"
+         id="polygon25" />
+    </marker>
+  </defs>
+</svg>

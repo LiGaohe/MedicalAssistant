@@ -13,8 +13,7 @@ class TranscriptNormalizer:
                 "text": self._normalize_text(turn.get("text", "")),
                 "original_text": turn.get("text", ""),
                 "start_ms": turn.get("start_ms", 0),
-                "end_ms": turn.get("end_ms", 0),
-                "confidence": turn.get("confidence", 0.0)
+                "end_ms": turn.get("end_ms", 0)
             }
             normalized_turns.append(normalized_turn)
         

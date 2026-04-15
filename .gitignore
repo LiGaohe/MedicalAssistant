@@ -2,7 +2,8 @@
 /.qwen
 /.trae
 *.0
-/docs
 /.agents
 /data
 /output
+/.agents
+/_bmad

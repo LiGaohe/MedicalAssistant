@@ -66,8 +66,7 @@ def process_asr_task(visit_id: str, db_url: str):
                 original_text=turn["original_text"],
                 corrected_text=turn["corrected_text"],
                 start_ms=turn["start_ms"],
-                end_ms=turn["end_ms"],
-                confidence=turn["confidence"]
+                end_ms=turn["end_ms"]
             )
             db.add(transcript_turn)
         
@@ -152,8 +151,7 @@ async def get_transcript(
             "original_text": turn.original_text,
             "corrected_text": turn.corrected_text,
             "start_ms": turn.start_ms,
-            "end_ms": turn.end_ms,
-            "confidence": turn.confidence
+            "end_ms": turn.end_ms
         })
     
     return JSONResponse(

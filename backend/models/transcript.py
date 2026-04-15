@@ -17,7 +17,6 @@ class TranscriptTurn(Base):
     corrected_text = Column(String, nullable=True)
     start_ms = Column(Integer, nullable=False)
     end_ms = Column(Integer, nullable=False)
-    confidence = Column(Float, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     visit = relationship("Visit", back_populates="turns")
@@ -33,7 +32,6 @@ class ASRCorrection(Base):
     original_word = Column(String, nullable=False)
     corrected_word = Column(String, nullable=False)
     correction_type = Column(String, nullable=False)
-    confidence = Column(Float, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     visit = relationship("Visit", back_populates="corrections")
