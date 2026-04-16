@@ -1,12 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
-from enum import Enum
-
-
-class LLMProvider(Enum):
-    MODELSCOPE = "modelscope"
-    OPENROUTER = "openrouter"
 
 
 @dataclass
