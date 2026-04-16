@@ -27,5 +27,5 @@ def get_db():
 
 
 def init_db():
-    from .models import Visit, TranscriptTurn, Task, ASRCorrection
+    from .models import Visit, TranscriptTurn, Task, ASRCorrection, LLMConfig
     Base.metadata.create_all(bind=engine)
