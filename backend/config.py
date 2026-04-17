@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     ENABLE_ASR_CORRECTION: bool = True
     CORRECTION_CONFIDENCE_THRESHOLD: float = 0.7
     
+    LLM_DEBUG_MODE: bool = False
+    LLM_SEGMENT_TURNS: int = 10
+    
     class Config:
         env_file = ".env"
         case_sensitive = True

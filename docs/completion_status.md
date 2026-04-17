@@ -1,5 +1,288 @@
 # 完成状态记录
 
+## 2026-04-17 多阶段LLM证据抽取流程
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 配置开关 | ✅ 完成 | 添加 `LLM_DEBUG_MODE` 和 `LLM_SEGMENT_TURNS` 配置 |
+| LLMPipelineService | ✅ 完成 | 实现多阶段LLM处理服务 |
+| 调试模式支持 | ✅ 完成 | 支持y/n交互和手动输入结果 |
+| API端点 | ✅ 完成 | 新增 `/api/emr/pipeline/process` 等端点 |
+| LLM调用修复 | ✅ 完成 | 修复API响应解析和超时问题 |
+
+### 设计决策
+
+**多阶段处理流程**：
+
+1. **阶段1 - 角色识别与证据标注**：
+   - 将对话按轮次分段（默认每10轮一段）
+   - 大模型识别说话人角色（医生/患者）
+   - 用XML标签标注证据字段（动态识别）
+
+2. **阶段2 - 术语规范化**：
+   - 对标注文本中的口语化医学术语规范化
+   - 保持XML标签和对话格式不变
+
+3. **阶段3 - 字段抽取**：
+   - 从XML标签中提取对应字段内容
+   - 合并、去重、处理冲突
+
+4. **阶段4 - 病历生成**：
+   - 根据抽取结果生成SOAP格式病历
+   - 符合中国医疗病历书写规范
+
+**调试模式设计**：
+
+- 输入 `y`：正常发送给大模型
+- 输入 `n`：不发送，显示提示词和指导步骤，允许手动输入结果
+- 输入 `q`：取消操作
+
+### 实现详情
+
+1. **配置项** (`backend/config.py`)
+   - `LLM_DEBUG_MODE`：调试模式开关，默认 `False`
+   - `LLM_SEGMENT_TURNS`：分段轮次数，默认 `10`
+
+2. **LLMPipelineService** (`backend/services/llm_pipeline_service.py`)
+   - `process_transcript()`：完整处理流程
+   - `_segment_turns()`：按轮次分段
+   - `_process_segment()`：处理单个段落
+   - `_normalize_terms_stage()`：术语规范化阶段
+   - `_extract_fields_stage()`：字段抽取阶段
+   - `_generate_emr_stage()`：病历生成阶段
+   - `_debug_interact()`：调试模式交互
+
+3. **API端点** (`backend/api/emr.py`)
+   - `POST /api/emr/pipeline/process`：多阶段LLM处理
+   - `GET /api/emr/config/debug-mode`：获取调试模式配置
+   - `POST /api/emr/config/debug-mode`：设置调试模式
+
+4. **降级方案**：
+   - LLM不可用时，使用规则推断角色
+   - 保留原有的 `MedicalRecordPipeline` 作为备选
+
+5. **LLM调用修复** (`backend/services/llm/openai_compatible_adapter.py`)
+   - 增加超时时间：60s → 120s
+   - 安全解析API响应：使用 `.get()` 方法避免 KeyError
+   - 检查空choices：提供详细错误信息
+   - 检查None content：避免后续处理错误
+
+### 使用方法
+
+**开启调试模式**：
+
+```python
+# 方式1：修改配置文件
+# backend/config.py
+LLM_DEBUG_MODE = True
+LLM_SEGMENT_TURNS = 10
+
+# 方式2：通过API设置
+POST /api/emr/config/debug-mode?enabled=true&segment_turns=10
+```
+
+**调用多阶段处理**：
+
+```python
+# API调用
+POST /api/emr/pipeline/process
+{
+  "visit_id": "test_visit_001"
+}
+
+# 返回结果
+{
+  "status": "completed",
+  "role_mapping": {"spk0": "doctor", "spk1": "patient"},
+  "annotated_text": "标注后的文本...",
+  "normalized_result": {...},
+  "extraction_result": {...},
+  "emr_result": {...}
+}
+```
+
+**调试模式交互示例**：
+
+```
+================================================================================
+[DEBUG模式] 阶段: role_annotation
+================================================================================
+
+>>> 即将发送给大模型的完整内容：
+
+你是一个医疗对话分析专家。请分析以下医患对话...
+--------------------------------------------------------------------------------
+
+请选择操作：
+  y - 确认发送给大模型
+  n - 不发送，手动输入结果
+  q - 取消操作
+
+请输入选择: n
+
+>>> 手动输入模式
+阶段: role_annotation
+
+指导步骤：
+1. 分析对话内容，判断每个说话人(spk0, spk1等)是医生还是患者
+2. 用XML标签标注证据字段...
+```
+
+### 测试结果
+
+```
+测试数据已存在，跳过创建
+
+当前配置:
+  LLM_DEBUG_MODE: False
+  LLM_SEGMENT_TURNS: 10
+
+可用的LLM适配器: ['glm-5.1']
+
+============================================================
+开始多阶段LLM处理...
+============================================================
+>>> 处理段落 1/1
+合并后的标注文本长度: 327 字符
+>>> 阶段2: 术语规范化
+>>> 阶段3: 字段抽取
+>>> 阶段4: 病历生成
+
+============================================================
+处理结果:
+============================================================
+状态: completed
+
+角色映射:
+  spk0: doctor
+  spk1: patient
+
+生成的病历:
+  主观数据: 主诉：头痛3天，晨起加重。现病史：患者3天前无明显诱因出现头痛...
+  客观数据: 体格检查：血压145/95mmHg。辅助检查：暂缺。
+  评估: 初步诊断：高血压病引起的头痛。
+  计划: 治疗方案：予降压药物口服，每日1次，晨起服用...
+```
+
+## 2026-04-17 置信度字段支持
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| TranscriptTurn模型 | ✅ 完成 | 添加 `confidence` 字段 |
+| ASRService传递置信度 | ✅ 完成 | FunASR和Qwen3-ASR均传递置信度 |
+| EvidenceService使用置信度 | ✅ 完成 | 基于置信度过滤和打分 |
+| 单元测试 | ✅ 完成 | 8个测试全部通过 |
+
+### 设计决策
+
+**置信度在证据选择中的作用**：
+
+1. **过滤低置信度轮次**：置信度低于阈值的对话轮次直接过滤
+2. **影响证据得分**：置信度越高，证据得分越高
+3. **继承到证据记录**：EvidenceSpan 继承 TranscriptTurn 的置信度
+
+### 实现详情
+
+1. **TranscriptTurn 模型** (`backend/models/transcript.py`)
+   - 新增 `confidence` 字段，类型 `Float`，默认值 `1.0`
+   - 允许为空，兼容旧数据
+
+2. **ASRService 传递置信度** (`backend/services/asr_service.py`)
+   - `_transcribe_funasr_with_diarization()`：从 FunASR 输出提取置信度
+   - `_transcribe_qwen3_asr()`：Qwen3-ASR 默认置信度为 1.0
+
+3. **EvidenceService 使用置信度** (`backend/services/evidence_service.py`)
+   - `select_evidence_by_rules()` 新增 `confidence_threshold` 参数
+   - `_calculate_turn_score()` 新增置信度过滤和加权逻辑
+   - 低置信度轮次被过滤并记录日志
+
+### 置信度打分公式
+
+```
+最终得分 = 基础得分 × 说话人偏好系数 × 句长系数 × (0.5 + 0.5 × confidence)
+```
+
+- 基础得分：触发词命中数量
+- 说话人偏好系数：匹配偏好说话人时 ×1.2
+- 句长系数：短句（<5字）×0.5
+- 置信度系数：`0.5 + 0.5 × confidence`（范围 0.5-1.0）
+
+### 测试结果
+
+```
+tests/test_confidence_feature.py::TestTranscriptTurnConfidence::test_create_turn_with_confidence PASSED
+tests/test_confidence_feature.py::TestTranscriptTurnConfidence::test_create_turn_without_confidence PASSED
+tests/test_confidence_feature.py::TestEvidenceServiceConfidence::test_filter_low_confidence_turns PASSED
+tests/test_confidence_feature.py::TestEvidenceServiceConfidence::test_confidence_affects_score PASSED
+tests/test_confidence_feature.py::TestEvidenceServiceConfidence::test_zero_confidence_turn_filtered PASSED
+tests/test_confidence_feature.py::TestEvidenceServiceConfidence::test_evidence_inherits_turn_confidence PASSED
+tests/test_confidence_feature.py::TestASRServiceConfidence::test_funasr_turns_include_confidence PASSED
+tests/test_confidence_feature.py::TestASRServiceConfidence::test_qwen3_asr_turns_include_default_confidence PASSED
+======================= 8 passed in 2.56s ========================
+```
+
+## 2026-04-17 病历生成角色识别功能
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 角色推断逻辑 | ✅ 完成 | 基于对话内容推断说话人角色（医生/患者） |
+| 证据内容修正 | ✅ 完成 | 根据角色修正证据内容归属 |
+| LLM Prompt模板 | ✅ 完成 | 新增支持角色识别的病历生成模板 |
+| 字段去重逻辑 | ✅ 完成 | 保留置信度最高的字段 |
+
+### 设计决策
+
+**保持ASR模块职责边界**：
+- ASR模块只输出 `spk0`/`spk1` 等原始说话人ID
+- 角色识别（医生/患者）由病历生成模块负责
+- 符合设计文档中的职责分离原则
+
+### 实现详情
+
+1. **角色推断** (`backend/services/emr_generation_service.py`)
+   - 新增 `_infer_roles()` 方法
+   - 基于对话内容特征推断角色：
+     - 医生特征：问问题、检查、诊断、开药、医嘱
+     - 患者特征：称呼"医生"、描述症状、回答问题
+   - 问号结尾的句子倾向于医生
+
+2. **证据内容修正** (`backend/services/emr_generation_service.py`)
+   - 新增 `_correct_content_by_role()` 方法
+   - 根据字段类型期望的角色修正内容：
+     - 主诉、现病史、既往史 → 患者
+     - 体格检查、诊断、治疗、医嘱 → 医生
+   - 使用关键词匹配选择正确内容
+
+3. **字段去重优化** (`backend/services/emr_generation_service.py`)
+   - 修改 `_aggregate_items()` 方法
+   - 同名字段保留置信度最高的
+   - 避免正确内容被错误内容覆盖
+
+4. **LLM Prompt模板** (`backend/services/llm/prompts.py`)
+   - 新增 `emr_generation_with_role` 模板
+   - 支持LLM进行角色识别和内容修正
+   - 包含原始对话和初步抽取数据
+
+### 测试结果
+
+修改前：
+```
+主诉：有没有恶心、呕吐的症状？（医生问的问题，错误）
+体格检查：考虑是高血压引起的头疼...（诊断内容，错误）
+```
+
+修改后：
+```
+主诉：医生，我这几天一直头疼，特别是早上起来的时候（患者回答，正确）
+体格检查：我给您量一下血压，一百四十五九十五，血压偏高（正确）
+```
+
 ## 2026-04-17 魔搭API集成修复
 
 ### 已完成

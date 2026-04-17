@@ -96,7 +96,8 @@ class ASRService:
                     "speaker_id": "spk0",
                     "text": segment.get("text", ""),
                     "start_ms": segment.get("start", 0),
-                    "end_ms": segment.get("end", 0)
+                    "end_ms": segment.get("end", 0),
+                    "confidence": segment.get("confidence", 1.0)
                 })
         else:
             turns.append({
@@ -104,7 +105,8 @@ class ASRService:
                 "speaker_id": "spk0",
                 "text": result.text,
                 "start_ms": 0,
-                "end_ms": int(result.duration_seconds * 1000)
+                "end_ms": int(result.duration_seconds * 1000),
+                "confidence": 1.0
             })
         
         return {
@@ -135,7 +137,8 @@ class ASRService:
                     "speaker_id": segment.get("speaker", "unknown"),
                     "text": segment.get("text", ""),
                     "start_ms": segment.get("start_ms", 0),
-                    "end_ms": segment.get("end_ms", 0)
+                    "end_ms": segment.get("end_ms", 0),
+                    "confidence": segment.get("confidence", 1.0)
                 })
         elif segments:
             for i, segment in enumerate(segments):
@@ -145,7 +148,8 @@ class ASRService:
                     "speaker_id": speaker_id,
                     "text": segment.get("text", ""),
                     "start_ms": segment.get("start", 0),
-                    "end_ms": segment.get("end", 0)
+                    "end_ms": segment.get("end", 0),
+                    "confidence": segment.get("confidence", 1.0)
                 })
         else:
             turns.append({
@@ -153,7 +157,8 @@ class ASRService:
                 "speaker_id": "unknown",
                 "text": result.text,
                 "start_ms": 0,
-                "end_ms": int(result.duration_seconds * 1000)
+                "end_ms": int(result.duration_seconds * 1000),
+                "confidence": 1.0
             })
         
         response = {

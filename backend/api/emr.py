@@ -1,14 +1,16 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from ..database import get_db
 from ..models import EMRRecord
 from ..services.medical_record_pipeline import MedicalRecordPipeline
 from ..services.emr_generation_service import EMRGenerationService
+from ..services.llm_pipeline_service import LLMPipelineService
 from ..services.llm.llm_service import LLMService
 from ..utils.logger import logger
+from ..config import settings
 
 router = APIRouter(prefix="/api/emr", tags=["EMR"])
 
@@ -133,3 +135,89 @@ async def get_emr_versions(
     except Exception as e:
         logger.error(f"获取病历版本失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class PipelineProcessRequest(BaseModel):
+    visit_id: str
+
+
+class PipelineProcessResponse(BaseModel):
+    status: str
+    role_mapping: Optional[Dict[str, str]] = None
+    annotated_text: Optional[str] = None
+    normalized_result: Optional[Dict[str, Any]] = None
+    extraction_result: Optional[Dict[str, Any]] = None
+    emr_result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+@router.post("/pipeline/process", response_model=PipelineProcessResponse)
+async def process_with_pipeline(
+    request: PipelineProcessRequest,
+    db: Session = Depends(get_db)
+):
+    logger.info(f"收到多阶段LLM处理请求: visit_id={request.visit_id}")
+    logger.info(f"DEBUG模式: {settings.LLM_DEBUG_MODE}")
+    
+    try:
+        llm_service = LLMService(db)
+        
+        if not llm_service.adapters:
+            logger.warning("LLM服务不可用")
+            if not settings.LLM_DEBUG_MODE:
+                return PipelineProcessResponse(
+                    status="failed",
+                    error="LLM服务不可用，请先配置LLM或开启DEBUG模式"
+                )
+        
+        pipeline = LLMPipelineService(db, llm_service)
+        
+        result = pipeline.process_transcript(request.visit_id)
+        
+        logger.info(f"多阶段LLM处理完成: {result['status']}")
+        return PipelineProcessResponse(
+            status=result.get("status", "completed"),
+            role_mapping=result.get("role_mapping"),
+            annotated_text=result.get("annotated_text"),
+            normalized_result=result.get("normalized_result"),
+            extraction_result=result.get("extraction_result"),
+            emr_result=result.get("emr_result")
+        )
+        
+    except RuntimeError as e:
+        if "User cancelled" in str(e):
+            logger.info("用户取消操作")
+            return PipelineProcessResponse(
+                status="cancelled",
+                error="用户取消操作"
+            )
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"多阶段LLM处理失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/config/debug-mode")
+async def get_debug_mode():
+    return {
+        "debug_mode": settings.LLM_DEBUG_MODE,
+        "segment_turns": settings.LLM_SEGMENT_TURNS
+    }
+
+
+@router.post("/config/debug-mode")
+async def set_debug_mode(
+    enabled: bool,
+    segment_turns: Optional[int] = None
+):
+    settings.LLM_DEBUG_MODE = enabled
+    if segment_turns is not None:
+        settings.LLM_SEGMENT_TURNS = segment_turns
+    
+    logger.info(f"DEBUG模式已{'开启' if enabled else '关闭'}")
+    logger.info(f"分段轮次数: {settings.LLM_SEGMENT_TURNS}")
+    
+    return {
+        "debug_mode": settings.LLM_DEBUG_MODE,
+        "segment_turns": settings.LLM_SEGMENT_TURNS
+    }

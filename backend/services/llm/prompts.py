@@ -143,6 +143,54 @@ $transcript
             required_vars=["extracted_data", "template_requirements"]
         )
         
+        self.templates["emr_generation_with_role"] = PromptTemplate(
+            template="""你是一个医疗病历撰写专家。请根据以下医患对话和结构化数据生成符合医疗规范的病历文本。
+
+## 原始对话（说话人ID为spk0, spk1等，需要你判断谁是医生谁是患者）
+$transcript
+
+## 初步抽取的结构化数据（可能存在角色识别错误，请根据对话内容修正）
+$extracted_data
+
+## 模板要求
+$template_requirements
+
+## 任务要求
+1. 首先判断每个说话人(spk0, spk1等)的角色（医生/患者）
+2. 根据角色修正结构化数据中的内容：
+   - 主诉、现病史、既往史：应该是患者说的话
+   - 体格检查、辅助检查、诊断、治疗方案、医嘱：应该是医生说的话
+3. 如果发现角色错误，请从正确的说话人对话中提取正确内容
+4. 生成自然流畅的病历文本
+
+请输出JSON格式：
+{
+  "role_mapping": {
+    "spk0": "doctor或patient",
+    "spk1": "doctor或patient"
+  },
+  "subjective": {
+    "text": "患者主诉...",
+    "chief_complaint": {"value": "...", "evidence_ids": []},
+    "history_present_illness": {"value": "...", "evidence_ids": []}
+  },
+  "objective": {
+    "text": "体格检查：...",
+    "physical_examination": {"value": "...", "evidence_ids": []}
+  },
+  "assessment": {
+    "text": "诊断：...",
+    "diagnosis": {"value": "...", "evidence_ids": []}
+  },
+  "plan": {
+    "text": "治疗方案：...",
+    "treatment": {"value": "...", "evidence_ids": []},
+    "advice": {"value": "...", "evidence_ids": []}
+  }
+}""",
+            required_vars=["extracted_data", "transcript", "template_requirements"]
+        )
+        
     def get_template(self, name: str) -> PromptTemplate:
         if name not in self.templates:
             raise ValueError(f"Template '{name}' not found")

@@ -23,9 +23,10 @@ class EvidenceService:
     def select_evidence_by_rules(
         self, 
         visit_id: str, 
-        top_k: int = 5
+        top_k: int = 5,
+        confidence_threshold: float = 0.5
     ) -> List[EvidenceSpan]:
-        logger.info(f"开始规则证据选择，visit_id={visit_id}")
+        logger.info(f"开始规则证据选择，visit_id={visit_id}, confidence_threshold={confidence_threshold}")
         
         turns = self.db.query(TranscriptTurn).filter(
             TranscriptTurn.visit_id == visit_id
@@ -38,6 +39,7 @@ class EvidenceService:
             return []
         
         candidates = []
+        low_confidence_count = 0
         
         for field_type, field_config in self.triggers.items():
             trigger_words = field_config.get("triggers", [])
@@ -45,11 +47,16 @@ class EvidenceService:
             weight = field_config.get("weight", 1.0)
             
             for turn in turns:
+                if turn.confidence is not None and turn.confidence < confidence_threshold:
+                    low_confidence_count += 1
+                    continue
+                    
                 score = self._calculate_turn_score(
                     turn, 
                     trigger_words, 
                     speaker_pref, 
-                    weight
+                    weight,
+                    confidence_threshold
                 )
                 
                 if score > 0:
@@ -58,6 +65,9 @@ class EvidenceService:
                         "field_type": field_type,
                         "score": score
                     })
+        
+        if low_confidence_count > 0:
+            logger.info(f"因置信度过低过滤了 {low_confidence_count} 条轮次")
         
         logger.info(f"找到 {len(candidates)} 个候选证据")
         candidates.sort(key=lambda x: x["score"], reverse=True)
@@ -70,7 +80,7 @@ class EvidenceService:
                 turn_id=turn.turn_id,
                 field_type=candidate["field_type"],
                 content=turn.text,
-                confidence=0.7,
+                confidence=turn.confidence if turn.confidence is not None else 1.0,
                 score=candidate["score"]
             )
             evidence_spans.append(evidence)
@@ -131,8 +141,12 @@ class EvidenceService:
         turn: TranscriptTurn, 
         trigger_words: List[str], 
         speaker_pref: Optional[str], 
-        weight: float
+        weight: float,
+        confidence_threshold: float = 0.5
     ) -> float:
+        if turn.confidence is not None and turn.confidence < confidence_threshold:
+            return 0.0
+            
         score = 0.0
         text_lower = turn.text.lower()
         
@@ -145,6 +159,9 @@ class EvidenceService:
             
         if len(turn.text) < 5:
             score *= 0.5
+            
+        if turn.confidence is not None:
+            score *= (0.5 + 0.5 * turn.confidence)
             
         return score * weight
         

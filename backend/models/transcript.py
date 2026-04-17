@@ -17,6 +17,7 @@ class TranscriptTurn(Base):
     corrected_text = Column(String, nullable=True)
     start_ms = Column(Integer, nullable=False)
     end_ms = Column(Integer, nullable=False)
+    confidence = Column(Float, nullable=True, default=1.0)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     visit = relationship("Visit", back_populates="turns")

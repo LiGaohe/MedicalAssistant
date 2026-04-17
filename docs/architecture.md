@@ -886,6 +886,22 @@ graph TB
 | EMRRecord | emr_records | 病历记录 | backend/models/emr_record.py |
 | LLMConfig | llm_configs | LLM配置 | backend/models/llm_config.py |
 
+#### TranscriptTurn 字段说明
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| turn_id | Integer | 主键，自增 |
+| visit_id | String | 外键，关联就诊记录 |
+| turn_index | Integer | 轮次索引 |
+| speaker | String | 说话人ID（spk0, spk1等） |
+| text | String | 转写文本 |
+| original_text | String | 原始文本（纠错前） |
+| corrected_text | String | 纠正后文本 |
+| start_ms | Integer | 开始时间戳（毫秒） |
+| end_ms | Integer | 结束时间戳（毫秒） |
+| confidence | Float | ASR置信度（0.0-1.0），默认1.0 |
+| created_at | DateTime | 创建时间 |
+
 ### 服务层
 
 | 服务 | 功能 | 文件 |
@@ -894,11 +910,12 @@ graph TB
 | ASRPostprocessor | ASR后处理，医疗术语纠错 | backend/services/postprocessor.py |
 | TranscriptNormalizer | 文本标准化，说话人映射 | backend/services/normalizer.py |
 | SpeakerRoleClassifier | 说话人角色识别，基于语义分析识别医生/患者 | backend/services/speaker_role_classifier.py |
-| EvidenceService | 证据选择，基于触发词和LLM筛选相关片段 | backend/services/evidence_service.py |
+| EvidenceService | 证据选择，基于触发词、置信度和LLM筛选相关片段 | backend/services/evidence_service.py |
 | TerminologyService | 术语规范化，字典匹配和LLM规范化 | backend/services/terminology_service.py |
 | ExtractionService | 病历要素抽取，从证据中抽取SOAP要素 | backend/services/extraction_service.py |
 | EMRGenerationService | 病历生成，基于模板和LLM生成结构化病历 | backend/services/emr_generation_service.py |
 | MedicalRecordPipeline | 整合服务，串联所有处理步骤 | backend/services/medical_record_pipeline.py |
+| LLMPipelineService | 多阶段LLM处理，支持调试模式 | backend/services/llm_pipeline_service.py |
 | LLMService | LLM服务，支持多适配器和模板渲染 | backend/services/llm/llm_service.py |
 
 ### 配置项
@@ -913,6 +930,8 @@ graph TB
 | ENABLE_ROLE_CORRECTION | true | 启用说话人角色识别修正 |
 | ENABLE_ASR_CORRECTION | true | 启用ASR纠错 |
 | HOTWORD_PATH | config/hotwords_medical.txt | 热词表路径 |
+| LLM_DEBUG_MODE | false | LLM调试模式开关 |
+| LLM_SEGMENT_TURNS | 10 | LLM分段轮次数 |
 
 ## 前端界面
 

@@ -3,6 +3,7 @@ from .asr_service import ASRService
 from .postprocessor import ASRPostprocessor
 from .normalizer import TranscriptNormalizer
 from .speaker_role_classifier import SpeakerRoleClassifier, SpeakerRole, SpeakerSegment
+from .llm_pipeline_service import LLMPipelineService
 
 __all__ = [
     "ASRService",
@@ -11,4 +12,5 @@ __all__ = [
     "SpeakerRoleClassifier",
     "SpeakerRole",
     "SpeakerSegment",
+    "LLMPipelineService",
 ]

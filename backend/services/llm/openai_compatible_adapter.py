@@ -1,5 +1,6 @@
 from typing import Dict, Any
 import httpx
+import json
 from .base import LLMAdapter, LLMRequest, LLMResponse
 
 
@@ -43,7 +44,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
             payload["stop"] = request.stop_sequences
             
         try:
-            with httpx.Client(timeout=60.0) as client:
+            with httpx.Client(timeout=120.0) as client:
                 response = client.post(
                     self.api_endpoint,
                     headers=headers,
@@ -52,12 +53,25 @@ class OpenAICompatibleAdapter(LLMAdapter):
                 response.raise_for_status()
                 data = response.json()
                 
+                choices = data.get("choices", [])
+                if not choices:
+                    error_info = data.get("error", {})
+                    if error_info:
+                        raise RuntimeError(f"{self.provider_name} API error: {error_info}")
+                    raise RuntimeError(f"{self.provider_name} API returned no choices. Response: {json.dumps(data, ensure_ascii=False)[:500]}")
+                
+                message = choices[0].get("message", {})
+                content = message.get("content")
+                
+                if content is None:
+                    raise RuntimeError(f"{self.provider_name} API returned None content")
+                
                 return LLMResponse(
-                    text=data["choices"][0]["message"]["content"],
+                    text=content,
                     model=self.model_name,
                     provider=self.provider_name,
                     usage=data.get("usage", {}),
-                    finish_reason=data["choices"][0].get("finish_reason", "stop"),
+                    finish_reason=choices[0].get("finish_reason", "stop"),
                     raw_response=data
                 )
         except httpx.HTTPError as e:
