@@ -37,7 +37,21 @@
    - 自动添加标点符号（句号、问号、逗号）
    - 不再依赖语义分析
 
-3. **输出格式**
+3. **Normalizer 简化** (`backend/services/normalizer.py`)
+   - 删除 `_normalize_speaker` 方法
+   - 直接输出 `speaker_id` 字段，不进行角色映射
+   - 添加文档说明角色识别由后续模块处理
+
+4. **前端显示优化** (`frontend/js/result.js`, `frontend/css/style.css`)
+   - 前端显示 `speaker_id`（spk0, spk1）而不是角色（医生/患者）
+   - 添加 `.speaker-0`, `.speaker-1`, `.speaker-other` 样式类
+   - 不同说话人用不同颜色区分
+
+5. **后端 API 适配** (`backend/api/asr.py`)
+   - 使用 `turn["speaker_id"]` 而不是 `turn["speaker"]`
+   - 数据库存储原始 speaker_id
+
+6. **输出格式**
    ```json
    {
      "turns": [

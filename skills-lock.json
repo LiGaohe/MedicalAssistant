@@ -21,6 +21,11 @@
       "sourceType": "github",
       "computedHash": "ecde2e0d684f770a50c8718ab036e5df5e1ead082cb608739673507079a524a3"
     },
+    "subagent-creator": {
+      "source": "tech-leads-club/agent-skills",
+      "sourceType": "github",
+      "computedHash": "82d90e24f541907d701917fd7face6dfa45ccf6afb610b77669ef665b766a3d9"
+    },
     "subagent-driven-development": {
       "source": "obra/superpowers",
       "sourceType": "github",

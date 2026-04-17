@@ -61,7 +61,7 @@ def process_asr_task(visit_id: str, db_url: str):
             transcript_turn = TranscriptTurn(
                 visit_id=visit_id,
                 turn_index=turn["turn_index"],
-                speaker=turn["speaker"],
+                speaker=turn["speaker_id"],
                 text=turn["text"],
                 original_text=turn["original_text"],
                 corrected_text=turn["corrected_text"],

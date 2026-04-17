@@ -112,15 +112,16 @@ document.addEventListener('DOMContentLoaded', async function() {
                 
                 result.turns.forEach(turn => {
                     const turnDiv = document.createElement('div');
-                    turnDiv.className = `turn-item ${turn.speaker}`;
+                    turnDiv.className = 'turn-item';
                     
-                    const speakerClass = turn.speaker === 'doctor' ? 'doctor-turn' : 'patient-turn';
-                    const speakerText = turn.speaker === 'doctor' ? '医生' : '患者';
+                    const speakerId = turn.speaker || 'unknown';
+                    const speakerClass = speakerId === 'spk0' ? 'speaker-0' : 
+                                        speakerId === 'spk1' ? 'speaker-1' : 'speaker-other';
                     
                     turnDiv.innerHTML = `
                         <div class="turn-header ${speakerClass}">
                             <span class="time">[${formatTime(turn.start_ms)} - ${formatTime(turn.end_ms)}]</span>
-                            <span class="speaker">${speakerText}</span>
+                            <span class="speaker">${speakerId}</span>
                         </div>
                         <div class="turn-text">${turn.text}</div>
                     `;

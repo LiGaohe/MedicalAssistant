@@ -4,12 +4,18 @@ from typing import List, Dict
 
 class TranscriptNormalizer:
     def normalize(self, turns: List[Dict]) -> List[Dict]:
+        """
+        标准化转写结果。
+        
+        注意：不进行角色识别，直接输出原始 speaker_id。
+        角色识别（医生/患者）应由后续模块（大模型）处理。
+        """
         normalized_turns = []
         
         for i, turn in enumerate(turns):
             normalized_turn = {
                 "turn_index": i,
-                "speaker": self._normalize_speaker(turn.get("speaker", "unknown")),
+                "speaker_id": turn.get("speaker_id", "unknown"),
                 "text": self._normalize_text(turn.get("text", "")),
                 "original_text": turn.get("text", ""),
                 "start_ms": turn.get("start_ms", 0),
@@ -18,16 +24,6 @@ class TranscriptNormalizer:
             normalized_turns.append(normalized_turn)
         
         return normalized_turns
-    
-    def _normalize_speaker(self, speaker: str) -> str:
-        speaker_mapping = {
-            "doctor": "doctor",
-            "patient": "patient",
-            "unknown": "unknown",
-            "spk0": "doctor",
-            "spk1": "patient"
-        }
-        return speaker_mapping.get(speaker.lower(), "unknown")
     
     def _normalize_text(self, text: str) -> str:
         text = re.sub(r'\s+', '', text)

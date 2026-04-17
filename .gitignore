@@ -7,3 +7,10 @@
 /output
 /.agents
 /_bmad
+/backend/services/correction/__pycache__
+/backend/services/llm/__pycache__
+/docs
+/src/asr/__pycache__
+/tests/test_correction/__pycache__
+/backend/__pycache__
+/tests/__pycache__
