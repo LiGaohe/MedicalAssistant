@@ -2,6 +2,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const dropZone = document.getElementById('dropZone');
     const audioFile = document.getElementById('audioFile');
     const uploadBtn = document.getElementById('uploadBtn');
+    const configBtn = document.getElementById('configBtn');
     const progressSection = document.getElementById('progressSection');
     const progressFill = document.getElementById('progressFill');
     const progressText = document.getElementById('progressText');
@@ -37,6 +38,10 @@ document.addEventListener('DOMContentLoaded', function() {
         if (e.target.files.length > 0) {
             handleFileSelect(e.target.files[0]);
         }
+    });
+    
+    configBtn.addEventListener('click', () => {
+        window.location.href = '/static/config.html';
     });
     
     function handleFileSelect(file) {

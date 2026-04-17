@@ -222,3 +222,207 @@ h1 {
     text-align: center;
     padding: 40px;
 }
+
+.btn-success {
+    width: 100%;
+    padding: 14px;
+    background-color: #4CAF50;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    font-size: 16px;
+    cursor: pointer;
+    margin-top: 10px;
+    transition: background-color 0.3s;
+}
+
+.btn-success:hover {
+    background-color: #45a049;
+}
+
+.btn-small {
+    padding: 8px 16px;
+    background-color: #2196F3;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    font-size: 14px;
+    cursor: pointer;
+    margin-right: 8px;
+    transition: background-color 0.3s;
+}
+
+.btn-small:hover {
+    background-color: #1976D2;
+}
+
+.btn-danger {
+    background-color: #f44336;
+}
+
+.btn-danger:hover {
+    background-color: #d32f2f;
+}
+
+.config-section {
+    margin-top: 30px;
+}
+
+.config-section h2 {
+    margin-bottom: 10px;
+}
+
+.config-section .hint {
+    color: #666;
+    margin-bottom: 20px;
+}
+
+.configs-section {
+    margin-top: 40px;
+}
+
+.configs-section h2 {
+    margin-bottom: 20px;
+}
+
+.config-item {
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    padding: 20px;
+    margin-bottom: 20px;
+    background: white;
+}
+
+.config-item.active {
+    border-color: #4CAF50;
+    background-color: #f1f8f4;
+}
+
+.config-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+}
+
+.config-header h3 {
+    margin: 0;
+    color: #333;
+}
+
+.config-status {
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.config-status.active {
+    background-color: #4CAF50;
+    color: white;
+}
+
+.config-status.inactive {
+    background-color: #e0e0e0;
+    color: #666;
+}
+
+.config-details {
+    margin-bottom: 15px;
+}
+
+.config-details p {
+    margin: 8px 0;
+    color: #666;
+}
+
+.config-actions {
+    display: flex;
+    gap: 10px;
+}
+
+.emr-section {
+    margin-top: 30px;
+}
+
+.emr-section h2 {
+    margin-bottom: 20px;
+}
+
+.emr-version {
+    margin-bottom: 20px;
+}
+
+.emr-version label {
+    font-weight: 500;
+    margin-right: 10px;
+}
+
+.emr-version select {
+    padding: 8px 12px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 14px;
+}
+
+.emr-content {
+    margin-top: 20px;
+}
+
+.emr-part {
+    margin-bottom: 30px;
+    padding: 20px;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    background: white;
+}
+
+.emr-part h3 {
+    margin-bottom: 15px;
+    color: #1976D2;
+    border-bottom: 2px solid #1976D2;
+    padding-bottom: 10px;
+}
+
+.section-text {
+    font-size: 16px;
+    line-height: 1.8;
+    margin-bottom: 15px;
+    padding: 15px;
+    background: #f9f9f9;
+    border-radius: 4px;
+}
+
+.section-fields {
+    margin-top: 15px;
+}
+
+.field-item {
+    margin-bottom: 15px;
+    padding: 15px;
+    border-left: 3px solid #4CAF50;
+    background: #f9f9f9;
+}
+
+.field-name {
+    font-weight: 600;
+    color: #333;
+    margin-bottom: 8px;
+}
+
+.field-value {
+    font-size: 15px;
+    line-height: 1.6;
+    margin-bottom: 8px;
+}
+
+.field-meta {
+    font-size: 13px;
+    color: #666;
+}
+
+.empty {
+    text-align: center;
+    color: #999;
+    padding: 20px;
+}

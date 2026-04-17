@@ -3,18 +3,20 @@ from typing import Literal, Optional
 from .base import ASRBase
 from .funasr_engine import FunASREngine
 from .medasr_engine import MedASREngine
+from .qwen3_asr_engine import Qwen3ASREngine
 
 
 class ASRFactory:
     _registry: dict[str, type[ASRBase]] = {
         "funasr": FunASREngine,
         "medasr": MedASREngine,
+        "qwen3-asr": Qwen3ASREngine,
     }
     
     @classmethod
     def create(
         cls,
-        engine_type: Literal["funasr", "medasr"],
+        engine_type: Literal["funasr", "medasr", "qwen3-asr"],
         device: str = "cpu",
         hotword_path: Optional[str] = None,
         **kwargs,
@@ -30,6 +32,8 @@ class ASRFactory:
         if engine_type == "funasr":
             return engine_class(device=device, hotword_path=hotword_path, **kwargs)
         elif engine_type == "medasr":
+            return engine_class(device=device, **kwargs)
+        elif engine_type == "qwen3-asr":
             return engine_class(device=device, **kwargs)
         
         return engine_class(device=device, **kwargs)

@@ -10,6 +10,8 @@ document.addEventListener('DOMContentLoaded', async function() {
     document.getElementById('visitId').textContent = visitId;
     
     const startBtn = document.getElementById('startTranscribe');
+    const generateEMRBtn = document.getElementById('generateEMR');
+    const configLLMBtn = document.getElementById('configLLM');
     const refreshBtn = document.getElementById('refreshStatus');
     const turnsSection = document.getElementById('turnsSection');
     const loadingSection = document.getElementById('loadingSection');
@@ -39,6 +41,14 @@ document.addEventListener('DOMContentLoaded', async function() {
         }
     });
     
+    generateEMRBtn.addEventListener('click', () => {
+        window.location.href = `/static/emr.html?visit_id=${visitId}`;
+    });
+    
+    configLLMBtn.addEventListener('click', () => {
+        window.location.href = '/static/config.html';
+    });
+    
     refreshBtn.addEventListener('click', async () => {
         await loadTranscript(visitId);
     });
@@ -53,6 +63,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             
             if (result.status === 'completed') {
                 startBtn.style.display = 'none';
+                generateEMRBtn.style.display = 'block';
                 await loadTranscript(visitId);
             } else if (result.status === 'processing') {
                 startBtn.style.display = 'none';
@@ -75,6 +86,7 @@ document.addEventListener('DOMContentLoaded', async function() {
                 if (result.status === 'completed') {
                     loadingSection.style.display = 'none';
                     turnsSection.style.display = 'block';
+                    generateEMRBtn.style.display = 'block';
                     await loadTranscript(visitId);
                 } else if (result.status === 'failed') {
                     alert('转写失败: ' + result.error_message);

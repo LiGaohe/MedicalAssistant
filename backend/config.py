@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     ASR_DEVICE: str = "cpu"
     HOTWORD_PATH: str = "config/hotwords_medical.txt"
     
+    QWEN3_ASR_MODEL_SIZE: str = "1.7B"
+    QWEN3_ASR_LANGUAGE: str = "Chinese"
+    
     ENABLE_DIARIZATION: bool = True
     ENABLE_ASR_CORRECTION: bool = True
     CORRECTION_CONFIDENCE_THRESHOLD: float = 0.7

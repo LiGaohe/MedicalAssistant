@@ -5,7 +5,8 @@ from pathlib import Path
 
 from .config import settings
 from .database import init_db
-from .api import upload_router, asr_router, task_router, llm_router
+from .api import upload_router, asr_router, task_router, llm_router, emr_router
+from .utils.logger import logger
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -17,6 +18,7 @@ app.include_router(upload_router)
 app.include_router(asr_router)
 app.include_router(task_router)
 app.include_router(llm_router)
+app.include_router(emr_router)
 
 frontend_path = Path(__file__).parent.parent / "frontend"
 if frontend_path.exists():
@@ -25,7 +27,9 @@ if frontend_path.exists():
 
 @app.on_event("startup")
 async def startup_event():
+    logger.info(f"启动 {settings.APP_NAME} v{settings.APP_VERSION}")
     init_db()
+    logger.info("数据库初始化完成")
 
 
 @app.get("/")

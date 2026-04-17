@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>病历生成 - 中文门诊病历生成系统</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>病历生成</h1>
+        
+        <div class="info-section">
+            <p><strong>就诊记录:</strong> <span id="visitId"></span></p>
+            <p><strong>状态:</strong> <span id="status"></span></p>
+        </div>
+        
+        <div class="actions">
+            <button id="generateEMR" class="btn-primary">生成病历</button>
+            <button id="viewEMR" class="btn-success" style="display: none;">查看病历</button>
+            <button id="backToResult" class="btn-secondary">返回转写结果</button>
+        </div>
+        
+        <div class="loading" id="loadingSection" style="display: none;">
+            <p>正在生成病历，请稍候...</p>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+        </div>
+        
+        <div class="emr-section" id="emrSection" style="display: none;">
+            <h2>病历内容</h2>
+            <div class="emr-version">
+                <label>版本：</label>
+                <select id="versionSelect"></select>
+            </div>
+            
+            <div class="emr-content">
+                <div class="emr-part">
+                    <h3>主观数据 (Subjective)</h3>
+                    <div id="subjectiveContent"></div>
+                </div>
+                
+                <div class="emr-part">
+                    <h3>客观数据 (Objective)</h3>
+                    <div id="objectiveContent"></div>
+                </div>
+                
+                <div class="emr-part">
+                    <h3>评估 (Assessment)</h3>
+                    <div id="assessmentContent"></div>
+                </div>
+                
+                <div class="emr-part">
+                    <h3>计划 (Plan)</h3>
+                    <div id="planContent"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/static/js/emr.js"></script>
+</body>
+</html>

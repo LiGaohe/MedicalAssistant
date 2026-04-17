@@ -30,7 +30,12 @@ class ConfigCreate(BaseModel):
     api_key: Optional[str] = None
     api_endpoint: Optional[str] = None
     max_tokens: int = 2048
-    temperature: float = 0.7
+    temperature: str = "0.7"
+    is_active: bool = True
+
+
+class ConfigUpdate(BaseModel):
+    is_active: Optional[bool] = None
 
 
 @router.post("/generate")
@@ -90,7 +95,7 @@ async def get_configs(db: Session = Depends(get_db)):
     return {"configs": [config.to_dict() for config in configs]}
 
 
-@router.post("/configs")
+@router.post("/config")
 async def create_config(
     config: ConfigCreate,
     db: Session = Depends(get_db)
@@ -100,10 +105,16 @@ async def create_config(
     ).first()
     
     if existing:
-        raise HTTPException(
-            status_code=400, 
-            detail="Config name already exists"
-        )
+        existing.provider = config.provider
+        existing.model_name = config.model_name
+        existing.api_key = config.api_key
+        existing.api_endpoint = config.api_endpoint
+        existing.max_tokens = config.max_tokens
+        existing.temperature = config.temperature
+        existing.is_active = config.is_active
+        db.commit()
+        db.refresh(existing)
+        return {"success": True, "config_id": existing.id, "message": "配置更新成功"}
     
     new_config = LLMConfig(
         config_name=config.config_name,
@@ -112,20 +123,21 @@ async def create_config(
         api_key=config.api_key,
         api_endpoint=config.api_endpoint,
         max_tokens=config.max_tokens,
-        temperature=str(config.temperature)
+        temperature=config.temperature,
+        is_active=config.is_active
     )
     
     db.add(new_config)
     db.commit()
     db.refresh(new_config)
     
-    return {"config": new_config.to_dict()}
+    return {"success": True, "config_id": new_config.id, "message": "配置创建成功"}
 
 
-@router.put("/configs/{config_id}")
+@router.put("/config/{config_id}")
 async def update_config(
     config_id: int,
-    config: ConfigCreate,
+    config: ConfigUpdate,
     db: Session = Depends(get_db)
 ):
     existing = db.query(LLMConfig).filter(LLMConfig.id == config_id).first()
@@ -133,21 +145,16 @@ async def update_config(
     if not existing:
         raise HTTPException(status_code=404, detail="Config not found")
     
-    existing.config_name = config.config_name
-    existing.provider = config.provider
-    existing.model_name = config.model_name
-    existing.api_key = config.api_key
-    existing.api_endpoint = config.api_endpoint
-    existing.max_tokens = config.max_tokens
-    existing.temperature = str(config.temperature)
+    if config.is_active is not None:
+        existing.is_active = config.is_active
     
     db.commit()
     db.refresh(existing)
     
-    return {"config": existing.to_dict()}
+    return {"success": True, "config": existing.to_dict()}
 
 
-@router.delete("/configs/{config_id}")
+@router.delete("/config/{config_id}")
 async def delete_config(
     config_id: int,
     db: Session = Depends(get_db)
@@ -160,4 +167,4 @@ async def delete_config(
     db.delete(config)
     db.commit()
     
-    return {"message": "Config deleted"}
+    return {"success": True, "message": "配置删除成功"}

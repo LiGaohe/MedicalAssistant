@@ -21,6 +21,8 @@ class TranscriptTurn(Base):
     
     visit = relationship("Visit", back_populates="turns")
     corrections = relationship("ASRCorrection", back_populates="turn", cascade="all, delete-orphan")
+    evidence_spans = relationship("EvidenceSpan", back_populates="turn", cascade="all, delete-orphan")
+    normalized_terms = relationship("NormalizedTerm", back_populates="turn", cascade="all, delete-orphan")
 
 
 class ASRCorrection(Base):

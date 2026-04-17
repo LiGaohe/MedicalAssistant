@@ -20,3 +20,7 @@ class Visit(Base):
     turns = relationship("TranscriptTurn", back_populates="visit", cascade="all, delete-orphan")
     tasks = relationship("Task", back_populates="visit", cascade="all, delete-orphan")
     corrections = relationship("ASRCorrection", back_populates="visit", cascade="all, delete-orphan")
+    evidence_spans = relationship("EvidenceSpan", back_populates="visit", cascade="all, delete-orphan")
+    normalized_terms = relationship("NormalizedTerm", back_populates="visit", cascade="all, delete-orphan")
+    extracted_items = relationship("ExtractedItem", back_populates="visit", cascade="all, delete-orphan")
+    emr_records = relationship("EMRRecord", back_populates="visit", cascade="all, delete-orphan")

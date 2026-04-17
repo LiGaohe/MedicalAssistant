@@ -1,5 +1,284 @@
 # 完成状态记录
 
+## 2026-04-17 魔搭API集成修复
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| API Endpoint自动补全 | ✅ 完成 | 自动处理base_url和完整endpoint格式 |
+| 配置页面提示更新 | ✅ 完成 | 添加魔搭配置示例和提示信息 |
+| 使用文档更新 | ✅ 完成 | 添加魔搭ModelScope配置示例 |
+| 集成测试 | ✅ 完成 | 验证魔搭API调用成功 |
+
+### 实现详情
+
+1. **API Endpoint自动补全** (`backend/services/llm/openai_compatible_adapter.py`)
+   - 自动检测endpoint格式
+   - 支持base_url格式（如 `https://api-inference.modelscope.cn/v1`）
+   - 支持完整endpoint格式（如 `https://api.openai.com/v1/chat/completions`）
+   - 自动添加 `/chat/completions` 后缀
+
+2. **配置页面更新** (`frontend/config.html`)
+   - 更新placeholder为魔搭示例
+   - 添加提示信息：支持base_url格式或完整endpoint格式
+
+3. **使用文档更新** (`docs/前端使用说明.md`)
+   - 新增魔搭ModelScope配置示例（推荐）
+   - 配置名称: modelscope
+   - 模型: ZhipuAI/GLM-5.1
+   - Endpoint: https://api-inference.modelscope.cn/v1
+
+4. **集成测试**
+   - 测试魔搭API调用成功
+   - 验证endpoint自动补全功能
+   - 确认响应格式正确
+
+### 问题原因
+
+用户配置的endpoint是 `https://api-inference.modelscope.cn/v1`（base_url格式），但代码期望的是完整endpoint格式（包含 `/chat/completions`）。OpenAI SDK会自动添加后缀，但我们的代码直接调用HTTP API，需要完整URL。
+
+### 解决方案
+
+修改 `OpenAICompatibleAdapter.__init__()` 方法，自动检测endpoint格式并补全：
+- 如果endpoint不以 `/chat/completions` 结尾
+- 检查是否以 `/v1` 结尾，如果是则添加 `/chat/completions`
+- 否则添加 `/v1/chat/completions`
+
+## 2026-04-17 前端功能更新
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 病历生成页面 | ✅ 完成 | frontend/emr.html, frontend/js/emr.js |
+| LLM配置页面 | ✅ 完成 | frontend/config.html, frontend/js/config.js |
+| 转写结果页面更新 | ✅ 完成 | 添加生成病历和配置LLM按钮 |
+| 首页更新 | ✅ 完成 | 添加配置大模型按钮 |
+| API接口调整 | ✅ 完成 | backend/api/llm.py 调整接口路径 |
+| 样式更新 | ✅ 完成 | frontend/css/style.css 新增样式 |
+| 使用文档 | ✅ 完成 | docs/前端使用说明.md |
+
+### 实现详情
+
+1. **病历生成页面** (`frontend/emr.html`)
+   - 生成病历按钮
+   - 查看病历按钮
+   - 病历版本选择
+   - SOAP格式展示（主观数据、客观数据、评估、计划）
+   - 证据回链显示
+
+2. **LLM配置页面** (`frontend/config.html`)
+   - 配置表单（配置名称、服务商、模型名称、API Key、API Endpoint等）
+   - 已保存配置列表
+   - 启用/禁用/删除配置功能
+
+3. **转写结果页面更新** (`frontend/result.html`)
+   - 添加"生成病历"按钮（转写完成后显示）
+   - 添加"配置大模型"按钮
+   - 按钮事件处理逻辑
+
+4. **首页更新** (`frontend/index.html`)
+   - 添加"配置大模型"按钮
+   - 跳转到配置页面
+
+5. **API接口调整** (`backend/api/llm.py`)
+   - `/api/llm/config` POST：创建/更新配置
+   - `/api/llm/config/{config_id}` PUT：更新配置状态
+   - `/api/llm/config/{config_id}` DELETE：删除配置
+   - 返回格式统一为 `{"success": True/False, ...}`
+
+6. **样式更新** (`frontend/css/style.css`)
+   - 新增 `.btn-success`、`.btn-small`、`.btn-danger` 样式
+   - 新增配置页面样式：`.config-section`、`.config-item`、`.config-header`等
+   - 新增病历页面样式：`.emr-section`、`.emr-part`、`.field-item`等
+
+7. **使用文档** (`docs/前端使用说明.md`)
+   - 功能概览
+   - 页面导航说明
+   - 使用流程（不配置LLM vs 配置LLM）
+   - API配置示例（通义千问、OpenAI、本地模型）
+   - 病历内容说明
+   - 故障排除
+
+## 2026-04-17 M2里程碑：文本到病历
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 数据模型设计 | ✅ 完成 | EvidenceSpan, NormalizedTerm, ExtractedItem, EMRRecord |
+| 字段触发词表 | ✅ 完成 | config/field_triggers.json |
+| 医学术语词表 | ✅ 完成 | config/medical_terms.json |
+| 证据选择模块 | ✅ 完成 | EvidenceService（规则+LLM） |
+| 术语规范化模块 | ✅ 完成 | TerminologyService（字典+LLM） |
+| 病历要素抽取模块 | ✅ 完成 | ExtractionService（规则+LLM） |
+| 病历生成模块 | ✅ 完成 | EMRGenerationService（模板+LLM） |
+| 整合服务 | ✅ 完成 | MedicalRecordPipeline |
+| API接口 | ✅ 完成 | /api/emr/* |
+| 测试脚本 | ✅ 完成 | scripts/test_m2_milestone.py |
+
+### 实现详情
+
+1. **数据模型** (`backend/models/`)
+   - `EvidenceSpan`：证据片段，存储字段类型、内容、置信度、分数
+   - `NormalizedTerm`：规范化术语，存储原始术语、标准术语、术语类型、风险标记
+   - `ExtractedItem`：抽取的病历要素，存储字段名、字段值、证据ID列表
+   - `EMRRecord`：病历记录，存储版本、类型、JSON内容、证据映射
+
+2. **字段触发词表** (`config/field_triggers.json`)
+   - 8个核心字段：主诉、现病史、既往史、体格检查、辅助检查、诊断、治疗方案、医嘱
+   - 每个字段包含触发词列表、说话人偏好、权重
+   - 支持基于规则的证据筛选
+
+3. **医学术语词表** (`config/medical_terms.json`)
+   - 4类术语：症状、药物、诊断、检查
+   - 每个标准术语包含同义词和口语表达
+   - 支持术语规范化
+
+4. **证据选择模块** (`backend/services/evidence_service.py`)
+   - `select_evidence_by_rules()`：基于触发词和说话人偏好筛选证据
+   - `select_evidence_by_llm()`：使用LLM选择证据
+   - 支持证据打分和排序
+
+5. **术语规范化模块** (`backend/services/terminology_service.py`)
+   - `normalize_term()`：规范化单个术语（字典+LLM）
+   - `extract_and_normalize_terms()`：从文本中提取并规范化术语
+   - 支持相似度匹配和风险标记
+
+6. **病历要素抽取模块** (`backend/services/extraction_service.py`)
+   - `extract_items()`：从证据中抽取病历要素（规则+LLM）
+   - `aggregate_items()`：聚合抽取结果，去重和冲突处理
+   - 支持SOAP格式输出
+
+7. **病历生成模块** (`backend/services/emr_generation_service.py`)
+   - `generate_emr()`：生成病历（模板+LLM）
+   - 支持版本化存储
+   - 支持证据映射
+
+8. **整合服务** (`backend/services/medical_record_pipeline.py`)
+   - `process_visit()`：完整处理流程
+   - 步骤：证据选择 → 术语规范化 → 要素抽取 → 病历生成
+   - 支持中间结果保存
+
+9. **API接口** (`backend/api/emr.py`)
+   - `POST /api/emr/process`：处理就诊记录
+   - `GET /api/emr/status/{visit_id}`：查询处理状态
+   - `GET /api/emr/record/{visit_id}`：获取病历记录
+   - `GET /api/emr/versions/{visit_id}`：获取所有版本
+
+### 测试结果
+
+```
+测试数据：9轮对话
+证据数量：10个
+规范化术语数量：11个
+抽取要素数量：20个
+病历生成：成功
+```
+
+### 使用方法
+
+```python
+# 方式1：使用整合服务
+from backend.services.medical_record_pipeline import MedicalRecordPipeline
+from backend.services.llm.llm_service import LLMService
+
+pipeline = MedicalRecordPipeline(db, llm_service)
+result = pipeline.process_visit("visit_id", use_llm=True)
+
+# 方式2：使用API接口
+POST /api/emr/process
+{
+  "visit_id": "test_visit_001",
+  "use_llm": true,
+  "save_intermediate": true
+}
+```
+
+### 后续优化
+
+1. **LLM Prompt优化**：优化证据选择、术语规范化、要素抽取的prompt模板
+2. **规则优化**：完善触发词表和术语词表
+3. **验证模块**：实现T22-T25（规则校验器、风险标记器、审核页面）
+4. **评测模块**：实现T26-T29（测试集、指标脚本、错误分析）
+
+## 2026-04-17 Qwen3-ASR引擎集成
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 安装qwen-asr包 | ✅ 完成 | pip install -U qwen-asr |
+| 创建Qwen3ASREngine引擎类 | ✅ 完成 | src/asr/qwen3_asr_engine.py |
+| 更新ASRFactory注册 | ✅ 完成 | 支持"qwen3-asr"引擎类型 |
+| 更新ASRService支持 | ✅ 完成 | 支持Qwen3-ASR引擎切换 |
+| 更新配置文件 | ✅ 完成 | 添加QWEN3_ASR_MODEL_SIZE等配置项 |
+| 创建测试脚本 | ✅ 完成 | scripts/test_qwen3_asr.py |
+
+### 实现详情
+
+1. **Qwen3ASREngine引擎类** (`src/asr/qwen3_asr_engine.py`)
+   - 继承ASRBase抽象基类
+   - 支持1.7B和0.6B两种模型规格
+   - 支持CPU和GPU运行
+   - 支持长音频分块转写（超过30秒自动分块）
+   - 使用transformers库加载模型
+
+2. **ASRFactory更新** (`src/asr/factory.py`)
+   - 注册"qwen3-asr"引擎类型
+   - 支持通过工厂模式创建Qwen3ASREngine实例
+
+3. **ASRService更新** (`backend/services/asr_service.py`)
+   - 支持engine_type配置项切换引擎
+   - Qwen3-ASR模式：不支持说话人分离，所有文本归为spk0
+   - FunASR模式：保持原有说话人分离功能
+
+4. **配置项** (`backend/config.py`)
+   - `QWEN3_ASR_MODEL_SIZE`: 模型规格，默认"1.7B"
+   - `QWEN3_ASR_LANGUAGE`: 语言，默认"Chinese"
+
+### 使用方法
+
+```python
+# 方式1：使用ASRService
+from backend.services.asr_service import ASRService
+
+config = {
+    "engine_type": "qwen3-asr",
+    "device": "cpu",
+    "qwen3_asr_model_size": "1.7B",
+    "qwen3_asr_language": "Chinese"
+}
+service = ASRService(config)
+result = service.transcribe_with_diarization("audio.wav")
+
+# 方式2：直接使用引擎
+from src.asr import Qwen3ASREngine
+
+engine = Qwen3ASREngine(device="cpu", model_size="1.7B")
+engine.load_model()
+result = engine.transcribe("audio.wav")  # 短音频
+result = engine.transcribe_long_audio("long_audio.wav")  # 长音频
+```
+
+### 测试命令
+
+```bash
+# 激活环境
+source med_env/Scripts/activate
+
+# 测试Qwen3-ASR
+python scripts/test_qwen3_asr.py audio.wav --device cpu
+```
+
+### 注意事项
+
+1. **模型下载**：首次运行时会自动从HuggingFace下载模型（约2.5GB）
+2. **说话人分离**：Qwen3-ASR不支持说话人分离，如需区分医生/患者请使用FunASR
+3. **长音频处理**：超过30秒的音频会自动分块处理，每块30秒
+4. **内存需求**：1.7B模型CPU运行需要约4GB内存
+
 ## 2026-04-15 ASR模块职责简化与角色识别移除
 
 ### 已完成
@@ -448,3 +727,114 @@ FunASR的说话人分离**正是基于声纹识别**的：
 1. **MedASR 仅支持英文**：官方暂无中文版本，对中文音频会输出警告
 2. **AMD 780M 建议 CPU 模式**：ROCm 对集成显卡支持有限
 3. **热词文件**：已创建 80+ 常见医疗术语，可根据科室扩展
+
+## 2026-04-17 日志系统与病历显示问题修复
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 日志系统搭建 | ✅ 完成 | backend/utils/logger.py |
+| 流水线日志输出 | ✅ 完成 | medical_record_pipeline.py 各阶段详细日志 |
+| 证据选择日志 | ✅ 完成 | evidence_service.py 证据选择过程日志 |
+| 术语规范化日志 | ✅ 完成 | terminology_service.py 术语提取和规范化日志 |
+| 病历要素抽取日志 | ✅ 完成 | extraction_service.py 抽取过程日志 |
+| 病历生成日志 | ✅ 完成 | emr_generation_service.py 生成过程日志 |
+| API接口日志 | ✅ 完成 | backend/api/emr.py 请求和响应日志 |
+| 时间显示修复 | ✅ 完成 | 后端返回ISO格式，前端正确解析显示 |
+| 主程序日志 | ✅ 完成 | backend/main.py 启动日志 |
+
+### 实现详情
+
+1. **日志系统** (`backend/utils/logger.py`)
+   - 统一的日志配置
+   - 同时输出到控制台和文件
+   - 日志文件路径：`data/logs/app_YYYYMMDD.log`
+   - 控制台显示INFO级别，文件记录DEBUG级别
+   - 格式：`时间 - 模块名 - 级别 - 消息`
+
+2. **流水线日志** (`backend/services/medical_record_pipeline.py`)
+   - 记录每个步骤的开始和完成
+   - 记录每个步骤的结果数量
+   - 记录前5条详细数据（DEBUG级别）
+   - 记录错误和异常堆栈
+
+3. **证据选择日志** (`backend/services/evidence_service.py`)
+   - 记录查询到的对话轮次数
+   - 记录候选证据数量
+   - 记录最终返回的证据数量
+   - 记录证据字段类型和内容摘要
+
+4. **术语规范化日志** (`backend/services/terminology_service.py`)
+   - 记录术语提取过程
+   - 记录发现的术语和规范化结果
+   - 记录术语类型和数量
+
+5. **病历要素抽取日志** (`backend/services/extraction_service.py`)
+   - 记录查询到的证据数量
+   - 记录使用的抽取方法（LLM/规则）
+   - 记录抽取的字段数量和内容摘要
+
+6. **病历生成日志** (`backend/services/emr_generation_service.py`)
+   - 记录查询到的抽取字段数量
+   - 记录使用的生成方法（LLM/模板）
+   - 记录生成的病历JSON内容
+   - 记录病历版本号
+
+7. **API接口日志** (`backend/api/emr.py`)
+   - 记录请求参数
+   - 记录处理状态
+   - 记录错误信息
+
+8. **时间显示修复**
+   - 后端：将datetime对象转换为ISO格式字符串（`created_at.isoformat()`）
+   - 前端：正确解析ISO格式时间，使用中文本地化显示
+   - 格式：`YYYY-MM-DD HH:MM:SS`
+
+### 解决的问题
+
+1. **病历显示"暂无数据"问题**
+   - 原因：流水线各阶段没有详细日志，无法定位问题
+   - 解决：添加详细日志输出，方便调试和问题定位
+
+2. **时间显示不正确问题**
+   - 原因：后端返回datetime对象，前端解析失败
+   - 解决：后端统一返回ISO格式字符串，前端正确解析
+
+3. **日志输出问题**
+   - 原因：没有统一的日志系统，只有零散的print语句
+   - 解决：建立统一的日志系统，所有模块使用logger输出
+
+### 日志示例
+
+```
+2026-04-17 10:30:15 - medical_assistant - INFO - 启动 中文门诊病历生成系统 v1.0.0
+2026-04-17 10:30:15 - medical_assistant - INFO - 数据库初始化完成
+2026-04-17 10:30:20 - medical_assistant - INFO - 收到病历处理请求: visit_id=xxx
+2026-04-17 10:30:20 - medical_assistant - INFO - === 开始处理就诊记录: xxx ===
+2026-04-17 10:30:20 - medical_assistant - INFO - >>> 步骤1: 证据选择
+2026-04-17 10:30:20 - medical_assistant - INFO - 开始规则证据选择，visit_id=xxx
+2026-04-17 10:30:20 - medical_assistant - INFO - 查询到 9 条对话轮次
+2026-04-17 10:30:20 - medical_assistant - INFO - 找到 10 个候选证据
+2026-04-17 10:30:20 - medical_assistant - INFO - 返回 10 条证据
+2026-04-17 10:30:20 - medical_assistant - INFO - 证据选择完成，共找到 10 条证据
+2026-04-17 10:30:20 - medical_assistant - INFO - >>> 步骤2: 术语规范化
+...
+```
+
+### 使用方法
+
+```bash
+# 启动服务后，日志会自动输出到控制台和文件
+uvicorn backend.main:app --reload
+
+# 查看日志文件
+tail -f data/logs/app_20260417.log
+```
+
+### 后续优化
+
+1. **日志级别配置**：支持通过环境变量配置日志级别
+2. **日志轮转**：支持日志文件按大小或时间轮转
+3. **结构化日志**：支持JSON格式日志，方便日志分析
+4. **性能监控**：记录各阶段处理时间，方便性能优化

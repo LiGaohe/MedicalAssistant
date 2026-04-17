@@ -58,17 +58,35 @@ MedicalAssisstant/
 │   │   ├── __init__.py
 │   │   ├── asr.py             # ASR 相关 API
 │   │   ├── task.py            # 任务管理 API
-│   │   └── upload.py          # 上传 API
+│   │   ├── upload.py          # 上传 API
+│   │   ├── llm.py             # LLM 配置管理 API
+│   │   └── emr.py             # 病历生成 API
 │   ├── models/                # 数据模型
 │   │   ├── __init__.py
 │   │   ├── task.py            # 任务模型
 │   │   ├── transcript.py      # 转写记录模型（含ASRCorrection）
-│   │   └── visit.py           # 就诊记录模型
+│   │   ├── visit.py           # 就诊记录模型
+│   │   ├── llm_config.py      # LLM配置模型
+│   │   ├── evidence.py        # 证据片段模型
+│   │   ├── term.py            # 规范化术语模型
+│   │   ├── extracted_item.py  # 抽取要素模型
+│   │   └── emr_record.py      # 病历记录模型
 │   ├── services/              # 业务服务
 │   │   ├── __init__.py
 │   │   ├── asr_service.py     # ASR 服务（封装FunASR）
 │   │   ├── normalizer.py      # 术语规范化服务
-│   │   └── postprocessor.py   # 后处理服务（医疗术语纠错）
+│   │   ├── postprocessor.py   # 后处理服务（医疗术语纠错）
+│   │   ├── llm/               # LLM服务模块
+│   │   │   ├── __init__.py
+│   │   │   ├── base.py        # LLM基类
+│   │   │   ├── openai_provider.py # OpenAI兼容接口
+│   │   │   └── prompt_templates.py # 提示词模板
+│   │   ├── llm_service.py     # LLM服务
+│   │   ├── evidence_service.py # 证据选择服务
+│   │   ├── terminology_service.py # 术语规范化服务
+│   │   ├── extraction_service.py # 病历要素抽取服务
+│   │   ├── emr_generation_service.py # 病历生成服务
+│   │   └── medical_record_pipeline.py # 病历生成流水线
 │   ├── utils/                 # 工具函数
 │   │   ├── __init__.py
 │   │   └── audio_utils.py     # 音频处理工具
@@ -94,9 +112,13 @@ MedicalAssisstant/
 │   │   └── style.css          # 样式文件
 │   ├── js/
 │   │   ├── result.js          # 结果页面脚本
-│   │   └── upload.js          # 上传页面脚本
+│   │   ├── upload.js          # 上传页面脚本
+│   │   ├── emr.js             # 病历生成页面脚本
+│   │   └── config.js          # LLM配置页面脚本
 │   ├── index.html             # 上传页面
-│   └── result.html            # 结果展示页面
+│   ├── result.html            # 结果展示页面
+│   ├── emr.html               # 病历生成页面
+│   └── config.html            # LLM配置页面
 ├── output/                     # 输出目录
 │   └── raw_asr_result.json    # ASR原始输出
 ├── scripts/                    # 脚本
@@ -104,6 +126,7 @@ MedicalAssisstant/
 │   ├── test_diarization.py    # 说话人分离测试
 │   ├── test_diarization_debug.py # 调试脚本
 │   ├── test_diarization_with_tts.py # TTS测试脚本
+│   ├── test_qwen3_asr.py      # Qwen3-ASR测试脚本
 │   └── set_cache_path.bat     # 设置缓存路径脚本
 ├── src/                        # 核心源代码
 │   ├── asr/                   # ASR 模块
@@ -112,6 +135,7 @@ MedicalAssisstant/
 │   │   ├── factory.py         # 工厂模式
 │   │   ├── funasr_engine.py   # FunASR 实现（支持说话人分离）
 │   │   ├── medasr_engine.py   # MedASR 实现（仅英文）
+│   │   ├── qwen3_asr_engine.py # Qwen3-ASR 实现（高性能中文ASR）
 │   │   └── test_confid.py     # 置信度测试
 │   └── __init__.py
 ├── .gitignore
@@ -431,6 +455,40 @@ graph TB
 2. **说话人分离**：区分医生和患者（需说话人识别模块）
 3. **时间戳同步**：确保时间戳与文本对应
 4. **格式转换**：转换为下游模块所需格式
+
+#### 1.9 Qwen3-ASR引擎
+
+Qwen3-ASR是阿里巴巴开源的高性能语音识别模型，支持52种语言（包括22种中文方言）。
+
+**模型规格：**
+
+| 模型 | 参数量 | 显存需求 | RTF | 适用场景 |
+|------|--------|----------|-----|----------|
+| Qwen3-ASR-1.7B | ~2B | 4GB+ | ~0.064 | 高精度转写 |
+| Qwen3-ASR-0.6B | ~0.9B | 2GB+ | ~0.064 | 快速转写 |
+
+**架构特点：**
+
+```
+Audio (16kHz) → 128-mel Spectrogram → Conv2d×3 (8× downsample)
+             → Transformer Encoder → Linear Projector → Qwen3 Decoder → Text
+```
+
+**与FunASR对比：**
+
+| 特性 | Qwen3-ASR | FunASR |
+|------|-----------|--------|
+| 中文准确率 | SOTA (AISHELL-2: 2.71% CER) | 高 (AISHELL-2: 2.85% CER) |
+| 说话人分离 | 不支持 | 支持 (cam++模型) |
+| 热词增强 | 不支持 | 支持 |
+| 长音频处理 | 自动分块 | VAD切分 |
+| 流式推理 | 支持 | 支持 |
+
+**使用建议：**
+
+- **需要说话人分离**：使用FunASR
+- **仅需高精度转写**：使用Qwen3-ASR
+- **医疗术语识别**：FunASR + 热词增强
 
 ### 2. 语音采集模块设计
 
@@ -773,9 +831,10 @@ graph TB
 |------|------|----------|----------|
 | ASR后处理 | 医疗术语纠错 | 规则匹配 | ✅ 已实现 |
 | 文本规范化 | 标点、说话人映射 | 正则表达式 | ✅ 已实现 |
-| 证据选择模块 | 从对话中检索相关片段 | 向量检索 / BM25 | 📋 待实现 |
-| 术语规范化模块 | 口语化表述映射到专业术语 | UMLS/SNOMED 概念检索 | 📋 待实现 |
-| 结构化生成模块 | 基于证据生成结构化病历 | LLM | 📋 待实现 |
+| 证据选择模块 | 从对话中检索相关片段 | 触发词匹配 + LLM | ✅ 已实现 |
+| 术语规范化模块 | 口语化表述映射到专业术语 | 字典匹配 + LLM | ✅ 已实现 |
+| 病历要素抽取模块 | 从证据中抽取SOAP要素 | 规则抽取 + LLM | ✅ 已实现 |
+| 病历生成模块 | 基于抽取结果生成结构化病历 | 模板生成 + LLM | ✅ 已实现 |
 | 验证模块 | 检查病历与对话一致性 | 规则检查 / LLM 验证 | 📋 待实现 |
 
 ### 输出层
@@ -783,7 +842,7 @@ graph TB
 | 模块 | 职责 | 格式 | 实现状态 |
 |------|------|------|----------|
 | 转写结果展示 | 显示转写文本和说话人 | HTML/JSON | ✅ 已实现 |
-| 结构化病历 | 最终输出的结构化医疗文档 | SOAP格式 | 📋 待实现 |
+| 结构化病历 | 最终输出的结构化医疗文档 | SOAP格式 | ✅ 已实现 |
 
 ### 外部依赖
 
@@ -792,8 +851,10 @@ graph TB
 | FunASR模型 | ASR转写和说话人分离 | ✅ 已集成 |
 | 医疗热词表 | 提升医疗术语识别率 | ✅ 已配置 |
 | ASR纠正规则 | 医疗术语纠错 | ✅ 已配置 |
+| 字段触发词表 | 证据选择触发词 | ✅ 已配置 |
+| 医学术语词表 | 术语规范化 | ✅ 已配置 |
 | 医学本体库 (UMLS/SNOMED/ICD) | 术语规范化检索 | 📋 待集成 |
-| LLM API / 本地模型 | 结构化生成 | 📋 待集成 |
+| LLM API / 本地模型 | 结构化生成 | ✅ 已集成 |
 
 ## 后端服务架构
 
@@ -804,6 +865,10 @@ graph TB
 | /api/upload | POST | 上传音频文件 | backend/api/upload.py |
 | /api/asr/transcribe/{visit_id} | POST | 启动ASR转写任务 | backend/api/asr.py |
 | /api/task/{task_id} | GET | 查询任务状态 | backend/api/task.py |
+| /api/emr/process | POST | 处理就诊记录生成病历 | backend/api/emr.py |
+| /api/emr/status/{visit_id} | GET | 查询病历处理状态 | backend/api/emr.py |
+| /api/emr/record/{visit_id} | GET | 获取病历记录 | backend/api/emr.py |
+| /api/emr/versions/{visit_id} | GET | 获取病历所有版本 | backend/api/emr.py |
 | / | GET | 首页（上传界面） | backend/main.py |
 | /health | GET | 健康检查 | backend/main.py |
 
@@ -815,6 +880,11 @@ graph TB
 | Task | tasks | 任务记录 | backend/models/task.py |
 | TranscriptTurn | transcript_turns | 转写轮次 | backend/models/transcript.py |
 | ASRCorrection | asr_corrections | ASR纠正记录 | backend/models/transcript.py |
+| EvidenceSpan | evidence_spans | 证据片段 | backend/models/evidence.py |
+| NormalizedTerm | normalized_terms | 规范化术语 | backend/models/term.py |
+| ExtractedItem | extracted_items | 抽取的病历要素 | backend/models/extracted_item.py |
+| EMRRecord | emr_records | 病历记录 | backend/models/emr_record.py |
+| LLMConfig | llm_configs | LLM配置 | backend/models/llm_config.py |
 
 ### 服务层
 
@@ -824,6 +894,12 @@ graph TB
 | ASRPostprocessor | ASR后处理，医疗术语纠错 | backend/services/postprocessor.py |
 | TranscriptNormalizer | 文本标准化，说话人映射 | backend/services/normalizer.py |
 | SpeakerRoleClassifier | 说话人角色识别，基于语义分析识别医生/患者 | backend/services/speaker_role_classifier.py |
+| EvidenceService | 证据选择，基于触发词和LLM筛选相关片段 | backend/services/evidence_service.py |
+| TerminologyService | 术语规范化，字典匹配和LLM规范化 | backend/services/terminology_service.py |
+| ExtractionService | 病历要素抽取，从证据中抽取SOAP要素 | backend/services/extraction_service.py |
+| EMRGenerationService | 病历生成，基于模板和LLM生成结构化病历 | backend/services/emr_generation_service.py |
+| MedicalRecordPipeline | 整合服务，串联所有处理步骤 | backend/services/medical_record_pipeline.py |
+| LLMService | LLM服务，支持多适配器和模板渲染 | backend/services/llm/llm_service.py |
 
 ### 配置项
 

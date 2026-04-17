@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM配置 - 中文门诊病历生成系统</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>大模型配置</h1>
+        
+        <div class="config-section">
+            <h2>配置LLM服务</h2>
+            <p class="hint">配置大模型API以获得更好的病历生成效果</p>
+            
+            <form id="llmConfigForm">
+                <div class="form-group">
+                    <label for="configName">配置名称 *</label>
+                    <input type="text" id="configName" name="config_name" required placeholder="例如：qwen">
+                </div>
+                
+                <div class="form-group">
+                    <label for="provider">服务商 *</label>
+                    <select id="provider" name="provider" required>
+                        <option value="openai_compatible">OpenAI兼容接口</option>
+                        <option value="openai">OpenAI</option>
+                        <option value="anthropic">Anthropic</option>
+                        <option value="custom">自定义</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="modelName">模型名称 *</label>
+                    <input type="text" id="modelName" name="model_name" required placeholder="例如：qwen-plus">
+                </div>
+                
+                <div class="form-group">
+                    <label for="apiKey">API Key *</label>
+                    <input type="password" id="apiKey" name="api_key" required placeholder="输入您的API Key">
+                </div>
+                
+                <div class="form-group">
+                    <label for="apiEndpoint">API Endpoint</label>
+                    <input type="text" id="apiEndpoint" name="api_endpoint" placeholder="例如：https://api-inference.modelscope.cn/v1">
+                    <p class="hint">支持base_url格式（如 https://api-inference.modelscope.cn/v1）或完整endpoint格式</p>
+                </div>
+                
+                <div class="form-group">
+                    <label for="maxTokens">最大Token数</label>
+                    <input type="number" id="maxTokens" name="max_tokens" value="2048" min="100" max="8192">
+                </div>
+                
+                <div class="form-group">
+                    <label for="temperature">Temperature</label>
+                    <input type="number" id="temperature" name="temperature" value="0.7" min="0" max="2" step="0.1">
+                </div>
+                
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="isActive" name="is_active" checked>
+                        启用此配置
+                    </label>
+                </div>
+                
+                <button type="submit" class="btn-primary">保存配置</button>
+            </form>
+        </div>
+        
+        <div class="configs-section">
+            <h2>已保存的配置</h2>
+            <div id="configsList"></div>
+        </div>
+        
+        <div class="actions">
+            <button id="backToHome" class="btn-secondary">返回首页</button>
+        </div>
+    </div>
+    
+    <script src="/static/js/config.js"></script>
+</body>
+</html>

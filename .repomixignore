@@ -1,0 +1,20 @@
+# Add patterns to ignore here, one per line
+# Example:
+# *.log
+# tmp/
+%TEMP%install-qwen.bat
+/.qwen
+/.trae
+*.0
+/.agents
+/data/audio
+/.agents
+/_bmad
+/backend/services/correction/__pycache__
+/backend/services/llm/__pycache__
+/src/asr/__pycache__
+/tests/test_correction/__pycache__
+/backend/__pycache__
+/tests/__pycache__
+/med_env
+/docs

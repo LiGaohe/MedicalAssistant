@@ -1,0 +1,152 @@
+{
+  "chief_complaint": {
+    "description": "主诉",
+    "speaker_preference": "patient",
+    "triggers": [
+      "主诉",
+      "哪里不舒服",
+      "怎么了",
+      "什么症状",
+      "来看什么病",
+      "哪里痛",
+      "哪里难受",
+      "不舒服",
+      "症状"
+    ],
+    "weight": 1.0
+  },
+  "history_present_illness": {
+    "description": "现病史",
+    "speaker_preference": "patient",
+    "triggers": [
+      "多久了",
+      "什么时候开始",
+      "持续多长时间",
+      "几天了",
+      "几个月了",
+      "几年了",
+      "怎么开始的",
+      "一开始怎么样",
+      "后来怎么样",
+      "加重",
+      "缓解",
+      "伴随症状",
+      "还有其他不舒服",
+      "有没有",
+      "是不是"
+    ],
+    "weight": 0.9
+  },
+  "past_history": {
+    "description": "既往史",
+    "speaker_preference": "doctor",
+    "triggers": [
+      "既往史",
+      "以前得过",
+      "以前有什么病",
+      "有没有高血压",
+      "有没有糖尿病",
+      "有没有心脏病",
+      "手术史",
+      "过敏史",
+      "用药史",
+      "家族史"
+    ],
+    "weight": 0.8
+  },
+  "physical_examination": {
+    "description": "体格检查",
+    "speaker_preference": "doctor",
+    "triggers": [
+      "体格检查",
+      "查体",
+      "听诊",
+      "触诊",
+      "叩诊",
+      "血压",
+      "心率",
+      "体温",
+      "呼吸",
+      "神志",
+      "精神",
+      "皮肤",
+      "淋巴结",
+      "心肺",
+      "腹部"
+    ],
+    "weight": 0.9
+  },
+  "auxiliary_examination": {
+    "description": "辅助检查",
+    "speaker_preference": "doctor",
+    "triggers": [
+      "检查",
+      "化验",
+      "血常规",
+      "尿常规",
+      "生化",
+      "心电图",
+      "CT",
+      "MRI",
+      "B超",
+      "X光",
+      "拍片",
+      "结果"
+    ],
+    "weight": 0.85
+  },
+  "diagnosis": {
+    "description": "诊断",
+    "speaker_preference": "doctor",
+    "triggers": [
+      "诊断",
+      "考虑",
+      "可能是",
+      "应该是",
+      "确诊",
+      "怀疑",
+      "初步诊断",
+      "印象"
+    ],
+    "weight": 1.0
+  },
+  "treatment_plan": {
+    "description": "治疗方案",
+    "speaker_preference": "doctor",
+    "triggers": [
+      "治疗",
+      "用药",
+      "吃药",
+      "输液",
+      "打针",
+      "手术",
+      "住院",
+      "门诊",
+      "随访",
+      "复查",
+      "注意",
+      "建议",
+      "开药"
+    ],
+    "weight": 0.9
+  },
+  "advice": {
+    "description": "医嘱",
+    "speaker_preference": "doctor",
+    "triggers": [
+      "注意休息",
+      "多喝水",
+      "少吃",
+      "多吃",
+      "避免",
+      "不要",
+      "禁忌",
+      "饮食",
+      "运动",
+      "睡眠",
+      "戒烟",
+      "戒酒"
+    ],
+    "weight": 0.85
+  }
+}

@@ -7,10 +7,18 @@ class OpenAICompatibleAdapter(LLMAdapter):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.api_key = config.get("api_key")
-        self.api_endpoint = config.get(
-            "api_endpoint",
-            "https://api.openai.com/v1/chat/completions"
-        )
+        
+        api_endpoint = config.get("api_endpoint", "https://api.openai.com/v1")
+        
+        if not api_endpoint.endswith("/chat/completions"):
+            if api_endpoint.endswith("/v1"):
+                api_endpoint = f"{api_endpoint}/chat/completions"
+            elif not api_endpoint.endswith("/"):
+                api_endpoint = f"{api_endpoint}/v1/chat/completions"
+            else:
+                api_endpoint = f"{api_endpoint}v1/chat/completions"
+        
+        self.api_endpoint = api_endpoint
         self.provider_name = config.get("provider_name", "openai")
         
     def generate(self, request: LLMRequest) -> LLMResponse:
