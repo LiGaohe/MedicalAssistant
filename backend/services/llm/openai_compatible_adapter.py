@@ -1,6 +1,7 @@
 from typing import Dict, Any
 import httpx
 import json
+import time
 from .base import LLMAdapter, LLMRequest, LLMResponse
 
 
@@ -21,6 +22,10 @@ class OpenAICompatibleAdapter(LLMAdapter):
         
         self.api_endpoint = api_endpoint
         self.provider_name = config.get("provider_name", "openai")
+        self.max_retries = config.get("max_retries", 5)
+        self.retry_delay = config.get("retry_delay", 3.0)
+        self.request_interval = config.get("request_interval", 2.0)
+        self._last_request_time = 0
         
     def generate(self, request: LLMRequest) -> LLMResponse:
         headers = {
@@ -42,42 +47,66 @@ class OpenAICompatibleAdapter(LLMAdapter):
         
         if request.stop_sequences:
             payload["stop"] = request.stop_sequences
+        
+        last_error = None
+        
+        for attempt in range(self.max_retries):
+            try:
+                elapsed = time.time() - self._last_request_time
+                if elapsed < self.request_interval:
+                    wait_time = self.request_interval - elapsed
+                    time.sleep(wait_time)
+                
+                with httpx.Client(timeout=120.0) as client:
+                    response = client.post(
+                        self.api_endpoint,
+                        headers=headers,
+                        json=payload
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    self._last_request_time = time.time()
+                    
+                    choices = data.get("choices", [])
+                    if not choices:
+                        error_info = data.get("error", {})
+                        if error_info:
+                            raise RuntimeError(f"{self.provider_name} API error: {error_info}")
+                        
+                        usage = data.get("usage", {})
+                        if usage and usage.get("total_tokens", 0) == 0:
+                            raise RuntimeError(f"{self.provider_name} API rate limited or request rejected")
+                        
+                        raise RuntimeError(f"{self.provider_name} API returned no choices. Response: {json.dumps(data, ensure_ascii=False)[:500]}")
+                    
+                    message = choices[0].get("message", {})
+                    content = message.get("content")
+                    
+                    if content is None:
+                        raise RuntimeError(f"{self.provider_name} API returned None content")
+                    
+                    return LLMResponse(
+                        text=content,
+                        model=self.model_name,
+                        provider=self.provider_name,
+                        usage=data.get("usage", {}),
+                        finish_reason=choices[0].get("finish_reason", "stop"),
+                        raw_response=data
+                    )
+                    
+            except httpx.HTTPError as e:
+                last_error = RuntimeError(f"{self.provider_name} API error: {str(e)}")
+            except (KeyError, IndexError) as e:
+                last_error = RuntimeError(f"Invalid {self.provider_name} response format: {str(e)}")
+            except RuntimeError as e:
+                last_error = e
             
-        try:
-            with httpx.Client(timeout=120.0) as client:
-                response = client.post(
-                    self.api_endpoint,
-                    headers=headers,
-                    json=payload
-                )
-                response.raise_for_status()
-                data = response.json()
-                
-                choices = data.get("choices", [])
-                if not choices:
-                    error_info = data.get("error", {})
-                    if error_info:
-                        raise RuntimeError(f"{self.provider_name} API error: {error_info}")
-                    raise RuntimeError(f"{self.provider_name} API returned no choices. Response: {json.dumps(data, ensure_ascii=False)[:500]}")
-                
-                message = choices[0].get("message", {})
-                content = message.get("content")
-                
-                if content is None:
-                    raise RuntimeError(f"{self.provider_name} API returned None content")
-                
-                return LLMResponse(
-                    text=content,
-                    model=self.model_name,
-                    provider=self.provider_name,
-                    usage=data.get("usage", {}),
-                    finish_reason=choices[0].get("finish_reason", "stop"),
-                    raw_response=data
-                )
-        except httpx.HTTPError as e:
-            raise RuntimeError(f"{self.provider_name} API error: {str(e)}")
-        except (KeyError, IndexError) as e:
-            raise RuntimeError(f"Invalid {self.provider_name} response format: {str(e)}")
+            if attempt < self.max_retries - 1:
+                wait_time = self.retry_delay * (attempt + 1)
+                time.sleep(wait_time)
+        
+        raise last_error
     
     def is_available(self) -> bool:
         try:

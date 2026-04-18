@@ -1,5 +1,51 @@
 # 完成状态记录
 
+## 2026-04-18 前端调试模式优化
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 动态提示词生成 | ✅ 完成 | 后续阶段提示词根据前一阶段结果动态生成 |
+| Context传递优化 | ✅ 完成 | 正确传递和更新各阶段处理结果 |
+| 阶段描述更新 | ✅ 完成 | 实时更新阶段选择器中的描述 |
+| 多segment支持 | ✅ 完成 | 正确处理阶段1的多个segment |
+| 病历保存功能 | ✅ 完成 | 调试模式完成后自动保存病历到数据库 |
+
+### 修改文件
+
+1. **backend/services/llm_pipeline_service.py**
+   - `get_all_prompts()`：只返回阶段1的提示词，后续阶段标记为"待生成"
+   - `process_stage_with_user_input()`：根据前一阶段结果动态生成下一阶段提示词
+   - 添加 `context_update` 返回值，用于更新前端context
+   - 添加 `next_description` 返回值，用于更新阶段描述
+   - 添加 `next_segment_index` 返回值，用于处理多个segment
+   - 新增 `_save_emr_record()`：保存病历记录到数据库
+   - 修改 `_parse_emr_response()`：解析后自动保存病历
+   - 修改 `_template_emr_generation()`：模板生成后自动保存病历
+
+2. **backend/api/emr.py**
+   - `DebugProcessStageResponse`：添加新字段 `next_segment_index`, `next_description`, `context_update`, `completed`
+   - `debug_process_stage()`：返回新增字段
+
+3. **frontend/js/emr.js**
+   - 使用 `context_update` 更新 `debugContext`
+   - 使用 `next_description` 更新阶段选择器
+   - 使用 `next_segment_index` 更新当前segment索引
+   - 正确传递 `segment_index` 到后端
+
+### 工作流程
+
+1. 用户打开调试模式，显示所有阶段（阶段1可能有多个segment）
+2. 阶段1各segment处理完成后，合并所有 `annotated_text`
+3. 阶段2使用阶段1的合并结果生成提示词
+4. 阶段3使用阶段2的 `normalized_text` 生成提示词
+5. 阶段4使用阶段3的 `extraction_result` 生成提示词
+6. 阶段4完成后，自动保存病历记录到数据库
+7. 刷新页面后显示生成的病历
+
+---
+
 ## 2026-04-17 多阶段LLM证据抽取流程
 
 ### 已完成
@@ -68,6 +114,21 @@
    - 安全解析API响应：使用 `.get()` 方法避免 KeyError
    - 检查空choices：提供详细错误信息
    - 检查None content：避免后续处理错误
+   - 添加重试机制：最多5次重试，指数退避
+   - 添加请求间隔：默认2秒间隔避免限流
+   - 检测限流：识别 `total_tokens=0` 的限流响应
+
+6. **证据溯源功能** (`backend/services/llm_pipeline_service.py`)
+   - `_extract_evidence_traces()`：从标注文本提取证据位置
+   - `_attach_evidence_traces()`：关联证据到抽取字段
+   - `_save_evidence_spans()`：保存溯源记录到数据库
+   - 溯源信息包含：turn_id, turn_index, speaker, start_char, end_char, confidence
+   - 添加阶段间延迟：3秒间隔避免API限流
+
+7. **API端点整合** (`backend/api/emr.py`)
+   - `/api/emr/process` 现在使用 `LLMPipelineService`（当 `use_llm=True`）
+   - DEBUG模式在HTTP请求中自动禁用（需要终端交互）
+   - 返回格式兼容旧的 `ProcessResponse`
 
 ### 使用方法
 
@@ -146,9 +207,11 @@ POST /api/emr/pipeline/process
 ============================================================
 >>> 处理段落 1/1
 合并后的标注文本长度: 327 字符
+收集到 6 条证据溯源记录
 >>> 阶段2: 术语规范化
 >>> 阶段3: 字段抽取
 >>> 阶段4: 病历生成
+保存了 6 条证据溯源记录到数据库
 
 ============================================================
 处理结果:
@@ -160,11 +223,42 @@ POST /api/emr/pipeline/process
   spk1: patient
 
 生成的病历:
-  主观数据: 主诉：头痛3天，晨起加重。现病史：患者3天前无明显诱因出现头痛...
-  客观数据: 体格检查：血压145/95mmHg。辅助检查：暂缺。
-  评估: 初步诊断：高血压病引起的头痛。
-  计划: 治疗方案：予降压药物口服，每日1次，晨起服用...
+  主观数据: 主诉：头痛3天，晨起明显。现病史：患者3天前无明显诱因出现头痛，以晨起时为著...
+  客观数据: 体格检查：血压 145/95mmHg。辅助检查：暂缺。
+  评估: 初步诊断：1. 高血压病；2. 头痛（考虑高血压所致）。
+  计划: 治疗方案：给予降压药物治疗，每日1次，晨起口服。医嘱及健康指导：低盐饮食...
+
+证据溯源信息 (共6条):
+  [1] 主诉: 我这几天一直头疼，特别是早上起来的时候。...
+      来源: turn_id=340, speaker=spk1, turn_index=1
+  [2] 现病史: 大概三天了，有时候会恶心，但没有呕吐。...
+      来源: turn_id=342, speaker=spk1, turn_index=3
+  [3] 体格检查: 我给您量一下血压。一百四十五九十五，血压偏高。...
+      来源: turn_id=343, speaker=spk0, turn_index=4
+  [4] 诊断: 是的，考虑是高血压引起的头疼。...
+      来源: turn_id=345, speaker=spk0, turn_index=6
+  [5] 治疗: 我给您开点降压药，每天一次，早上吃。...
+      来源: turn_id=345, speaker=spk0, turn_index=6
+  ... 还有 1 条证据
+
+数据库中保存的证据记录: 6 条
 ```
+
+### 溯源数据结构
+
+每条证据溯源记录包含：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| field_type | str | 字段类型（英文） |
+| field_type_cn | str | 字段类型（中文） |
+| content | str | 证据内容 |
+| turn_id | int | 关联的对话轮次ID |
+| turn_index | int | 对话轮次索引 |
+| speaker | str | 说话人ID |
+| start_char | int | 在标注文本中的起始位置 |
+| end_char | int | 在标注文本中的结束位置 |
+| confidence | float | 置信度 |
 
 ## 2026-04-17 置信度字段支持
 

@@ -37,19 +37,86 @@ async def process_visit(
     db: Session = Depends(get_db)
 ):
     logger.info(f"收到病历处理请求: visit_id={request.visit_id}")
+    logger.info(f"DEBUG模式: {settings.LLM_DEBUG_MODE}")
+    
+    if settings.LLM_DEBUG_MODE:
+        logger.warning("DEBUG模式已开启，但HTTP请求不支持终端交互")
+        return ProcessResponse(
+            visit_id=request.visit_id,
+            status="failed",
+            evidence_count=0,
+            normalized_terms_count=0,
+            extracted_items_count=0,
+            emr_record=None,
+            errors=["DEBUG模式已开启，HTTP请求不支持终端交互。请关闭DEBUG模式或将后端配置文件中的LLM_DEBUG_MODE设为False"]
+        )
+    
     try:
         llm_service = LLMService(db)
-        pipeline = MedicalRecordPipeline(db, llm_service)
         
-        result = pipeline.process_visit(
-            request.visit_id,
-            use_llm=request.use_llm,
-            save_intermediate=request.save_intermediate
-        )
+        if request.use_llm:
+            pipeline = LLMPipelineService(db, llm_service)
+            result = pipeline.process_transcript(request.visit_id)
+            
+            evidence_count = len(result.get("evidence_traces", []))
+            normalized_terms_count = len(result.get("normalized_result", {}).get("terms", []))
+            
+            emr_result = result.get("emr_result", {})
+            emr_record = {
+                "emr_json": {
+                    "subjective": emr_result.get("subjective", {}),
+                    "objective": emr_result.get("objective", {}),
+                    "assessment": emr_result.get("assessment", {}),
+                    "plan": emr_result.get("plan", {})
+                }
+            }
+            
+            logger.info(f"病历处理完成: {result['status']}")
+            return ProcessResponse(
+                visit_id=request.visit_id,
+                status=result.get("status", "completed"),
+                evidence_count=evidence_count,
+                normalized_terms_count=normalized_terms_count,
+                extracted_items_count=evidence_count,
+                emr_record=emr_record,
+                errors=[]
+            )
+        else:
+            pipeline = MedicalRecordPipeline(db, llm_service)
+            
+            result = pipeline.process_visit(
+                request.visit_id,
+                use_llm=False,
+                save_intermediate=request.save_intermediate
+            )
+            
+            logger.info(f"病历处理完成: {result['status']}")
+            return ProcessResponse(**result)
         
-        logger.info(f"病历处理完成: {result['status']}")
-        return ProcessResponse(**result)
-        
+    except RuntimeError as e:
+        if "User cancelled" in str(e):
+            logger.info("用户取消操作")
+            return ProcessResponse(
+                visit_id=request.visit_id,
+                status="cancelled",
+                evidence_count=0,
+                normalized_terms_count=0,
+                extracted_items_count=0,
+                emr_record=None,
+                errors=["用户取消操作"]
+            )
+        if "DEBUG模式" in str(e):
+            logger.warning(f"DEBUG模式错误: {e}")
+            return ProcessResponse(
+                visit_id=request.visit_id,
+                status="failed",
+                evidence_count=0,
+                normalized_terms_count=0,
+                extracted_items_count=0,
+                emr_record=None,
+                errors=[str(e)]
+            )
+        raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         logger.error(f"病历处理失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -221,3 +288,90 @@ async def set_debug_mode(
         "debug_mode": settings.LLM_DEBUG_MODE,
         "segment_turns": settings.LLM_SEGMENT_TURNS
     }
+
+
+class DebugPromptsResponse(BaseModel):
+    visit_id: str
+    stages: List[Dict[str, Any]]
+
+
+class DebugProcessStageRequest(BaseModel):
+    visit_id: str
+    stage: str
+    user_response: str
+    context: Optional[Dict[str, Any]] = None
+
+
+class DebugProcessStageResponse(BaseModel):
+    status: str
+    stage: str
+    result: Optional[Dict[str, Any]] = None
+    next_stage: Optional[str] = None
+    next_prompt: Optional[str] = None
+    next_segment_index: Optional[int] = None
+    next_description: Optional[str] = None
+    context_update: Optional[Dict[str, Any]] = None
+    completed: Optional[bool] = None
+    error: Optional[str] = None
+
+
+@router.get("/debug/prompts/{visit_id}", response_model=DebugPromptsResponse)
+async def get_debug_prompts(
+    visit_id: str,
+    db: Session = Depends(get_db)
+):
+    logger.info(f"获取调试提示词: visit_id={visit_id}")
+    
+    from ..models import TranscriptTurn
+    
+    turns = db.query(TranscriptTurn).filter(
+        TranscriptTurn.visit_id == visit_id
+    ).order_by(TranscriptTurn.turn_index).all()
+    
+    if not turns:
+        raise HTTPException(status_code=404, detail="没有找到对话轮次")
+    
+    pipeline = LLMPipelineService(db)
+    stages = pipeline.get_all_prompts(turns)
+    
+    return DebugPromptsResponse(
+        visit_id=visit_id,
+        stages=stages
+    )
+
+
+@router.post("/debug/process-stage", response_model=DebugProcessStageResponse)
+async def debug_process_stage(
+    request: DebugProcessStageRequest,
+    db: Session = Depends(get_db)
+):
+    logger.info(f"调试处理阶段: {request.stage}, visit_id={request.visit_id}")
+    
+    try:
+        pipeline = LLMPipelineService(db)
+        result = pipeline.process_stage_with_user_input(
+            visit_id=request.visit_id,
+            stage=request.stage,
+            user_response=request.user_response,
+            context=request.context or {}
+        )
+        
+        return DebugProcessStageResponse(
+            status="success",
+            stage=request.stage,
+            result=result.get("result"),
+            next_stage=result.get("next_stage"),
+            next_prompt=result.get("next_prompt"),
+            next_segment_index=result.get("next_segment_index"),
+            next_description=result.get("next_description"),
+            context_update=result.get("context_update"),
+            completed=result.get("completed")
+        )
+        
+    except Exception as e:
+        logger.error(f"调试处理失败: {str(e)}", exc_info=True)
+        return DebugProcessStageResponse(
+            status="failed",
+            stage=request.stage,
+            error=str(e)
+        )

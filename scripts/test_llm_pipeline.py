@@ -109,6 +109,21 @@ def test_pipeline():
             print(f"  评估: {emr.get('assessment', {}).get('text', '')[:100]}...")
             print(f"  计划: {emr.get('plan', {}).get('text', '')[:100]}...")
         
+        if result.get('evidence_traces'):
+            print(f"\n证据溯源信息 (共{len(result['evidence_traces'])}条):")
+            for i, trace in enumerate(result['evidence_traces'][:5]):
+                print(f"  [{i+1}] {trace.get('field_type_cn', trace.get('field_type'))}: {trace.get('content', '')[:30]}...")
+                print(f"      来源: turn_id={trace.get('turn_id')}, speaker={trace.get('speaker')}, turn_index={trace.get('turn_index')}")
+            
+            if len(result['evidence_traces']) > 5:
+                print(f"  ... 还有 {len(result['evidence_traces']) - 5} 条证据")
+        
+        from backend.models import EvidenceSpan
+        saved_evidence = db.query(EvidenceSpan).filter(
+            EvidenceSpan.visit_id == "test_pipeline_001"
+        ).count()
+        print(f"\n数据库中保存的证据记录: {saved_evidence} 条")
+        
         return result
         
     except Exception as e:
