@@ -375,3 +375,104 @@ async def debug_process_stage(
             stage=request.stage,
             error=str(e)
         )
+
+
+class UpdateEMRRequest(BaseModel):
+    emr_json: Dict[str, Any]
+    record_type: str = "user_edited"
+
+
+class UpdateEMRResponse(BaseModel):
+    status: str
+    record_id: int
+    version: int
+    message: Optional[str] = None
+
+
+@router.put("/record/{visit_id}", response_model=UpdateEMRResponse)
+async def update_emr_record(
+    visit_id: str,
+    request: UpdateEMRRequest,
+    db: Session = Depends(get_db)
+):
+    logger.info(f"更新病历记录: visit_id={visit_id}")
+    try:
+        llm_service = LLMService(db)
+        emr_service = EMRGenerationService(db, llm_service)
+        
+        latest_version = emr_service._get_latest_version(visit_id)
+        new_version = latest_version + 1
+        
+        emr = EMRRecord(
+            visit_id=visit_id,
+            version=new_version,
+            record_type=request.record_type,
+            emr_json=request.emr_json,
+            evidence_mapping=None,
+            validation_errors=None
+        )
+        
+        db.add(emr)
+        db.commit()
+        db.refresh(emr)
+        
+        logger.info(f"病历更新成功: record_id={emr.record_id}, version={new_version}")
+        
+        return UpdateEMRResponse(
+            status="success",
+            record_id=emr.record_id,
+            version=new_version,
+            message="病历更新成功"
+        )
+        
+    except Exception as e:
+        logger.error(f"更新病历失败: {str(e)}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/evidence/{visit_id}")
+async def get_evidence_by_visit(
+    visit_id: str,
+    db: Session = Depends(get_db)
+):
+    logger.info(f"获取证据溯源: visit_id={visit_id}")
+    try:
+        from ..models import EvidenceSpan, TranscriptTurn
+        
+        evidence_list = db.query(EvidenceSpan).filter(
+            EvidenceSpan.visit_id == visit_id
+        ).all()
+        
+        result = []
+        for ev in evidence_list:
+            turn = db.query(TranscriptTurn).filter(
+                TranscriptTurn.turn_id == ev.turn_id
+            ).first()
+            
+            turn_text = ev.turn_text
+            if not turn_text and turn:
+                turn_text = turn.text
+            
+            result.append({
+                "evidence_id": ev.evidence_id,
+                "field_type": ev.field_type,
+                "field_value": ev.field_value,
+                "content": ev.content,
+                "turn_id": ev.turn_id,
+                "turn_index": turn.turn_index if turn else None,
+                "turn_text": turn_text,
+                "speaker": turn.speaker if turn else None,
+                "confidence": ev.confidence,
+                "reasoning": ev.reasoning
+            })
+        
+        logger.info(f"返回 {len(result)} 条证据")
+        return {
+            "visit_id": visit_id,
+            "evidence": result
+        }
+        
+    except Exception as e:
+        logger.error(f"获取证据失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

@@ -68,12 +68,26 @@
         
         <div class="emr-section" id="emrSection" style="display: none;">
             <h2>病历内容</h2>
-            <div class="emr-version">
-                <label>版本：</label>
-                <select id="versionSelect"></select>
+            <div class="emr-toolbar">
+                <div class="emr-version">
+                    <label>版本：</label>
+                    <select id="versionSelect"></select>
+                </div>
+                <div class="emr-actions">
+                    <button id="editEMR" class="btn-warning">编辑病历</button>
+                    <button id="saveEMR" class="btn-success" style="display: none;">保存修改</button>
+                    <button id="cancelEdit" class="btn-secondary" style="display: none;">取消编辑</button>
+                    <button id="printEMR" class="btn-primary">打印病历</button>
+                    <button id="toggleEvidence" class="btn-secondary">显示证据溯源</button>
+                </div>
             </div>
             
-            <div class="emr-content">
+            <div id="evidencePanel" class="evidence-panel" style="display: none;">
+                <h3>证据溯源</h3>
+                <div id="evidenceList"></div>
+            </div>
+            
+            <div class="emr-content" id="emrContent">
                 <div class="emr-part">
                     <h3>主观数据 (Subjective)</h3>
                     <div id="subjectiveContent"></div>

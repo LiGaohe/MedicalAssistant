@@ -12,8 +12,18 @@ document.addEventListener('DOMContentLoaded', async function() {
     const generateBtn = document.getElementById('generateEMR');
     const viewBtn = document.getElementById('viewEMR');
     const backBtn = document.getElementById('backToResult');
+    const editBtn = document.getElementById('editEMR');
+    const saveBtn = document.getElementById('saveEMR');
+    const cancelEditBtn = document.getElementById('cancelEdit');
+    const printBtn = document.getElementById('printEMR');
+    const toggleEvidenceBtn = document.getElementById('toggleEvidence');
     const loadingSection = document.getElementById('loadingSection');
     const emrSection = document.getElementById('emrSection');
+    
+    let currentEMRRecord = null;
+    let isEditing = false;
+    let evidenceVisible = false;
+    let evidenceData = [];
     
     await loadEMRStatus(visitId);
     
@@ -66,6 +76,35 @@ document.addEventListener('DOMContentLoaded', async function() {
         const version = e.target.value;
         if (version) {
             await loadEMRByVersion(visitId, version);
+        }
+    });
+    
+    editBtn.addEventListener('click', () => {
+        if (!currentEMRRecord) {
+            alert('请先加载病历');
+            return;
+        }
+        enterEditMode();
+    });
+    
+    saveBtn.addEventListener('click', async () => {
+        await saveEMREdits();
+    });
+    
+    cancelEditBtn.addEventListener('click', () => {
+        exitEditMode();
+        displayEMR(currentEMRRecord);
+    });
+    
+    printBtn.addEventListener('click', () => {
+        printEMR();
+    });
+    
+    toggleEvidenceBtn.addEventListener('click', async () => {
+        if (evidenceVisible) {
+            hideEvidence();
+        } else {
+            await showEvidence();
         }
     });
     
@@ -131,22 +170,35 @@ document.addEventListener('DOMContentLoaded', async function() {
         try {
             const response = await fetch(`/api/emr/record/${visitId}?version=${version}`);
             const result = await response.json();
+            currentEMRRecord = result;
             await displayEMR(result);
+            await loadEvidenceData(visitId);
         } catch (error) {
             console.error('加载病历失败:', error);
+        }
+    }
+    
+    async function loadEvidenceData(visitId) {
+        try {
+            const response = await fetch(`/api/emr/evidence/${visitId}`);
+            const result = await response.json();
+            evidenceData = result.evidence || [];
+        } catch (error) {
+            console.error('加载证据数据失败:', error);
+            evidenceData = [];
         }
     }
     
     async function displayEMR(emrRecord) {
         const emrJson = emrRecord.emr_json;
         
-        displaySection('subjectiveContent', emrJson.subjective);
-        displaySection('objectiveContent', emrJson.objective);
-        displaySection('assessmentContent', emrJson.assessment);
-        displaySection('planContent', emrJson.plan);
+        displaySection('subjectiveContent', emrJson.subjective, 'subjective');
+        displaySection('objectiveContent', emrJson.objective, 'objective');
+        displaySection('assessmentContent', emrJson.assessment, 'assessment');
+        displaySection('planContent', emrJson.plan, 'plan');
     }
     
-    function displaySection(elementId, sectionData) {
+    function displaySection(elementId, sectionData, sectionName) {
         const element = document.getElementById(elementId);
         
         if (!sectionData) {
@@ -157,22 +209,24 @@ document.addEventListener('DOMContentLoaded', async function() {
         let html = '';
         
         if (sectionData.text !== undefined && sectionData.text !== null) {
-            html += `<div class="section-text">${sectionData.text || '暂无内容'}</div>`;
+            html += `<div class="section-text" data-field="${sectionName}.text">${sectionData.text || '暂无内容'}</div>`;
         }
         
-        const fields = Object.keys(sectionData).filter(k => k !== 'text');
+        const fields = Object.keys(sectionData).filter(k => k !== 'text' && k !== 'evidence_traces');
         if (fields.length > 0) {
             html += '<div class="section-fields">';
             fields.forEach(field => {
                 const fieldData = sectionData[field];
                 if (fieldData && fieldData.value !== undefined && fieldData.value !== null) {
+                    const evidenceHtml = buildEvidenceHtml(sectionName, field, fieldData);
                     html += `
-                        <div class="field-item">
+                        <div class="field-item" data-field="${sectionName}.${field}">
                             <div class="field-name">${getFieldName(field)}</div>
                             <div class="field-value">${fieldData.value || '暂无'}</div>
                             <div class="field-meta">
                                 置信度: ${((fieldData.confidence || 0) * 100).toFixed(1)}%
                             </div>
+                            ${evidenceHtml}
                         </div>
                     `;
                 }
@@ -181,6 +235,51 @@ document.addEventListener('DOMContentLoaded', async function() {
         }
         
         element.innerHTML = html || '<p class="empty">暂无数据</p>';
+    }
+    
+    function buildEvidenceHtml(sectionName, field, fieldData) {
+        const traces = fieldData.evidence_traces || [];
+        if (traces.length === 0) {
+            return '';
+        }
+        
+        const fieldValue = fieldData.value || '';
+        
+        let html = '<div class="evidence-traces"><strong>证据来源：</strong>';
+        if (fieldValue) {
+            html += `<div class="evidence-final-value"><strong>最终病历：</strong>${fieldValue}</div>`;
+        }
+        html += '<ul>';
+        traces.forEach((trace, idx) => {
+            const speaker = trace.speaker || '未知';
+            const content = trace.content || '';
+            const turnText = trace.turn_text || '';
+            const turnIndex = trace.turn_index !== undefined ? trace.turn_index : '-';
+            const confidence = ((trace.confidence || 0) * 100).toFixed(0);
+            
+            const displayContent = content.length > 80 ? content.substring(0, 80) + '...' : content;
+            const displayTurnText = turnText.length > 100 ? turnText.substring(0, 100) + '...' : turnText;
+            
+            html += `
+                <li class="evidence-item" data-turn-index="${turnIndex}">
+                    <div class="evidence-header">
+                        <span class="evidence-speaker">${speaker}</span>
+                        <span class="evidence-turn">轮次 ${turnIndex}</span>
+                        <span class="evidence-confidence">置信度: ${confidence}%</span>
+                    </div>
+                    <div class="evidence-detail">
+                        <div class="evidence-label">LLM标注片段：</div>
+                        <div class="evidence-content">${displayContent}</div>
+                        ${turnText ? `
+                        <div class="evidence-label">完整转写文本：</div>
+                        <div class="evidence-turn-text">${displayTurnText}</div>
+                        ` : ''}
+                    </div>
+                </li>
+            `;
+        });
+        html += '</ul></div>';
+        return html;
     }
     
     function getFieldName(field) {
@@ -195,6 +294,215 @@ document.addEventListener('DOMContentLoaded', async function() {
             'advice': '医嘱'
         };
         return nameMap[field] || field;
+    }
+    
+    function enterEditMode() {
+        isEditing = true;
+        editBtn.style.display = 'none';
+        saveBtn.style.display = 'inline-block';
+        cancelEditBtn.style.display = 'inline-block';
+        
+        const sections = ['subjectiveContent', 'objectiveContent', 'assessmentContent', 'planContent'];
+        sections.forEach(sectionId => {
+            const section = document.getElementById(sectionId);
+            makeSectionEditable(section);
+        });
+    }
+    
+    function exitEditMode() {
+        isEditing = false;
+        editBtn.style.display = 'inline-block';
+        saveBtn.style.display = 'none';
+        cancelEditBtn.style.display = 'none';
+    }
+    
+    function makeSectionEditable(section) {
+        const textDivs = section.querySelectorAll('.section-text');
+        textDivs.forEach(div => {
+            const text = div.textContent;
+            const field = div.dataset.field;
+            div.innerHTML = `<textarea class="edit-textarea" data-field="${field}">${text}</textarea>`;
+        });
+        
+        const valueDivs = section.querySelectorAll('.field-value');
+        valueDivs.forEach(div => {
+            const text = div.textContent;
+            div.innerHTML = `<textarea class="edit-textarea field-edit">${text}</textarea>`;
+        });
+    }
+    
+    async function saveEMREdits() {
+        if (!currentEMRRecord) {
+            alert('没有可保存的病历');
+            return;
+        }
+        
+        const updatedEMR = JSON.parse(JSON.stringify(currentEMRRecord.emr_json));
+        
+        const textareas = document.querySelectorAll('.edit-textarea');
+        textareas.forEach(textarea => {
+            const field = textarea.dataset.field;
+            const value = textarea.value;
+            
+            if (field) {
+                const parts = field.split('.');
+                if (parts.length === 2) {
+                    const [section, fieldName] = parts;
+                    if (fieldName === 'text') {
+                        if (!updatedEMR[section]) updatedEMR[section] = {};
+                        updatedEMR[section].text = value;
+                    }
+                }
+            }
+        });
+        
+        const fieldEdits = document.querySelectorAll('.field-edit');
+        fieldEdits.forEach(textarea => {
+            const fieldItem = textarea.closest('.field-item');
+            if (fieldItem) {
+                const field = fieldItem.dataset.field;
+                if (field) {
+                    const parts = field.split('.');
+                    if (parts.length === 2) {
+                        const [section, fieldName] = parts;
+                        if (!updatedEMR[section]) updatedEMR[section] = {};
+                        if (!updatedEMR[section][fieldName]) updatedEMR[section][fieldName] = {};
+                        updatedEMR[section][fieldName].value = textarea.value;
+                    }
+                }
+            }
+        });
+        
+        try {
+            const response = await fetch(`/api/emr/record/${visitId}`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    emr_json: updatedEMR,
+                    record_type: 'user_edited'
+                })
+            });
+            
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                alert(`病历保存成功！新版本: ${result.version}`);
+                exitEditMode();
+                await loadEMRVersions(visitId);
+            } else {
+                throw new Error(result.message || '保存失败');
+            }
+        } catch (error) {
+            alert('保存失败: ' + error.message);
+        }
+    }
+    
+    function printEMR() {
+        const printWindow = window.open('', '_blank');
+        const emrContent = document.getElementById('emrContent').cloneNode(true);
+        
+        const editElements = emrContent.querySelectorAll('.edit-textarea');
+        editElements.forEach(el => {
+            const span = document.createElement('span');
+            span.textContent = el.value;
+            el.parentNode.replaceChild(span, el);
+        });
+        
+        const evidenceElements = emrContent.querySelectorAll('.evidence-traces');
+        evidenceElements.forEach(el => el.remove());
+        
+        const printStyles = `
+            <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; }
+                body { font-family: SimSun, serif; padding: 40px; line-height: 1.8; }
+                h1 { text-align: center; font-size: 24px; margin-bottom: 30px; }
+                h3 { font-size: 16px; border-bottom: 2px solid #333; padding-bottom: 5px; margin: 20px 0 10px 0; }
+                .emr-part { margin-bottom: 30px; }
+                .section-text { margin-bottom: 15px; text-indent: 2em; }
+                .field-item { margin-bottom: 10px; }
+                .field-name { font-weight: bold; display: inline; }
+                .field-value { display: inline; }
+                .field-meta { display: none; }
+                .section-fields { margin-top: 10px; }
+                @media print {
+                    body { padding: 0; }
+                }
+            </style>
+        `;
+        
+        printWindow.document.write(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <title>病历打印</title>
+                ${printStyles}
+            </head>
+            <body>
+                <h1>门诊病历</h1>
+                <p style="text-align: center; margin-bottom: 20px;">
+                    就诊记录: ${visitId} | 打印时间: ${new Date().toLocaleString('zh-CN')}
+                </p>
+                ${emrContent.innerHTML}
+            </body>
+            </html>
+        `);
+        
+        printWindow.document.close();
+        printWindow.focus();
+        setTimeout(() => {
+            printWindow.print();
+        }, 500);
+    }
+    
+    async function showEvidence() {
+        const panel = document.getElementById('evidencePanel');
+        const list = document.getElementById('evidenceList');
+        
+        if (evidenceData.length === 0) {
+            await loadEvidenceData(visitId);
+        }
+        
+        if (evidenceData.length === 0) {
+            list.innerHTML = '<p class="empty">暂无证据溯源数据</p>';
+        } else {
+            let html = '<table class="evidence-table"><thead><tr>';
+            html += '<th>字段类型</th><th>最终病历</th><th>标注片段</th><th>原始转写</th><th>说话人</th><th>轮次</th><th>置信度</th>';
+            html += '</tr></thead><tbody>';
+            
+            evidenceData.forEach(ev => {
+                const turnText = ev.turn_text || '-';
+                const displayTurnText = turnText.length > 50 ? turnText.substring(0, 50) + '...' : turnText;
+                const fieldValue = ev.field_value || '-';
+                const displayFieldValue = fieldValue.length > 50 ? fieldValue.substring(0, 50) + '...' : fieldValue;
+                const content = ev.content || '-';
+                const displayContent = content.length > 50 ? content.substring(0, 50) + '...' : content;
+                html += `<tr>
+                    <td>${getFieldName(ev.field_type)}</td>
+                    <td class="evidence-value-cell">${displayFieldValue}</td>
+                    <td class="evidence-content-cell">${displayContent}</td>
+                    <td class="evidence-turn-cell">${displayTurnText}</td>
+                    <td>${ev.speaker || '-'}</td>
+                    <td>${ev.turn_index !== null ? ev.turn_index : '-'}</td>
+                    <td>${((ev.confidence || 0) * 100).toFixed(0)}%</td>
+                </tr>`;
+            });
+            
+            html += '</tbody></table>';
+            list.innerHTML = html;
+        }
+        
+        panel.style.display = 'block';
+        toggleEvidenceBtn.textContent = '隐藏证据溯源';
+        evidenceVisible = true;
+    }
+    
+    function hideEvidence() {
+        document.getElementById('evidencePanel').style.display = 'none';
+        toggleEvidenceBtn.textContent = '显示证据溯源';
+        evidenceVisible = false;
     }
     
     const debugBtn = document.getElementById('debugEMR');

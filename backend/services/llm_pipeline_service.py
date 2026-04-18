@@ -207,7 +207,7 @@ class LLMPipelineService:
                 role_mapping = result.get("role_mapping", {})
                 annotated_text = result.get("annotated_text", "")
                 
-                evidence_traces = self._extract_evidence_traces(annotated_text, segment)
+                evidence_traces = self._extract_evidence_traces(annotated_text, segment, role_mapping)
                 
                 return {
                     "role_mapping": role_mapping,
@@ -219,20 +219,71 @@ class LLMPipelineService:
         
         return self._fallback_role_annotation(segment)
     
+    FIELD_EXPECTED_ROLE = {
+        "chief_complaint": "patient",
+        "history_present_illness": "patient",
+        "past_history": "patient",
+        "physical_examination": "doctor",
+        "auxiliary_examination": "doctor",
+        "diagnosis": "doctor",
+        "treatment": "doctor",
+        "advice": "doctor",
+        "other": None
+    }
+    
+    def _calculate_evidence_confidence(
+        self,
+        content: str,
+        turn_text: str,
+        field_type: str,
+        speaker: str,
+        role_mapping: Dict[str, str],
+        turn_confidence: float = 1.0
+    ) -> float:
+        confidence = 0.5
+        
+        if turn_text and content:
+            if content in turn_text:
+                confidence += 0.3
+            elif turn_text in content:
+                confidence += 0.25
+            else:
+                content_words = set(content)
+                turn_words = set(turn_text)
+                if content_words and turn_words:
+                    overlap = len(content_words & turn_words) / len(content_words)
+                    confidence += overlap * 0.2
+        
+        expected_role = self.FIELD_EXPECTED_ROLE.get(field_type)
+        if expected_role and speaker and role_mapping:
+            actual_role = role_mapping.get(speaker)
+            if actual_role == expected_role:
+                confidence += 0.2
+            elif actual_role and actual_role != expected_role:
+                confidence -= 0.1
+        
+        if turn_confidence and turn_confidence > 0:
+            confidence += turn_confidence * 0.1
+        
+        return min(1.0, max(0.1, confidence))
+    
     def _extract_evidence_traces(
         self,
         annotated_text: str,
-        segment: List[TranscriptTurn]
+        segment: List[TranscriptTurn],
+        role_mapping: Dict[str, str] = None
     ) -> List[Dict[str, Any]]:
         evidence_traces = []
         
         tag_pattern = r'<(主诉|现病史|既往史|体格检查|辅助检查|诊断|治疗|医嘱|其他)>(.*?)</\1>'
         
         turn_by_speaker = {}
+        turn_by_index = {}
         for turn in segment:
             if turn.speaker not in turn_by_speaker:
                 turn_by_speaker[turn.speaker] = []
             turn_by_speaker[turn.speaker].append(turn)
+            turn_by_index[turn.turn_index] = turn
         
         for match in re.finditer(tag_pattern, annotated_text, re.DOTALL):
             field_type_cn = match.group(1)
@@ -246,29 +297,80 @@ class LLMPipelineService:
             speaker = None
             turn_id = None
             turn_index = None
+            turn_text = None
+            turn_confidence = 1.0
             
-            line_start = annotated_text.rfind('\n', 0, start_char) + 1
-            line_end = annotated_text.find('\n', start_char)
-            if line_end == -1:
-                line_end = len(annotated_text)
+            speaker_markers = re.findall(r'\[(spk\d+)\]:\s*([^[]+)', content)
             
-            line = annotated_text[line_start:line_end]
-            
-            speaker_match = re.match(r'\[(spk\d+)\]', line)
-            if speaker_match:
-                speaker = speaker_match.group(1)
+            if speaker_markers:
+                matched_turns = []
+                matched_speakers = set()
                 
-                if speaker in turn_by_speaker:
-                    for turn in turn_by_speaker[speaker]:
-                        if content in turn.text or turn.text in content:
+                first_marker_pos = content.find('[spk')
+                if first_marker_pos > 0:
+                    prefix_text = content[:first_marker_pos].strip().rstrip('，。,')
+                    if prefix_text:
+                        first_speaker = speaker_markers[0][0] if speaker_markers else None
+                        if first_speaker and first_speaker in turn_by_speaker:
+                            for turn in turn_by_speaker[first_speaker]:
+                                if prefix_text in turn.text:
+                                    if turn.turn_index not in [t.turn_index for t in matched_turns]:
+                                        matched_turns.append(turn)
+                                        matched_speakers.add(first_speaker)
+                                    break
+                
+                for spk, text_part in speaker_markers:
+                    text_part = text_part.strip().rstrip('，。,')
+                    if not text_part:
+                        continue
+                    matched_speakers.add(spk)
+                    
+                    if spk in turn_by_speaker:
+                        for turn in turn_by_speaker[spk]:
+                            if text_part in turn.text or turn.text in text_part:
+                                if turn.turn_index not in [t.turn_index for t in matched_turns]:
+                                    matched_turns.append(turn)
+                                break
+                
+                matched_turns.sort(key=lambda t: t.turn_index)
+                
+                if matched_turns:
+                    speaker = matched_turns[0].speaker
+                    turn_id = matched_turns[0].turn_id
+                    turn_index = matched_turns[0].turn_index
+                    turn_text = "\n".join([f"[{t.speaker}]: {t.text}" for t in matched_turns])
+                    turn_confidence = matched_turns[0].confidence if matched_turns[0].confidence else 1.0
+            else:
+                line_start = annotated_text.rfind('\n', 0, start_char) + 1
+                line_end = annotated_text.find('\n', start_char)
+                if line_end == -1:
+                    line_end = len(annotated_text)
+                
+                line = annotated_text[line_start:line_end]
+                
+                speaker_match = re.match(r'\[(spk\d+)\]', line)
+                if speaker_match:
+                    speaker = speaker_match.group(1)
+                    
+                    if speaker in turn_by_speaker:
+                        for turn in turn_by_speaker[speaker]:
+                            if content in turn.text or turn.text in content:
+                                turn_id = turn.turn_id
+                                turn_index = turn.turn_index
+                                turn_text = turn.text
+                                turn_confidence = turn.confidence if turn.confidence else 1.0
+                                break
+                        
+                        if turn_id is None and turn_by_speaker[speaker]:
+                            turn = turn_by_speaker[speaker][0]
                             turn_id = turn.turn_id
                             turn_index = turn.turn_index
-                            break
-                    
-                    if turn_id is None and turn_by_speaker[speaker]:
-                        turn = turn_by_speaker[speaker][0]
-                        turn_id = turn.turn_id
-                        turn_index = turn.turn_index
+                            turn_text = turn.text
+                            turn_confidence = turn.confidence if turn.confidence else 1.0
+            
+            confidence = self._calculate_evidence_confidence(
+                content, turn_text, field_type, speaker, role_mapping or {}, turn_confidence
+            )
             
             evidence_trace = {
                 "field_type": field_type,
@@ -277,13 +379,14 @@ class LLMPipelineService:
                 "speaker": speaker,
                 "turn_id": turn_id,
                 "turn_index": turn_index,
+                "turn_text": turn_text,
                 "start_char": start_char,
                 "end_char": end_char,
-                "confidence": 0.8
+                "confidence": round(confidence, 3)
             }
             
             evidence_traces.append(evidence_trace)
-            logger.debug(f"提取证据: {field_type_cn} - {content[:30]}... (turn_id={turn_id})")
+            logger.debug(f"提取证据: {field_type_cn} - {content[:30]}... (turn_id={turn_id}, confidence={confidence:.2f})")
         
         return evidence_traces
     
@@ -583,11 +686,12 @@ class LLMPipelineService:
                 field_data["evidence_traces"].append({
                     "turn_id": trace.get("turn_id"),
                     "turn_index": trace.get("turn_index"),
+                    "turn_text": trace.get("turn_text"),
                     "speaker": trace.get("speaker"),
                     "content": trace.get("content"),
                     "start_char": trace.get("start_char"),
                     "end_char": trace.get("end_char"),
-                    "confidence": trace.get("confidence", 0.8)
+                    "confidence": trace.get("confidence", 0.5)
                 })
                 
                 extraction_result[section][field_type] = field_data
@@ -717,7 +821,7 @@ class LLMPipelineService:
                 result = self._attach_evidence_to_emr(result, extraction_result)
                 
                 if save_evidence and visit_id:
-                    self._save_evidence_spans(extraction_result, visit_id)
+                    self._save_evidence_spans(extraction_result, visit_id, result)
                     self._save_emr_record(result, visit_id)
                 
                 return result
@@ -749,7 +853,8 @@ class LLMPipelineService:
     def _save_evidence_spans(
         self,
         extraction_result: Dict[str, Any],
-        visit_id: str
+        visit_id: str,
+        emr_result: Dict[str, Any] = None
     ) -> int:
         saved_count = 0
         
@@ -767,6 +872,14 @@ class LLMPipelineService:
                 
                 evidence_traces = field_data.get("evidence_traces", [])
                 
+                field_value = None
+                if emr_result and section in emr_result:
+                    field_info = emr_result[section].get(field_name, {})
+                    if isinstance(field_info, dict):
+                        field_value = field_info.get("value", "")
+                    elif isinstance(field_info, str):
+                        field_value = field_info
+                
                 for trace in evidence_traces:
                     turn_id = trace.get("turn_id")
                     if turn_id is None:
@@ -776,7 +889,9 @@ class LLMPipelineService:
                         visit_id=visit_id,
                         turn_id=turn_id,
                         field_type=field_name,
+                        field_value=field_value,
                         content=trace.get("content", ""),
+                        turn_text=trace.get("turn_text", ""),
                         start_char=trace.get("start_char"),
                         end_char=trace.get("end_char"),
                         confidence=trace.get("confidence", 0.8),
@@ -925,7 +1040,7 @@ class LLMPipelineService:
         }
         
         if save_evidence and visit_id:
-            self._save_evidence_spans(extraction_result, visit_id)
+            self._save_evidence_spans(extraction_result, visit_id, result)
             self._save_emr_record(result, visit_id)
         
         return result
@@ -1151,8 +1266,12 @@ class LLMPipelineService:
             result = self._parse_role_annotation_response(user_response, segment)
             
             all_annotated_texts = context.get("all_annotated_texts", [])
+            all_evidence_traces = context.get("all_evidence_traces", [])
+            
             if result.get("annotated_text"):
                 all_annotated_texts.append(result["annotated_text"])
+            if result.get("evidence_traces"):
+                all_evidence_traces.extend(result["evidence_traces"])
             
             next_stage = None
             next_prompt = None
@@ -1180,6 +1299,7 @@ class LLMPipelineService:
                 "next_description": next_description,
                 "context_update": {
                     "all_annotated_texts": all_annotated_texts,
+                    "all_evidence_traces": all_evidence_traces,
                     "role_mapping": {**context.get("role_mapping", {}), **result.get("role_mapping", {})}
                 }
             }
@@ -1208,7 +1328,8 @@ class LLMPipelineService:
                 all_annotated_texts = context.get("all_annotated_texts", [])
                 normalized_text = "\n\n".join(all_annotated_texts) if all_annotated_texts else "\n\n".join([self._format_segment(s) for s in segments])
             
-            result = self._parse_extraction_response(user_response, [])
+            all_evidence_traces = context.get("all_evidence_traces", [])
+            result = self._parse_extraction_response(user_response, all_evidence_traces)
             
             return {
                 "result": result,

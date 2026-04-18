@@ -1,5 +1,253 @@
 # 完成状态记录
 
+## 2026-04-18 证据溯源优化：最终病历内容关联
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 模型字段扩展 | ✅ 完成 | EvidenceSpan添加field_value字段 |
+| 最终病历保存 | ✅ 完成 | 保存证据时同时保存对应的最终病历内容 |
+| 证据溯源面板 | ✅ 完成 | 显示最终病历列 |
+| 字段证据卡片 | ✅ 完成 | 显示最终病历内容 |
+
+### 修改文件
+
+1. **backend/models/evidence.py**
+   - 新增 `field_value` 字段：存储最终病历内容
+
+2. **backend/services/llm_pipeline_service.py**
+   - 修改 `_save_evidence_spans()`：添加emr_result参数，保存field_value
+
+3. **backend/api/emr.py**
+   - 修改 `get_evidence_by_visit()`：返回field_value字段
+
+4. **frontend/js/emr.js**
+   - 修改 `buildEvidenceHtml()`：显示最终病历内容
+   - 修改 `showEvidence()`：证据面板添加最终病历列
+
+5. **frontend/css/style.css**
+   - 新增 `.evidence-final-value` 样式
+   - 新增 `.evidence-value-cell` 样式
+   - 新增 `.evidence-turn-cell` 样式
+
+### 证据溯源表格结构
+
+| 列名 | 说明 |
+|------|------|
+| 字段类型 | 病历字段（主诉、现病史等） |
+| 最终病历 | 生成的病历内容 |
+| 标注片段 | LLM从原始转写中标注的相关片段 |
+| 原始转写 | ASR转写的完整文本 |
+| 说话人 | spk0/spk1等 |
+| 轮次 | 对话轮次索引 |
+| 置信度 | 计算后的置信度 |
+
+### 数据关系说明
+
+```
+原始转写文本（完整）
+    │
+    ├── LLM标注 ──→ 标注片段（原始转写的子集）
+    │                    │
+    │                    └── 多个标注片段综合 ──→ 最终病历
+    │
+    └── 完整保存用于溯源
+```
+
+**示例**：
+
+| 原始转写 | 标注片段 | 最终病历 |
+|----------|----------|----------|
+| 医生，我这几天一直头疼，特别是早上起来的时候 | 我这几天一直头疼 | 头痛3天，晨起明显 |
+
+### 数据流程
+
+```
+ASR转写文本 → LLM标注证据 → 抽取字段 → 生成病历 → 保存证据(含field_value)
+                                                    ↓
+                                            前端显示证据溯源
+```
+
+### 数据库迁移
+
+由于使用 `create_all` 方式，新字段不会自动添加到现有表。需要手动执行：
+
+```sql
+ALTER TABLE evidence_spans ADD COLUMN field_value TEXT;
+```
+
+**注意**：现有证据记录的 `field_value` 为空，需重新生成病历才能填充。
+
+### 调试模式证据传递修复
+
+调试模式下 `evidence_traces` 未正确传递到后续阶段，已修复：
+
+| 阶段 | 修改内容 |
+|------|----------|
+| role_annotation | 将 `evidence_traces` 保存到 context |
+| field_extraction | 从 context 获取 `evidence_traces` 并传递 |
+
+**数据流**：
+```
+role_annotation → evidence_traces → context
+                                        ↓
+field_extraction ← 从context获取 ← evidence_traces
+                                        ↓
+emr_generation → 保存证据到数据库
+```
+
+### 标注片段跨多轮次匹配修复
+
+当LLM将多个轮次内容合并到一个标签时（如 `<现病史>大概三天了， [spk1]: 有时候会恶心</现病史>`），需要匹配多个turn：
+
+| 修改前 | 修改后 |
+|--------|--------|
+| 只匹配单个turn | 检测标注片段中的说话人标记，匹配所有相关turn |
+| `turn_text` 为单个turn | `turn_text` 合并所有匹配的turn文本 |
+
+**示例**：
+
+| 标注片段 | 匹配的turn_text |
+|----------|-----------------|
+| `大概三天了， [spk1]: 有时候会恶心` | `[spk1]: 大概三天了，\n[spk1]: 有时候会恶心` |
+
+### turn_text字段保存到数据库
+
+`turn_text` 原来只在内存中传递，未保存到数据库，导致表格显示不完整。
+
+**修改**：
+
+1. **模型**：`EvidenceSpan` 添加 `turn_text` 字段
+2. **保存**：`_save_evidence_spans()` 保存 `turn_text`
+3. **API**：优先返回保存的 `turn_text`，回退到关联查询
+
+**数据库迁移**：
+
+```sql
+ALTER TABLE evidence_spans ADD COLUMN turn_text TEXT;
+```
+
+---
+
+## 2026-04-18 证据溯源优化：转写文本与置信度计算
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 转写文本显示 | ✅ 完成 | 证据溯源中显示原始转写文本 |
+| 置信度计算 | ✅ 完成 | 基于内容匹配、角色匹配、ASR置信度计算 |
+| 前端展示优化 | ✅ 完成 | 重新设计证据卡片样式，显示更多信息 |
+
+### 修改文件
+
+1. **backend/services/llm_pipeline_service.py**
+   - 新增 `FIELD_EXPECTED_ROLE`：定义各字段期望的说话人角色
+   - 新增 `_calculate_evidence_confidence()`：置信度计算方法
+   - 修改 `_extract_evidence_traces()`：添加turn_text和置信度计算
+   - 修改 `_attach_evidence_traces()`：传递turn_text字段
+
+2. **frontend/js/emr.js**
+   - 修改 `buildEvidenceHtml()`：显示标注内容和原始转写
+   - 修改 `showEvidence()`：证据面板添加原始转写列
+
+3. **frontend/css/style.css**
+   - 重构 `.evidence-traces` 样式
+   - 新增 `.evidence-header`、`.evidence-detail`、`.evidence-turn-text` 样式
+
+### 置信度计算逻辑
+
+置信度由以下因素加权计算：
+
+| 因素 | 权重范围 | 说明 |
+|------|----------|------|
+| 基础置信度 | 0.5 | 起始值 |
+| 内容匹配度 | +0.0~+0.3 | 证据内容与原始转写的相似程度 |
+| 角色匹配度 | +0.2/-0.1 | 说话人角色与字段期望角色是否匹配 |
+| ASR置信度 | +0.0~+0.1 | 转写置信度（如有） |
+
+**最终置信度范围**：0.1 ~ 1.0
+
+### 证据显示格式
+
+每个证据卡片包含：
+
+- **说话人**：spk0/spk1等
+- **轮次**：对话轮次索引
+- **置信度**：计算后的置信度百分比
+- **标注内容**：LLM标注的证据内容
+- **原始转写**：对应的ASR转写文本
+
+---
+
+## 2026-04-18 病历证据溯源、编辑与打印功能
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 证据溯源显示 | ✅ 完成 | 显示每个字段的证据来源，包含说话人、轮次、置信度 |
+| 证据溯源面板 | ✅ 完成 | 独立面板展示所有证据，支持展开/隐藏 |
+| 病历编辑功能 | ✅ 完成 | 支持编辑病历内容，保存为新版本 |
+| 病历打印功能 | ✅ 完成 | 生成适合打印的格式，隐藏非必要元素 |
+| 后端API扩展 | ✅ 完成 | 新增证据查询API和病历更新API |
+
+### 修改文件
+
+1. **backend/api/emr.py**
+   - 新增 `UpdateEMRRequest` 模型：病历更新请求
+   - 新增 `UpdateEMRResponse` 模型：病历更新响应
+   - 新增 `PUT /api/emr/record/{visit_id}`：更新病历记录，创建新版本
+   - 新增 `GET /api/emr/evidence/{visit_id}`：获取证据溯源数据
+
+2. **frontend/emr.html**
+   - 新增工具栏：包含编辑、保存、取消、打印、证据溯源按钮
+   - 新增证据溯源面板 `evidencePanel`
+   - 为病历内容区域添加ID `emrContent`
+
+3. **frontend/js/emr.js**
+   - 新增 `loadEvidenceData()`：加载证据数据
+   - 新增 `showEvidence()`/`hideEvidence()`：显示/隐藏证据面板
+   - 新增 `buildEvidenceHtml()`：构建证据溯源HTML
+   - 新增 `enterEditMode()`/`exitEditMode()`：进入/退出编辑模式
+   - 新增 `makeSectionEditable()`：将内容转为可编辑状态
+   - 新增 `saveEMREdits()`：保存编辑后的病历
+   - 新增 `printEMR()`：打印病历功能
+
+4. **frontend/css/style.css**
+   - 新增 `.emr-toolbar`：工具栏样式
+   - 新增 `.evidence-panel`：证据面板样式
+   - 新增 `.evidence-table`：证据表格样式
+   - 新增 `.evidence-traces`：字段内证据显示样式
+   - 新增 `.edit-textarea`：编辑文本框样式
+   - 新增 `@media print`：打印样式
+
+### 功能说明
+
+**证据溯源**：
+
+- 每个病历字段下方显示证据来源
+- 证据来源包含：说话人、证据内容、轮次索引、置信度
+- 独立面板可查看所有证据的汇总表格
+- 点击"显示证据溯源"按钮切换面板显示
+
+**病历编辑**：
+
+- 点击"编辑病历"进入编辑模式
+- 所有文本区域转为可编辑的文本框
+- 点击"保存修改"保存为新版本（record_type: user_edited）
+- 点击"取消编辑"放弃修改
+
+**病历打印**：
+
+- 点击"打印病历"打开打印预览窗口
+- 打印格式优化：隐藏工具栏、证据溯源、置信度等
+- 使用宋体字体，符合医疗文档规范
+- 包含就诊记录ID和打印时间
+
+---
+
 ## 2026-04-18 前端调试模式优化
 
 ### 已完成
