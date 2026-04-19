@@ -1148,16 +1148,31 @@ class LLMPipelineService:
             if section in emr_result and section in extraction_result:
                 for field_name, field_data in extraction_result[section].items():
                     if isinstance(field_data, dict) and "evidence_traces" in field_data:
+                        evidence_traces = field_data["evidence_traces"]
+                        field_confidence = self._calculate_field_confidence(evidence_traces)
+                        
                         if field_name in emr_result[section]:
                             if isinstance(emr_result[section][field_name], str):
                                 emr_result[section][field_name] = {
                                     "value": emr_result[section][field_name],
-                                    "evidence_traces": field_data["evidence_traces"]
+                                    "evidence_traces": evidence_traces,
+                                    "confidence": field_confidence
                                 }
                             else:
-                                emr_result[section][field_name]["evidence_traces"] = field_data["evidence_traces"]
+                                emr_result[section][field_name]["evidence_traces"] = evidence_traces
+                                emr_result[section][field_name]["confidence"] = field_confidence
         
         return emr_result
+    
+    def _calculate_field_confidence(self, evidence_traces: List[Dict[str, Any]]) -> float:
+        if not evidence_traces:
+            return 0.0
+        
+        confidences = [t.get("confidence", 0.5) for t in evidence_traces if t.get("confidence") is not None]
+        if not confidences:
+            return 0.5
+        
+        return round(sum(confidences) / len(confidences), 3)
     
     def _save_evidence_spans(
         self,
@@ -1270,6 +1285,10 @@ class LLMPipelineService:
             except:
                 return []
         
+        def get_field_confidence(section: str, field: str) -> float:
+            traces = get_evidence_traces(section, field)
+            return self._calculate_field_confidence(traces)
+        
         chief_complaint = get_value("subjective", "chief_complaint")
         history = get_value("subjective", "history_present_illness")
         past_history = get_value("subjective", "past_history")
@@ -1306,44 +1325,52 @@ class LLMPipelineService:
                 "text": "\n".join(subjective_text),
                 "chief_complaint": {
                     "value": chief_complaint,
-                    "evidence_traces": get_evidence_traces("subjective", "chief_complaint")
+                    "evidence_traces": get_evidence_traces("subjective", "chief_complaint"),
+                    "confidence": get_field_confidence("subjective", "chief_complaint")
                 },
                 "history_present_illness": {
                     "value": history,
-                    "evidence_traces": get_evidence_traces("subjective", "history_present_illness")
+                    "evidence_traces": get_evidence_traces("subjective", "history_present_illness"),
+                    "confidence": get_field_confidence("subjective", "history_present_illness")
                 },
                 "past_history": {
                     "value": past_history,
-                    "evidence_traces": get_evidence_traces("subjective", "past_history")
+                    "evidence_traces": get_evidence_traces("subjective", "past_history"),
+                    "confidence": get_field_confidence("subjective", "past_history")
                 }
             },
             "objective": {
                 "text": "\n".join(objective_text),
                 "physical_examination": {
                     "value": physical,
-                    "evidence_traces": get_evidence_traces("objective", "physical_examination")
+                    "evidence_traces": get_evidence_traces("objective", "physical_examination"),
+                    "confidence": get_field_confidence("objective", "physical_examination")
                 },
                 "auxiliary_examination": {
                     "value": auxiliary,
-                    "evidence_traces": get_evidence_traces("objective", "auxiliary_examination")
+                    "evidence_traces": get_evidence_traces("objective", "auxiliary_examination"),
+                    "confidence": get_field_confidence("objective", "auxiliary_examination")
                 }
             },
             "assessment": {
                 "text": assessment_text,
                 "diagnosis": {
                     "value": diagnosis,
-                    "evidence_traces": get_evidence_traces("assessment", "diagnosis")
+                    "evidence_traces": get_evidence_traces("assessment", "diagnosis"),
+                    "confidence": get_field_confidence("assessment", "diagnosis")
                 }
             },
             "plan": {
                 "text": "\n".join(plan_text),
                 "treatment": {
                     "value": treatment,
-                    "evidence_traces": get_evidence_traces("plan", "treatment")
+                    "evidence_traces": get_evidence_traces("plan", "treatment"),
+                    "confidence": get_field_confidence("plan", "treatment")
                 },
                 "advice": {
                     "value": advice,
-                    "evidence_traces": get_evidence_traces("plan", "advice")
+                    "evidence_traces": get_evidence_traces("plan", "advice"),
+                    "confidence": get_field_confidence("plan", "advice")
                 }
             }
         }
