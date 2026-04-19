@@ -68,7 +68,7 @@ MedicalAssisstant/
 │   │   ├── visit.py           # 就诊记录模型
 │   │   ├── llm_config.py      # LLM配置模型
 │   │   ├── evidence.py        # 证据片段模型
-│   │   ├── term.py            # 规范化术语模型
+│   │   ├── term.py            # 规范化术语模型（含UMLS编码）
 │   │   ├── extracted_item.py  # 抽取要素模型
 │   │   └── emr_record.py      # 病历记录模型
 │   ├── services/              # 业务服务
@@ -81,9 +81,13 @@ MedicalAssisstant/
 │   │   │   ├── base.py        # LLM基类
 │   │   │   ├── openai_provider.py # OpenAI兼容接口
 │   │   │   └── prompt_templates.py # 提示词模板
+│   │   ├── umls/              # UMLS医学术语库模块
+│   │   │   ├── __init__.py    # 数据类定义
+│   │   │   ├── umls_client.py # UMLS API客户端
+│   │   │   └── term_cache.py  # 术语缓存管理
 │   │   ├── llm_service.py     # LLM服务
 │   │   ├── evidence_service.py # 证据选择服务
-│   │   ├── terminology_service.py # 术语规范化服务
+│   │   ├── terminology_service.py # 术语规范化服务（集成UMLS）
 │   │   ├── extraction_service.py # 病历要素抽取服务
 │   │   ├── emr_generation_service.py # 病历生成服务
 │   │   └── medical_record_pipeline.py # 病历生成流水线
@@ -99,6 +103,8 @@ MedicalAssisstant/
 │   └── hotwords_medical.txt    # 医疗热词表（80+术语）
 ├── data/                       # 数据存储（运行时创建）
 │   ├── audio/                  # 上传的音频文件
+│   ├── cache/                  # 缓存数据
+│   │   └── umls/               # UMLS术语缓存
 │   └── database/               # SQLite数据库文件
 ├── docs/                       # 文档
 │   ├── architecture.md         # 架构文档 (本文件)
@@ -590,29 +596,82 @@ graph LR
 
 ```mermaid
 graph TB
-    A[口语化术语] --> B[术语识别]
-    B --> C[本体库检索]
-    C --> D{匹配结果}
-    D -->|精确匹配| E[直接映射]
-    D -->|模糊匹配| F[相似度排序]
-    D -->|无匹配| G[保留原词]
-    E --> H[标准术语]
-    F --> H
-    G --> H
+    A[口语化术语] --> B[本地字典匹配]
+    B --> C{置信度 >= 0.95?}
+    C -->|是| D[返回字典结果]
+    C -->|否| E{UMLS可用?}
+    E -->|是| F[UMLS中文查询]
+    F --> G{有候选?}
+    G -->|否| H[UMLS英文查询]
+    H --> G
+    G -->|是| I[返回候选列表]
+    G -->|否| J{LLM可用?}
+    E -->|否| J
+    J -->|是| K[LLM规范化]
+    J -->|否| L[保留原词]
+    K --> M[返回LLM结果]
+    I --> N{候选数 > 1?}
+    N -->|是| O[LLM选择最佳候选]
+    N -->|否| P[使用首个候选]
+    O --> Q[返回UMLS结果]
+    P --> Q
+    D --> R[输出规范化结果]
+    L --> R
+    M --> R
+    Q --> R
     
     style A fill:#e1f5ff
-    style H fill:#e8f5e9
-    style C fill:#fff3e0
+    style R fill:#e8f5e9
+    style F fill:#fff3e0
+    style K fill:#fce4ec
 ```
+
+**术语规范化流程说明：**
+
+| 步骤 | 处理方式 | 置信度范围 | 说明 |
+| --- | --- | --- | --- |
+| 1. 字典匹配 | 本地字典精确匹配 | 0.95-1.0 | 优先使用本地字典，速度快 |
+| 2. UMLS查询 | 在线API查询 | 0.70-0.95 | 字典未匹配时查询UMLS |
+| 3. LLM规范化 | 大模型推理 | 0.50-0.70 | UMLS无结果时使用LLM |
+| 4. 保留原词 | 无匹配 | < 0.50 | 所有方法都失败时保留原词 |
+
+**UMLS集成特性：**
+
+| 特性 | 说明 |
+| --- | --- |
+| 混合查询 | 优先中文查询，无结果时翻译后英文查询 |
+| 候选选择 | 多候选时由LLM选择最佳匹配 |
+| 编码获取 | 自动获取ICD-10/SNOMED-CT编码 |
+| 缓存机制 | 本地缓存查询结果，减少API调用 |
+| 降级策略 | UMLS不可用时自动降级到LLM方案 |
 
 **本体库选择：**
 
-| 本体库       | 覆盖范围  | 语言  | 访问方式  |
-| --------- | ----- | --- | ----- |
-| UMLS      | 全面    | 多语言 | 需申请许可 |
-| SNOMED CT | 临床术语  | 多语言 | 需申请许可 |
-| ICD-10    | 诊断编码  | 多语言 | 公开可用  |
-| MeSH      | 医学主题词 | 英文  | 公开可用  |
+| 本体库 | 覆盖范围 | 语言 | 访问方式 | 当前状态 |
+| --- | --- | --- | --- | --- |
+| UMLS | 全面 | 多语言 | 需申请许可 | ✅ 已集成 |
+| SNOMED CT | 临床术语 | 多语言 | 需申请许可 | 🔜 预留接口 |
+| ICD-10 | 诊断编码 | 多语言 | 公开可用 | ✅ 通过UMLS获取 |
+| MeSH | 医学主题词 | 英文 | 公开可用 | 🔜 预留接口 |
+
+**规范化输出格式：**
+
+```json
+{
+  "original_term": "头疼",
+  "normalized_term": "头痛",
+  "term_type": "symptom",
+  "code": "R51",
+  "code_system": "ICD-10-CM",
+  "source": "UMLS",
+  "confidence": 0.95,
+  "cui": "C0018681",
+  "candidates": [
+    {"term": "头痛", "cui": "C0018681", "score": 0.95},
+    {"term": "偏头痛", "cui": "C0149931", "score": 0.72}
+  ]
+}
+```
 
 #### 3.4 结构化生成模块
 
@@ -832,7 +891,7 @@ graph TB
 | ASR后处理 | 医疗术语纠错 | 规则匹配 | ✅ 已实现 |
 | 文本规范化 | 标点、说话人映射 | 正则表达式 | ✅ 已实现 |
 | 证据选择模块 | 从对话中检索相关片段 | 触发词匹配 + LLM | ✅ 已实现 |
-| 术语规范化模块 | 口语化表述映射到专业术语 | 字典匹配 + LLM | ✅ 已实现 |
+| 术语规范化模块 | 口语化表述映射到专业术语 | 字典匹配 + UMLS + LLM | ✅ 已实现 |
 | 病历要素抽取模块 | 从证据中抽取SOAP要素 | 规则抽取 + LLM | ✅ 已实现 |
 | 病历生成模块 | 基于抽取结果生成结构化病历 | 模板生成 + LLM | ✅ 已实现 |
 | 验证模块 | 检查病历与对话一致性 | 规则检查 / LLM 验证 | 📋 待实现 |

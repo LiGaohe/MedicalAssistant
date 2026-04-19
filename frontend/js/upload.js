@@ -8,6 +8,13 @@ document.addEventListener('DOMContentLoaded', function() {
     const progressText = document.getElementById('progressText');
     const visitDate = document.getElementById('visitDate');
     
+    const textDebugBtn = document.getElementById('textDebugBtn');
+    const textDebugModal = document.getElementById('textDebugModal');
+    const closeTextDebugModal = document.getElementById('closeTextDebugModal');
+    const dialogTextInput = document.getElementById('dialogTextInput');
+    const startTextDebug = document.getElementById('startTextDebug');
+    const cancelTextDebug = document.getElementById('cancelTextDebug');
+    
     const today = new Date().toISOString().split('T')[0];
     visitDate.value = today;
     
@@ -95,6 +102,57 @@ document.addEventListener('DOMContentLoaded', function() {
             alert('上传失败: ' + error.message);
             uploadBtn.disabled = false;
             progressSection.style.display = 'none';
+        }
+    });
+    
+    textDebugBtn.addEventListener('click', () => {
+        textDebugModal.style.display = 'block';
+    });
+    
+    closeTextDebugModal.addEventListener('click', () => {
+        textDebugModal.style.display = 'none';
+    });
+    
+    cancelTextDebug.addEventListener('click', () => {
+        textDebugModal.style.display = 'none';
+    });
+    
+    window.addEventListener('click', (e) => {
+        if (e.target === textDebugModal) {
+            textDebugModal.style.display = 'none';
+        }
+    });
+    
+    startTextDebug.addEventListener('click', async () => {
+        const text = dialogTextInput.value.trim();
+        if (!text) {
+            alert('请输入对话文本');
+            return;
+        }
+        
+        try {
+            startTextDebug.disabled = true;
+            startTextDebug.textContent = '创建中...';
+            
+            const response = await fetch('/api/emr/debug/create-from-text', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ dialog_text: text })
+            });
+            
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                textDebugModal.style.display = 'none';
+                window.location.href = `/static/emr.html?visit_id=${result.visit_id}`;
+            } else {
+                alert('创建失败: ' + (result.error || '未知错误'));
+            }
+        } catch (error) {
+            alert('请求失败: ' + error.message);
+        } finally {
+            startTextDebug.disabled = false;
+            startTextDebug.textContent = '开始调试';
         }
     });
 });

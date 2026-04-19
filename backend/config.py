@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     LLM_DEBUG_MODE: bool = False
     LLM_SEGMENT_TURNS: int = 10
     
+    UMLS_API_KEY: str = ""
+    UMLS_ENABLED: bool = False
+    UMLS_CACHE_DIR: str = "data/cache/umls"
+    UMLS_CACHE_TTL_HOURS: int = 168
+    UMLS_REQUEST_TIMEOUT: int = 30
+    UMLS_MAX_RETRIES: int = 3
+    UMLS_RATE_LIMIT_DELAY: float = 0.1
+    
     class Config:
         env_file = ".env"
         case_sensitive = True

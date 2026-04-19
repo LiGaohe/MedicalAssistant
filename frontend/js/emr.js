@@ -252,6 +252,8 @@ document.addEventListener('DOMContentLoaded', async function() {
         html += '<ul>';
         traces.forEach((trace, idx) => {
             const speaker = trace.speaker || '未知';
+            const originalSpeaker = trace.original_speaker || speaker;
+            const speakerCorrected = trace.speaker_corrected || false;
             const content = trace.content || '';
             const turnText = trace.turn_text || '';
             const turnIndex = trace.turn_index !== undefined ? trace.turn_index : '-';
@@ -260,10 +262,18 @@ document.addEventListener('DOMContentLoaded', async function() {
             const displayContent = content.length > 80 ? content.substring(0, 80) + '...' : content;
             const displayTurnText = turnText.length > 100 ? turnText.substring(0, 100) + '...' : turnText;
             
+            let speakerHtml = `<span class="evidence-speaker">${speaker}</span>`;
+            if (speakerCorrected) {
+                speakerHtml = `<span class="evidence-speaker corrected">${speaker}</span>
+                    <span class="evidence-speaker-correction" title="说话人已纠正">
+                        (原: ${originalSpeaker} → 纠正后: ${speaker})
+                    </span>`;
+            }
+            
             html += `
                 <li class="evidence-item" data-turn-index="${turnIndex}">
                     <div class="evidence-header">
-                        <span class="evidence-speaker">${speaker}</span>
+                        ${speakerHtml}
                         <span class="evidence-turn">轮次 ${turnIndex}</span>
                         <span class="evidence-confidence">置信度: ${confidence}%</span>
                     </div>

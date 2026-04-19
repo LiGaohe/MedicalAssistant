@@ -290,6 +290,98 @@ async def set_debug_mode(
     }
 
 
+class CreateFromTextRequest(BaseModel):
+    dialog_text: str
+
+
+class CreateFromTextResponse(BaseModel):
+    status: str
+    visit_id: Optional[str] = None
+    turn_count: Optional[int] = None
+    error: Optional[str] = None
+
+
+@router.post("/debug/create-from-text", response_model=CreateFromTextResponse)
+async def create_from_text(
+    request: CreateFromTextRequest,
+    db: Session = Depends(get_db)
+):
+    logger.info("从文本创建临时对话记录")
+    
+    import re
+    import uuid
+    from datetime import datetime
+    from ..models import Visit, TranscriptTurn
+    
+    try:
+        visit_id = f"text_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        
+        visit = Visit(
+            visit_id=visit_id,
+            patient_name="文本输入测试",
+            visit_date=datetime.now().strftime("%Y-%m-%d"),
+            audio_path=f"text_input://{visit_id}",
+            status="pending"
+        )
+        db.add(visit)
+        
+        lines = request.dialog_text.strip().split('\n')
+        turns = []
+        turn_index = 0
+        
+        speaker_pattern = r'^\[([^\]]+)\]:\s*(.+)$'
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            match = re.match(speaker_pattern, line)
+            if match:
+                speaker = match.group(1)
+                text = match.group(2)
+            else:
+                speaker = "unknown"
+                text = line
+            
+            turn = TranscriptTurn(
+                visit_id=visit_id,
+                turn_index=turn_index,
+                speaker=speaker,
+                text=text,
+                start_ms=turn_index * 5000,
+                end_ms=(turn_index + 1) * 5000,
+                confidence=1.0
+            )
+            turns.append(turn)
+            turn_index += 1
+        
+        if not turns:
+            return CreateFromTextResponse(
+                status="failed",
+                error="没有找到有效的对话内容"
+            )
+        
+        db.add_all(turns)
+        db.commit()
+        
+        logger.info(f"创建临时对话记录成功: visit_id={visit_id}, turns={len(turns)}")
+        
+        return CreateFromTextResponse(
+            status="success",
+            visit_id=visit_id,
+            turn_count=len(turns)
+        )
+        
+    except Exception as e:
+        logger.error(f"创建临时对话记录失败: {str(e)}", exc_info=True)
+        db.rollback()
+        return CreateFromTextResponse(
+            status="failed",
+            error=str(e)
+        )
+
+
 class DebugPromptsResponse(BaseModel):
     visit_id: str
     stages: List[Dict[str, Any]]

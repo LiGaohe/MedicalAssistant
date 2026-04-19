@@ -46,6 +46,8 @@ class FunASREngine(ASRBase):
             "vad_model": self.vad_model,
             "punc_model": self.punc_model,
             "device": self.device,
+            "beam_search": True,
+            "timestamp_extractor": True,
         }
         
         if self.vad_kwargs:
@@ -76,12 +78,15 @@ class FunASREngine(ASRBase):
         result, inference_time = self._measure_time(
             self._model.generate,
             input=str(audio_path),
+            batch_size_s=300,
+            batch_type="seg",
             **kwargs
         )
         
         text = ""
         segments = []
         speaker_segments = []
+        overall_confidence = 0.0
         
         if result and len(result) > 0:
             text = result[0].get("text", "")
@@ -91,19 +96,30 @@ class FunASREngine(ASRBase):
             elif "sentences" in result[0]:
                 segments = result[0]["sentences"]
             
+            confidences = []
             if self.spk_model and segments:
                 for sentence in segments:
                     if "spk" in sentence:
                         start_ms = sentence.get("start", 0)
                         end_ms = sentence.get("end", 0)
                         
+                        seg_confidence = self._extract_segment_confidence(sentence)
+                        confidences.append(seg_confidence)
+                        
                         speaker_segments.append({
                             "speaker": f"spk{sentence.get('spk', 0)}",
                             "text": sentence.get("text", ""),
                             "start_ms": start_ms,
                             "end_ms": end_ms,
-                            "confidence": sentence.get("confidence", 0.0)
+                            "confidence": seg_confidence
                         })
+            elif segments:
+                for sentence in segments:
+                    seg_confidence = self._extract_segment_confidence(sentence)
+                    confidences.append(seg_confidence)
+            
+            if confidences:
+                overall_confidence = sum(confidences) / len(confidences)
         
         return ASRResult(
             text=text,
@@ -113,7 +129,17 @@ class FunASREngine(ASRBase):
             model_name=self.model_name,
             segments=segments,
             speaker_segments=speaker_segments,
+            confidence=overall_confidence,
         )
+    
+    def _extract_segment_confidence(self, sentence: Dict[str, Any]) -> float:
+        if "confidence" in sentence:
+            return float(sentence["confidence"])
+        elif "word_conf" in sentence:
+            word_confs = sentence["word_conf"]
+            if word_confs:
+                return sum(word_confs) / len(word_confs)
+        return 0.0
     
     def _get_audio_duration(self, audio_path: Path) -> float:
         try:

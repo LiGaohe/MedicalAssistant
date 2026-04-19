@@ -1,4 +1,16 @@
-"""说话人角色识别模块"""
+"""
+说话人角色识别模块
+
+.. deprecated::
+    该模块已废弃，不再推荐使用。
+    
+    废弃原因：
+    1. 基于词表的语义推断覆盖不全，无法处理所有医疗对话场景
+    2. 说话人分离(spk0/spk1)与医生/患者角色无固定对应关系
+    3. 角色识别已改由LLM在处理流程中完成，语义理解更准确
+    
+    该模块将在未来版本中移除。
+"""
 from dataclasses import dataclass
 from enum import Enum
 from typing import List, Dict, Optional, Tuple

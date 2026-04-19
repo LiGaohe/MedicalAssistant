@@ -12,6 +12,7 @@ class TranscriptTurn(Base):
     visit_id = Column(String, ForeignKey("visits.visit_id"), nullable=False)
     turn_index = Column(Integer, nullable=False)
     speaker = Column(String, nullable=False)
+    corrected_speaker = Column(String, nullable=True)
     text = Column(String, nullable=False)
     original_text = Column(String, nullable=True)
     corrected_text = Column(String, nullable=True)

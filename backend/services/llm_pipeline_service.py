@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from ..models import TranscriptTurn, EMRRecord, EvidenceSpan
 from .llm.llm_service import LLMService
 from .llm.prompts import PromptManager
+from .evaluation_service import EMREvaluationService
 from ..config import settings
 from ..utils.logger import logger
 
@@ -31,7 +32,72 @@ class LLMPipelineService:
         self.prompt_manager = PromptManager()
         self.debug_mode = settings.LLM_DEBUG_MODE
         self.segment_turns = settings.LLM_SEGMENT_TURNS
+        self.evaluation_service = EMREvaluationService()
         logger.info(f"LLMPipelineService initialized, debug_mode={self.debug_mode}")
+    
+    def _extract_json_from_response(self, response_text: str, stage_name: str = "") -> Optional[Dict[str, Any]]:
+        """
+        从LLM响应中提取JSON对象。
+        
+        处理以下情况：
+        1. 标准JSON：{...}
+        2. 缺少开头 { 的JSON：直接以 "key": 开头
+        3. 缺少开头 {" 的JSON：直接以 key": 开头
+        4. 末尾有多余文字
+        5. 开头有多余文字
+        
+        Args:
+            response_text: LLM返回的原始文本
+            stage_name: 阶段名称，用于日志
+        
+        Returns:
+            解析后的字典，失败返回None
+        """
+        response_text = response_text.strip()
+        
+        json_start = response_text.find("{")
+        json_end = response_text.rfind("}")
+        
+        if json_start != -1 and json_end > json_start:
+            json_str = response_text[json_start:json_end + 1]
+            try:
+                return json.loads(json_str)
+            except json.JSONDecodeError as e:
+                logger.warning(f"标准JSON解析失败: {e}")
+        
+        if json_end != -1:
+            potential_json = response_text[:json_end + 1]
+        else:
+            potential_json = response_text
+        
+        if potential_json.startswith('"'):
+            json_str = "{" + potential_json
+            try:
+                return json.loads(json_str)
+            except json.JSONDecodeError as e:
+                logger.warning(f"补全开头大括号后解析失败: {e}")
+        
+        if potential_json and potential_json[0].isalpha():
+            colon_pos = potential_json.find('":')
+            if colon_pos != -1:
+                key = potential_json[:colon_pos]
+                rest = potential_json[colon_pos + 1:]
+                json_str = '{"' + key + '"' + rest
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"补全开头引号和大括号后解析失败: {e}")
+        
+        if potential_json and potential_json[0].isalpha():
+            json_str = "{" + potential_json
+            try:
+                return json.loads(json_str)
+            except json.JSONDecodeError as e:
+                logger.warning(f"仅补全大括号后解析失败: {e}")
+        
+        logger.error(f"无法从响应中提取有效JSON，阶段: {stage_name}")
+        logger.error(f"响应内容前500字符: {response_text[:500]}")
+        return None
         
     def process_transcript(
         self,
@@ -93,6 +159,9 @@ class LLMPipelineService:
             save_evidence
         )
         
+        dialogue_text = "\n".join(f"[{t.speaker}]: {t.text}" for t in turns)
+        self._run_evaluation(dialogue_text, emr_result)
+        
         return {
             "status": "completed",
             "role_mapping": all_role_mappings,
@@ -102,6 +171,41 @@ class LLMPipelineService:
             "emr_result": emr_result,
             "evidence_traces": all_evidence_traces
         }
+    
+    def _run_evaluation(self, dialogue_text: str, emr_result: Dict[str, Any]):
+        """运行评估并输出结果到日志"""
+        try:
+            matched = self.evaluation_service.find_matching_test_sample(dialogue_text)
+            
+            if not matched:
+                logger.info("未匹配到测试数据集样本，跳过评估")
+                return
+            
+            sample_id = matched["sample_id"]
+            test_sample = matched["test_sample"]
+            
+            if not test_sample:
+                logger.info(f"样本 {sample_id} 无标注数据，跳过评估")
+                return
+            
+            eval_result = self.evaluation_service.evaluate(emr_result, test_sample)
+            
+            if eval_result:
+                ground_truth_diagnosis = test_sample.get("diagnosis", "")
+                ground_truth_symptoms = self.evaluation_service._extract_symptoms_from_test(test_sample)
+                predicted_diagnosis = self.evaluation_service._extract_diagnosis_from_emr(emr_result)
+                predicted_symptoms = self.evaluation_service._extract_symptoms_from_emr(emr_result)
+                
+                self.evaluation_service.log_evaluation_result(
+                    sample_id=sample_id,
+                    result=eval_result,
+                    ground_truth_diagnosis=ground_truth_diagnosis,
+                    predicted_diagnosis=predicted_diagnosis,
+                    ground_truth_symptoms=ground_truth_symptoms,
+                    predicted_symptoms=predicted_symptoms
+                )
+        except Exception as e:
+            logger.warning(f"评估过程出错: {e}")
     
     def _segment_turns(self, turns: List[TranscriptTurn]) -> List[List[TranscriptTurn]]:
         segments = []
@@ -150,18 +254,55 @@ class LLMPipelineService:
         return self._parse_role_annotation_response(response_text, segment)
     
     def _format_segment(self, segment: List[TranscriptTurn]) -> str:
+        """
+        格式化对话轮次为文本。
+        
+        根据对话是否有有效的说话人标签，采用不同的格式：
+        - 有标签：[spk0]: 对话内容
+        - 无标签：直接输出对话内容（让LLM判断说话人）
+        """
+        has_valid_speakers = False
+        for turn in segment:
+            if turn.speaker and turn.speaker not in ("unknown", "", "None"):
+                has_valid_speakers = True
+                break
+        
         lines = []
         for turn in segment:
-            lines.append(f"[{turn.speaker}]: {turn.text}")
+            if has_valid_speakers:
+                lines.append(f"[{turn.speaker}]: {turn.text}")
+            else:
+                lines.append(turn.text)
+        
         return "\n".join(lines)
     
     def _build_role_annotation_prompt(self, transcript: str) -> str:
-        return f"""你是一个医疗对话分析专家。请分析以下医患对话，完成两个任务：
+        return f"""你是一个医疗对话分析专家。请分析以下医患对话，完成三个任务：
 
-## 任务1：角色识别
-判断每个说话人(spk0, spk1等)是医生还是患者。
+## 任务1：说话人识别与纠错
 
-## 任务2：证据标注
+首先判断对话格式：
+- **有说话人标签**：如 [spk0]、[speaker_1]、[A] 等格式
+- **无说话人标签**：纯文本对话，没有方括号标记
+
+### 情况A：有说话人标签
+语音识别的说话人分离可能存在错误。请检查每句话的内容，判断说话人标签是否正确。
+- 医生特征：提问、检查、诊断、开药、给出建议、使用专业术语
+- 患者特征：描述症状、回答问题、表达感受、询问病情
+
+如果发现某句话的说话人标签与内容不符，请在纠正后的对话中使用正确的说话人标签。
+
+### 情况B：无说话人标签
+请根据对话内容为每句话分配说话人标签：
+- 使用 [医生] 和 [患者] 作为标签
+- 根据内容特征判断每句话的说话人
+
+## 任务2：角色映射
+列出对话中出现的所有说话人标签，并判断每个是医生还是患者。
+- 如果进行了说话人纠错，这里的映射应基于纠正后的标签
+- 如果原始对话无标签，则映射 [医生] -> doctor, [患者] -> patient
+
+## 任务3：证据标注
 用XML标签标注可能与病历生成相关的证据字段。可用的标签包括：
 - <主诉>...</主诉>：患者描述的主要症状或问题
 - <现病史>...</现病史>：症状的详细发展过程
@@ -173,51 +314,181 @@ class LLMPipelineService:
 - <医嘱>...</医嘱>：医生的建议和嘱咐
 - <其他>...</其他>：其他相关信息
 
-## 对话内容
+## 原始对话内容
 {transcript}
 
 ## 输出格式
 请按以下JSON格式输出：
 {{
+  "dialog_format": "labeled或unlabeled",
+  "speakers_found": ["说话人标签列表"],
+  "corrections": [
+    {{"turn_index": 0, "original_speaker": "原标签", "corrected_speaker": "纠正后标签", "reason": "纠正原因"}}
+  ],
   "role_mapping": {{
-    "spk0": "doctor或patient",
-    "spk1": "doctor或patient"
+    "说话人标签1": "doctor或patient",
+    "说话人标签2": "doctor或patient"
   }},
-  "annotated_text": "标注后的对话文本，保留原始格式，在证据周围添加XML标签"
+  "annotated_text": "处理后的对话文本（纠正说话人或添加标签后），保留原始格式，在证据周围添加XML标签"
 }}
 
 注意：
-1. 角色识别依据：医生通常提问、检查、诊断、开药；患者通常描述症状、回答问题
-2. 证据标注要准确，不要遗漏重要信息
-3. 一段话可能包含多个证据字段
-4. 保持原始对话的完整性"""
+1. dialog_format: "labeled"表示原始对话有说话人标签，"unlabeled"表示没有
+2. corrections: 仅在有说话人标签且发现错误时填写，否则为空列表
+3. role_mapping: 列出所有说话人标签及其角色，不要遗漏
+4. annotated_text: 
+   - 有标签时：使用纠正后的说话人标签
+   - 无标签时：为每句话添加[医生]或[患者]标签
+5. 证据标注要准确，不要遗漏重要信息
+6. 一段话可能包含多个证据字段"""
     
     def _parse_role_annotation_response(
         self,
         response_text: str,
         segment: List[TranscriptTurn]
     ) -> Dict[str, Any]:
-        try:
-            json_start = response_text.find("{")
-            json_end = response_text.rfind("}") + 1
-            if json_start != -1 and json_end > json_start:
-                json_str = response_text[json_start:json_end]
-                result = json.loads(json_str)
-                
-                role_mapping = result.get("role_mapping", {})
-                annotated_text = result.get("annotated_text", "")
-                
-                evidence_traces = self._extract_evidence_traces(annotated_text, segment, role_mapping)
-                
-                return {
-                    "role_mapping": role_mapping,
-                    "annotated_text": annotated_text,
-                    "evidence_traces": evidence_traces
-                }
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON解析失败: {e}")
+        result = self._extract_json_from_response(response_text, "角色标注")
+        
+        if result:
+            dialog_format = result.get("dialog_format", "labeled")
+            role_mapping = result.get("role_mapping", {})
+            annotated_text = result.get("annotated_text", "")
+            corrections = result.get("corrections", [])
+            speakers_found = result.get("speakers_found", [])
+            
+            if dialog_format == "unlabeled":
+                correction_map = self._assign_speakers_from_unlabeled(
+                    annotated_text, segment, role_mapping
+                )
+            else:
+                correction_map = self._apply_speaker_corrections(corrections, segment)
+            
+            evidence_traces = self._extract_evidence_traces(
+                annotated_text, segment, role_mapping, correction_map
+            )
+            
+            return {
+                "dialog_format": dialog_format,
+                "role_mapping": role_mapping,
+                "annotated_text": annotated_text,
+                "evidence_traces": evidence_traces,
+                "speaker_corrections": corrections,
+                "speakers_found": speakers_found
+            }
         
         return self._fallback_role_annotation(segment)
+    
+    def _assign_speakers_from_unlabeled(
+        self,
+        annotated_text: str,
+        segment: List[TranscriptTurn],
+        role_mapping: Dict[str, str]
+    ) -> Dict[int, str]:
+        """
+        从无标签对话的标注结果中提取说话人分配。
+        
+        当原始对话没有说话人标签时，LLM会为每句话分配[医生]或[患者]标签。
+        此方法解析标注文本，更新数据库中的说话人信息。
+        
+        Args:
+            annotated_text: LLM标注后的文本（包含[医生]/[患者]标签）
+            segment: 对话轮次列表
+            role_mapping: 角色映射（如 {"医生": "doctor", "患者": "patient"}）
+        
+        Returns:
+            说话人分配映射 {turn_index: assigned_speaker}
+        """
+        assignment_map = {}
+        
+        speaker_pattern = r'\[(医生|患者)\]:\s*([^\n\[]+)'
+        matches = re.findall(speaker_pattern, annotated_text)
+        
+        if not matches:
+            logger.warning("无标签对话解析失败：未找到[医生]/[患者]标签")
+            return assignment_map
+        
+        turn_index = 0
+        for speaker_label, text_content in matches:
+            text_content = text_content.strip()
+            if not text_content:
+                continue
+            
+            if turn_index < len(segment):
+                turn = segment[turn_index]
+                turn.corrected_speaker = speaker_label
+                assignment_map[turn_index] = speaker_label
+                logger.info(
+                    f"无标签对话分配说话人: turn_index={turn_index}, "
+                    f"speaker={speaker_label}, text={text_content[:30]}..."
+                )
+                turn_index += 1
+        
+        if self.db and assignment_map:
+            try:
+                self.db.commit()
+                logger.info(f"已保存 {len(assignment_map)} 条说话人分配记录")
+            except Exception as e:
+                self.db.rollback()
+                logger.error(f"保存说话人分配记录失败: {e}")
+        
+        return assignment_map
+    
+    def _apply_speaker_corrections(
+        self,
+        corrections: List[Dict[str, Any]],
+        segment: List[TranscriptTurn]
+    ) -> Dict[int, str]:
+        """
+        应用说话人纠正到对话轮次。
+        
+        Args:
+            corrections: 纠正列表，每项包含 turn_index, original_speaker, corrected_speaker, reason
+            segment: 对话轮次列表
+        
+        Returns:
+            纠正映射字典 {turn_index: corrected_speaker}
+        """
+        correction_map = {}
+        
+        if not corrections:
+            return correction_map
+        
+        turn_by_index = {turn.turn_index: turn for turn in segment}
+        
+        for correction in corrections:
+            turn_index = correction.get("turn_index")
+            original_speaker = correction.get("original_speaker")
+            corrected_speaker = correction.get("corrected_speaker")
+            reason = correction.get("reason", "")
+            
+            if turn_index is None or corrected_speaker is None:
+                continue
+            
+            turn = turn_by_index.get(turn_index)
+            if turn:
+                if turn.speaker == original_speaker:
+                    turn.corrected_speaker = corrected_speaker
+                    correction_map[turn_index] = corrected_speaker
+                    logger.info(
+                        f"说话人纠正: turn_index={turn_index}, "
+                        f"{original_speaker} -> {corrected_speaker}, "
+                        f"原因: {reason}"
+                    )
+                else:
+                    logger.warning(
+                        f"说话人纠正跳过: turn_index={turn_index}, "
+                        f"原始说话人不匹配 (期望={original_speaker}, 实际={turn.speaker})"
+                    )
+        
+        if self.db and correction_map:
+            try:
+                self.db.commit()
+                logger.info(f"已保存 {len(correction_map)} 条说话人纠正记录")
+            except Exception as e:
+                self.db.rollback()
+                logger.error(f"保存说话人纠正记录失败: {e}")
+        
+        return correction_map
     
     FIELD_EXPECTED_ROLE = {
         "chief_complaint": "patient",
@@ -240,27 +511,38 @@ class LLMPipelineService:
         role_mapping: Dict[str, str],
         turn_confidence: float = 1.0
     ) -> float:
+        """
+        计算证据溯源的置信度。
+        
+        置信度 = 基础分(0.5) + 内容匹配分(0~0.4) + ASR置信度分(0~0.1)
+        
+        注意：角色匹配维度已移除，因为说话人分离(spk0/spk1)与医生/患者角色无固定对应关系，
+        且基于词表的语义推断覆盖不全、可靠性差。
+        
+        Args:
+            content: 提取的证据内容
+            turn_text: 原始转写文本
+            field_type: 字段类型（如 chief_complaint, diagnosis 等）
+            speaker: 说话人标识（如 spk0, spk1）
+            role_mapping: 角色映射字典（保留参数以兼容现有调用）
+            turn_confidence: ASR识别的置信度（0.0~1.0）
+        
+        Returns:
+            置信度值（0.1~1.0）
+        """
         confidence = 0.5
         
         if turn_text and content:
             if content in turn_text:
-                confidence += 0.3
+                confidence += 0.4
             elif turn_text in content:
-                confidence += 0.25
+                confidence += 0.35
             else:
                 content_words = set(content)
                 turn_words = set(turn_text)
                 if content_words and turn_words:
                     overlap = len(content_words & turn_words) / len(content_words)
-                    confidence += overlap * 0.2
-        
-        expected_role = self.FIELD_EXPECTED_ROLE.get(field_type)
-        if expected_role and speaker and role_mapping:
-            actual_role = role_mapping.get(speaker)
-            if actual_role == expected_role:
-                confidence += 0.2
-            elif actual_role and actual_role != expected_role:
-                confidence -= 0.1
+                    confidence += overlap * 0.3
         
         if turn_confidence and turn_confidence > 0:
             confidence += turn_confidence * 0.1
@@ -271,19 +553,56 @@ class LLMPipelineService:
         self,
         annotated_text: str,
         segment: List[TranscriptTurn],
-        role_mapping: Dict[str, str] = None
+        role_mapping: Dict[str, str] = None,
+        correction_map: Dict[int, str] = None
     ) -> List[Dict[str, Any]]:
+        """
+        从标注文本中提取证据溯源信息。
+        
+        Args:
+            annotated_text: LLM标注后的文本
+            segment: 对话轮次列表
+            role_mapping: 角色映射字典（如 {"spk0": "doctor", "spk1": "patient"} 或 {"医生": "doctor", "患者": "patient"}）
+            correction_map: 说话人纠正映射 {turn_index: corrected_speaker}
+        
+        Returns:
+            证据溯源列表
+        """
         evidence_traces = []
+        correction_map = correction_map or {}
+        role_mapping = role_mapping or {}
         
         tag_pattern = r'<(主诉|现病史|既往史|体格检查|辅助检查|诊断|治疗|医嘱|其他)>(.*?)</\1>'
         
         turn_by_speaker = {}
         turn_by_index = {}
         for turn in segment:
-            if turn.speaker not in turn_by_speaker:
-                turn_by_speaker[turn.speaker] = []
-            turn_by_speaker[turn.speaker].append(turn)
+            effective_speaker = correction_map.get(turn.turn_index, turn.speaker)
+            if effective_speaker not in turn_by_speaker:
+                turn_by_speaker[effective_speaker] = []
+            turn_by_speaker[effective_speaker].append(turn)
             turn_by_index[turn.turn_index] = turn
+        
+        role_to_speaker = {}
+        for spk, role in role_mapping.items():
+            if role not in role_to_speaker:
+                role_to_speaker[role] = []
+            role_to_speaker[role].append(spk)
+        
+        def find_turns_by_role_label(label: str) -> List[TranscriptTurn]:
+            if label in turn_by_speaker:
+                return turn_by_speaker[label]
+            
+            if label in ["医生", "doctor"]:
+                for spk in role_to_speaker.get("doctor", []):
+                    if spk in turn_by_speaker:
+                        return turn_by_speaker[spk]
+            elif label in ["患者", "patient"]:
+                for spk in role_to_speaker.get("patient", []):
+                    if spk in turn_by_speaker:
+                        return turn_by_speaker[spk]
+            
+            return []
         
         for match in re.finditer(tag_pattern, annotated_text, re.DOTALL):
             field_type_cn = match.group(1)
@@ -295,51 +614,55 @@ class LLMPipelineService:
             end_char = match.end()
             
             speaker = None
+            original_speaker = None
             turn_id = None
             turn_index = None
             turn_text = None
             turn_confidence = 1.0
             
-            speaker_markers = re.findall(r'\[(spk\d+)\]:\s*([^[]+)', content)
+            speaker_markers = re.findall(r'\[(spk\d+|医生|患者)\]:\s*([^[]+)', content)
             
             if speaker_markers:
                 matched_turns = []
                 matched_speakers = set()
                 
-                first_marker_pos = content.find('[spk')
+                first_marker_pos = content.find('[')
                 if first_marker_pos > 0:
                     prefix_text = content[:first_marker_pos].strip().rstrip('，。,')
                     if prefix_text:
                         first_speaker = speaker_markers[0][0] if speaker_markers else None
-                        if first_speaker and first_speaker in turn_by_speaker:
-                            for turn in turn_by_speaker[first_speaker]:
+                        if first_speaker:
+                            candidate_turns = find_turns_by_role_label(first_speaker)
+                            for turn in candidate_turns:
                                 if prefix_text in turn.text:
                                     if turn.turn_index not in [t.turn_index for t in matched_turns]:
                                         matched_turns.append(turn)
                                         matched_speakers.add(first_speaker)
                                     break
                 
-                for spk, text_part in speaker_markers:
+                for spk_label, text_part in speaker_markers:
                     text_part = text_part.strip().rstrip('，。,')
                     if not text_part:
                         continue
-                    matched_speakers.add(spk)
+                    matched_speakers.add(spk_label)
                     
-                    if spk in turn_by_speaker:
-                        for turn in turn_by_speaker[spk]:
-                            if text_part in turn.text or turn.text in text_part:
-                                if turn.turn_index not in [t.turn_index for t in matched_turns]:
-                                    matched_turns.append(turn)
-                                break
+                    candidate_turns = find_turns_by_role_label(spk_label)
+                    for turn in candidate_turns:
+                        if text_part in turn.text or turn.text in text_part:
+                            if turn.turn_index not in [t.turn_index for t in matched_turns]:
+                                matched_turns.append(turn)
+                            break
                 
                 matched_turns.sort(key=lambda t: t.turn_index)
                 
                 if matched_turns:
-                    speaker = matched_turns[0].speaker
-                    turn_id = matched_turns[0].turn_id
-                    turn_index = matched_turns[0].turn_index
-                    turn_text = "\n".join([f"[{t.speaker}]: {t.text}" for t in matched_turns])
-                    turn_confidence = matched_turns[0].confidence if matched_turns[0].confidence else 1.0
+                    first_turn = matched_turns[0]
+                    speaker = correction_map.get(first_turn.turn_index, first_turn.speaker)
+                    original_speaker = first_turn.speaker
+                    turn_id = first_turn.turn_id
+                    turn_index = first_turn.turn_index
+                    turn_text = "\n".join([f"[{correction_map.get(t.turn_index, t.speaker)}]: {t.text}" for t in matched_turns])
+                    turn_confidence = first_turn.confidence if first_turn.confidence else 1.0
             else:
                 line_start = annotated_text.rfind('\n', 0, start_char) + 1
                 line_end = annotated_text.find('\n', start_char)
@@ -348,25 +671,27 @@ class LLMPipelineService:
                 
                 line = annotated_text[line_start:line_end]
                 
-                speaker_match = re.match(r'\[(spk\d+)\]', line)
+                speaker_match = re.match(r'\[(spk\d+|医生|患者)\]', line)
                 if speaker_match:
                     speaker = speaker_match.group(1)
                     
-                    if speaker in turn_by_speaker:
-                        for turn in turn_by_speaker[speaker]:
-                            if content in turn.text or turn.text in content:
-                                turn_id = turn.turn_id
-                                turn_index = turn.turn_index
-                                turn_text = turn.text
-                                turn_confidence = turn.confidence if turn.confidence else 1.0
-                                break
-                        
-                        if turn_id is None and turn_by_speaker[speaker]:
-                            turn = turn_by_speaker[speaker][0]
+                    candidate_turns = find_turns_by_role_label(speaker)
+                    for turn in candidate_turns:
+                        if content in turn.text or turn.text in content:
+                            original_speaker = turn.speaker
                             turn_id = turn.turn_id
                             turn_index = turn.turn_index
                             turn_text = turn.text
                             turn_confidence = turn.confidence if turn.confidence else 1.0
+                            break
+                    
+                    if turn_id is None and candidate_turns:
+                        turn = candidate_turns[0]
+                        original_speaker = turn.speaker
+                        turn_id = turn.turn_id
+                        turn_index = turn.turn_index
+                        turn_text = turn.text
+                        turn_confidence = turn.confidence if turn.confidence else 1.0
             
             confidence = self._calculate_evidence_confidence(
                 content, turn_text, field_type, speaker, role_mapping or {}, turn_confidence
@@ -377,6 +702,8 @@ class LLMPipelineService:
                 "field_type_cn": field_type_cn,
                 "content": content,
                 "speaker": speaker,
+                "original_speaker": original_speaker,
+                "speaker_corrected": original_speaker is not None and original_speaker != speaker,
                 "turn_id": turn_id,
                 "turn_index": turn_index,
                 "turn_text": turn_text,
@@ -512,18 +839,13 @@ class LLMPipelineService:
         response_text: str,
         original_text: str
     ) -> Dict[str, Any]:
-        try:
-            json_start = response_text.find("{")
-            json_end = response_text.rfind("}") + 1
-            if json_start != -1 and json_end > json_start:
-                json_str = response_text[json_start:json_end]
-                result = json.loads(json_str)
-                return {
-                    "normalized_text": result.get("normalized_text", original_text),
-                    "terms": result.get("terms", [])
-                }
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON解析失败: {e}")
+        result = self._extract_json_from_response(response_text, "术语规范化")
+        
+        if result:
+            return {
+                "normalized_text": result.get("normalized_text", original_text),
+                "terms": result.get("terms", [])
+            }
         
         return {"normalized_text": original_text, "terms": []}
     
@@ -641,18 +963,11 @@ class LLMPipelineService:
         response_text: str,
         evidence_traces: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        try:
-            json_start = response_text.find("{")
-            json_end = response_text.rfind("}") + 1
-            if json_start != -1 and json_end > json_start:
-                json_str = response_text[json_start:json_end]
-                result = json.loads(json_str)
-                
-                result = self._attach_evidence_traces(result, evidence_traces)
-                
-                return result
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON解析失败: {e}")
+        result = self._extract_json_from_response(response_text, "字段抽取")
+        
+        if result:
+            result = self._attach_evidence_traces(result, evidence_traces)
+            return result
         
         return self._fallback_extraction("", evidence_traces)
     
@@ -811,22 +1126,16 @@ class LLMPipelineService:
         visit_id: str = None,
         save_evidence: bool = True
     ) -> Dict[str, Any]:
-        try:
-            json_start = response_text.find("{")
-            json_end = response_text.rfind("}") + 1
-            if json_start != -1 and json_end > json_start:
-                json_str = response_text[json_start:json_end]
-                result = json.loads(json_str)
-                
-                result = self._attach_evidence_to_emr(result, extraction_result)
-                
-                if save_evidence and visit_id:
-                    self._save_evidence_spans(extraction_result, visit_id, result)
-                    self._save_emr_record(result, visit_id)
-                
-                return result
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON解析失败: {e}")
+        result = self._extract_json_from_response(response_text, "病历生成")
+        
+        if result:
+            result = self._attach_evidence_to_emr(result, extraction_result)
+            
+            if save_evidence and visit_id:
+                self._save_evidence_spans(extraction_result, visit_id, result)
+                self._save_emr_record(result, visit_id)
+            
+            return result
         
         return self._template_emr_generation(extraction_result, visit_id, save_evidence)
     
