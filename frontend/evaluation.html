@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>病历质量评估 - 中文门诊病历生成系统</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>病历质量评估</h1>
+        
+        <div class="info-section">
+            <p><strong>病历记录:</strong> <span id="recordId"></span></p>
+            <p><strong>就诊记录:</strong> <span id="visitId"></span></p>
+        </div>
+        
+        <div class="actions">
+            <button id="runEvaluation" class="btn-primary">开始评估</button>
+            <button id="debugEvaluation" class="btn-warning">调试模式</button>
+            <button id="backToEMR" class="btn-secondary">返回病历</button>
+        </div>
+        
+        <div class="loading" id="loadingSection" style="display: none;">
+            <p>正在进行评估，请稍候...</p>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+        </div>
+        
+        <div id="debugModal" class="modal" style="display: none;">
+            <div class="modal-content modal-large">
+                <div class="modal-header">
+                    <h2>调试模式 - 手动输入评估结果</h2>
+                    <span class="close" id="closeDebugModal">&times;</span>
+                </div>
+                <div class="modal-body">
+                    <div id="debugStages">
+                        <div class="debug-stage-selector">
+                            <label>选择阶段：</label>
+                            <select id="stageSelect"></select>
+                        </div>
+                        <div class="debug-prompt">
+                            <h4>提示词：</h4>
+                            <pre id="promptContent"></pre>
+                        </div>
+                        <div class="debug-input">
+                            <h4>请输入大模型返回结果：</h4>
+                            <textarea id="userResponse" rows="15" placeholder="请输入JSON格式的返回结果..."></textarea>
+                        </div>
+                        <div class="debug-actions">
+                            <button id="submitStage" class="btn-primary">提交并继续</button>
+                            <button id="skipStage" class="btn-secondary">跳过此阶段</button>
+                        </div>
+                    </div>
+                    <div id="debugResult" style="display: none;">
+                        <h4>处理结果：</h4>
+                        <pre id="resultContent"></pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="evaluationSection" style="display: none;">
+            <div class="evaluation-summary">
+                <h2>评估概览</h2>
+                <div class="score-overview">
+                    <div class="score-main">
+                        <div class="score-circle" id="overallScoreCircle">
+                            <span class="score-value" id="overallScore">--</span>
+                            <span class="score-label">综合得分</span>
+                        </div>
+                    </div>
+                    <div class="score-details">
+                        <div class="score-item">
+                            <span class="score-name">一致性</span>
+                            <div class="score-bar">
+                                <div class="score-bar-fill" id="consistencyBar"></div>
+                            </div>
+                            <span class="score-percent" id="consistencyScore">--%</span>
+                        </div>
+                        <div class="score-item">
+                            <span class="score-name">完整性</span>
+                            <div class="score-bar">
+                                <div class="score-bar-fill" id="completenessBar"></div>
+                            </div>
+                            <span class="score-percent" id="completenessScore">--%</span>
+                        </div>
+                        <div class="score-item">
+                            <span class="score-name">文档质量</span>
+                            <div class="score-bar">
+                                <div class="score-bar-fill" id="qualityBar"></div>
+                            </div>
+                            <span class="score-percent" id="qualityScore">--%</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="risk-indicator" id="riskIndicator">
+                    <span class="risk-label">安全风险:</span>
+                    <span class="risk-status" id="riskStatus">--</span>
+                </div>
+            </div>
+            
+            <div class="evaluation-tabs">
+                <button class="tab-btn active" data-tab="consistency">一致性评估</button>
+                <button class="tab-btn" data-tab="completeness">完整性评估</button>
+                <button class="tab-btn" data-tab="quality">文档质量</button>
+                <button class="tab-btn" data-tab="safety">安全风险</button>
+            </div>
+            
+            <div class="tab-content" id="consistencyTab">
+                <h3>事实支持情况</h3>
+                <div class="stats-row">
+                    <div class="stat-item">
+                        <span class="stat-value" id="totalFacts">--</span>
+                        <span class="stat-label">总事实数</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-value" id="supportedFacts">--</span>
+                        <span class="stat-label">支持数</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-value" id="unsupportedFacts">--</span>
+                        <span class="stat-label">不支持数</span>
+                    </div>
+                </div>
+                <div id="factsList" class="facts-list"></div>
+                
+                <h3>内部一致性</h3>
+                <div id="conflictsList" class="conflicts-list"></div>
+            </div>
+            
+            <div class="tab-content" id="completenessTab" style="display: none;">
+                <h3>关键事实覆盖情况</h3>
+                <div class="stats-row">
+                    <div class="stat-item">
+                        <span class="stat-value" id="totalKeyFacts">--</span>
+                        <span class="stat-label">关键事实总数</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-value" id="fullCoverage">--</span>
+                        <span class="stat-label">完全覆盖</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-value" id="partialCoverage">--</span>
+                        <span class="stat-label">部分覆盖</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-value" id="noCoverage">--</span>
+                        <span class="stat-label">未覆盖</span>
+                    </div>
+                </div>
+                <div id="coverageList" class="coverage-list"></div>
+            </div>
+            
+            <div class="tab-content" id="qualityTab" style="display: none;">
+                <h3>文档质量评分</h3>
+                <div id="qualityScores" class="quality-scores"></div>
+                <div class="quality-assessment">
+                    <strong>整体评价：</strong>
+                    <span id="overallAssessment">--</span>
+                </div>
+            </div>
+            
+            <div class="tab-content" id="safetyTab" style="display: none;">
+                <h3>安全风险评估</h3>
+                <div class="safety-summary">
+                    <div class="safety-status" id="safetyStatus">
+                        <span class="safety-icon" id="safetyIcon">✓</span>
+                        <span class="safety-text" id="safetyText">未发现高风险错误</span>
+                    </div>
+                </div>
+                <div id="risksList" class="risks-list"></div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/static/js/evaluation.js"></script>
+</body>
+</html>

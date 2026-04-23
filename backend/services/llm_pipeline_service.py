@@ -7,6 +7,7 @@ from ..models import TranscriptTurn, EMRRecord, EvidenceSpan
 from .llm.llm_service import LLMService
 from .llm.prompts import PromptManager
 from .evaluation_service import EMREvaluationService
+from .validation_service import ValidationService
 from ..config import settings
 from ..utils.logger import logger
 
@@ -33,6 +34,7 @@ class LLMPipelineService:
         self.debug_mode = settings.LLM_DEBUG_MODE
         self.segment_turns = settings.LLM_SEGMENT_TURNS
         self.evaluation_service = EMREvaluationService()
+        self.validation_service = ValidationService()
         logger.info(f"LLMPipelineService initialized, debug_mode={self.debug_mode}")
     
     def _extract_json_from_response(self, response_text: str, stage_name: str = "") -> Optional[Dict[str, Any]]:
@@ -502,53 +504,6 @@ class LLMPipelineService:
         "other": None
     }
     
-    def _calculate_evidence_confidence(
-        self,
-        content: str,
-        turn_text: str,
-        field_type: str,
-        speaker: str,
-        role_mapping: Dict[str, str],
-        turn_confidence: float = 1.0
-    ) -> float:
-        """
-        计算证据溯源的置信度。
-        
-        置信度 = 基础分(0.5) + 内容匹配分(0~0.4) + ASR置信度分(0~0.1)
-        
-        注意：角色匹配维度已移除，因为说话人分离(spk0/spk1)与医生/患者角色无固定对应关系，
-        且基于词表的语义推断覆盖不全、可靠性差。
-        
-        Args:
-            content: 提取的证据内容
-            turn_text: 原始转写文本
-            field_type: 字段类型（如 chief_complaint, diagnosis 等）
-            speaker: 说话人标识（如 spk0, spk1）
-            role_mapping: 角色映射字典（保留参数以兼容现有调用）
-            turn_confidence: ASR识别的置信度（0.0~1.0）
-        
-        Returns:
-            置信度值（0.1~1.0）
-        """
-        confidence = 0.5
-        
-        if turn_text and content:
-            if content in turn_text:
-                confidence += 0.4
-            elif turn_text in content:
-                confidence += 0.35
-            else:
-                content_words = set(content)
-                turn_words = set(turn_text)
-                if content_words and turn_words:
-                    overlap = len(content_words & turn_words) / len(content_words)
-                    confidence += overlap * 0.3
-        
-        if turn_confidence and turn_confidence > 0:
-            confidence += turn_confidence * 0.1
-        
-        return min(1.0, max(0.1, confidence))
-    
     def _extract_evidence_traces(
         self,
         annotated_text: str,
@@ -618,7 +573,6 @@ class LLMPipelineService:
             turn_id = None
             turn_index = None
             turn_text = None
-            turn_confidence = 1.0
             
             speaker_markers = re.findall(r'\[(spk\d+|医生|患者)\]:\s*([^[]+)', content)
             
@@ -662,7 +616,6 @@ class LLMPipelineService:
                     turn_id = first_turn.turn_id
                     turn_index = first_turn.turn_index
                     turn_text = "\n".join([f"[{correction_map.get(t.turn_index, t.speaker)}]: {t.text}" for t in matched_turns])
-                    turn_confidence = first_turn.confidence if first_turn.confidence else 1.0
             else:
                 line_start = annotated_text.rfind('\n', 0, start_char) + 1
                 line_end = annotated_text.find('\n', start_char)
@@ -682,7 +635,6 @@ class LLMPipelineService:
                             turn_id = turn.turn_id
                             turn_index = turn.turn_index
                             turn_text = turn.text
-                            turn_confidence = turn.confidence if turn.confidence else 1.0
                             break
                     
                     if turn_id is None and candidate_turns:
@@ -691,11 +643,6 @@ class LLMPipelineService:
                         turn_id = turn.turn_id
                         turn_index = turn.turn_index
                         turn_text = turn.text
-                        turn_confidence = turn.confidence if turn.confidence else 1.0
-            
-            confidence = self._calculate_evidence_confidence(
-                content, turn_text, field_type, speaker, role_mapping or {}, turn_confidence
-            )
             
             evidence_trace = {
                 "field_type": field_type,
@@ -708,12 +655,11 @@ class LLMPipelineService:
                 "turn_index": turn_index,
                 "turn_text": turn_text,
                 "start_char": start_char,
-                "end_char": end_char,
-                "confidence": round(confidence, 3)
+                "end_char": end_char
             }
             
             evidence_traces.append(evidence_trace)
-            logger.debug(f"提取证据: {field_type_cn} - {content[:30]}... (turn_id={turn_id}, confidence={confidence:.2f})")
+            logger.debug(f"提取证据: {field_type_cn} - {content[:30]}... (turn_id={turn_id})")
         
         return evidence_traces
     
@@ -1149,30 +1095,17 @@ class LLMPipelineService:
                 for field_name, field_data in extraction_result[section].items():
                     if isinstance(field_data, dict) and "evidence_traces" in field_data:
                         evidence_traces = field_data["evidence_traces"]
-                        field_confidence = self._calculate_field_confidence(evidence_traces)
                         
                         if field_name in emr_result[section]:
                             if isinstance(emr_result[section][field_name], str):
                                 emr_result[section][field_name] = {
                                     "value": emr_result[section][field_name],
-                                    "evidence_traces": evidence_traces,
-                                    "confidence": field_confidence
+                                    "evidence_traces": evidence_traces
                                 }
                             else:
                                 emr_result[section][field_name]["evidence_traces"] = evidence_traces
-                                emr_result[section][field_name]["confidence"] = field_confidence
         
         return emr_result
-    
-    def _calculate_field_confidence(self, evidence_traces: List[Dict[str, Any]]) -> float:
-        if not evidence_traces:
-            return 0.0
-        
-        confidences = [t.get("confidence", 0.5) for t in evidence_traces if t.get("confidence") is not None]
-        if not confidences:
-            return 0.5
-        
-        return round(sum(confidences) / len(confidences), 3)
     
     def _save_evidence_spans(
         self,
@@ -1241,6 +1174,9 @@ class LLMPipelineService:
         visit_id: str
     ) -> Optional[EMRRecord]:
         try:
+            validation_result = self.validation_service.validate(emr_result)
+            validation_errors = self.validation_service.to_dict(validation_result)
+            
             max_version = self.db.query(EMRRecord).filter(
                 EMRRecord.visit_id == visit_id
             ).count()
@@ -1253,13 +1189,13 @@ class LLMPipelineService:
                 record_type="llm_generated",
                 emr_json=emr_result,
                 evidence_mapping=None,
-                validation_errors=None
+                validation_errors=validation_errors
             )
             
             self.db.add(emr_record)
             self.db.commit()
             
-            logger.info(f"保存病历记录成功: visit_id={visit_id}, version={new_version}")
+            logger.info(f"保存病历记录成功: visit_id={visit_id}, version={new_version}, 验证评分: {validation_result.score:.2%}")
             return emr_record
             
         except Exception as e:
@@ -1284,10 +1220,6 @@ class LLMPipelineService:
                 return extraction_result.get(section, {}).get(field, {}).get("evidence_traces", [])
             except:
                 return []
-        
-        def get_field_confidence(section: str, field: str) -> float:
-            traces = get_evidence_traces(section, field)
-            return self._calculate_field_confidence(traces)
         
         chief_complaint = get_value("subjective", "chief_complaint")
         history = get_value("subjective", "history_present_illness")
@@ -1325,52 +1257,44 @@ class LLMPipelineService:
                 "text": "\n".join(subjective_text),
                 "chief_complaint": {
                     "value": chief_complaint,
-                    "evidence_traces": get_evidence_traces("subjective", "chief_complaint"),
-                    "confidence": get_field_confidence("subjective", "chief_complaint")
+                    "evidence_traces": get_evidence_traces("subjective", "chief_complaint")
                 },
                 "history_present_illness": {
                     "value": history,
-                    "evidence_traces": get_evidence_traces("subjective", "history_present_illness"),
-                    "confidence": get_field_confidence("subjective", "history_present_illness")
+                    "evidence_traces": get_evidence_traces("subjective", "history_present_illness")
                 },
                 "past_history": {
                     "value": past_history,
-                    "evidence_traces": get_evidence_traces("subjective", "past_history"),
-                    "confidence": get_field_confidence("subjective", "past_history")
+                    "evidence_traces": get_evidence_traces("subjective", "past_history")
                 }
             },
             "objective": {
                 "text": "\n".join(objective_text),
                 "physical_examination": {
                     "value": physical,
-                    "evidence_traces": get_evidence_traces("objective", "physical_examination"),
-                    "confidence": get_field_confidence("objective", "physical_examination")
+                    "evidence_traces": get_evidence_traces("objective", "physical_examination")
                 },
                 "auxiliary_examination": {
                     "value": auxiliary,
-                    "evidence_traces": get_evidence_traces("objective", "auxiliary_examination"),
-                    "confidence": get_field_confidence("objective", "auxiliary_examination")
+                    "evidence_traces": get_evidence_traces("objective", "auxiliary_examination")
                 }
             },
             "assessment": {
                 "text": assessment_text,
                 "diagnosis": {
                     "value": diagnosis,
-                    "evidence_traces": get_evidence_traces("assessment", "diagnosis"),
-                    "confidence": get_field_confidence("assessment", "diagnosis")
+                    "evidence_traces": get_evidence_traces("assessment", "diagnosis")
                 }
             },
             "plan": {
                 "text": "\n".join(plan_text),
                 "treatment": {
                     "value": treatment,
-                    "evidence_traces": get_evidence_traces("plan", "treatment"),
-                    "confidence": get_field_confidence("plan", "treatment")
+                    "evidence_traces": get_evidence_traces("plan", "treatment")
                 },
                 "advice": {
                     "value": advice,
-                    "evidence_traces": get_evidence_traces("plan", "advice"),
-                    "confidence": get_field_confidence("plan", "advice")
+                    "evidence_traces": get_evidence_traces("plan", "advice")
                 }
             }
         }

@@ -1,5 +1,108 @@
 # 完成状态记录
 
+## 2026-04-21 病历验证模块
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 验证服务实现 | ✅ 完成 | 实现必填字段验证和医学术语验证 |
+| 集成到病历生成流程 | ✅ 完成 | 生成后自动验证，结果保存到validation_errors |
+| 日志输出 | ✅ 完成 | 验证结果输出到日志 |
+
+### 新增文件
+
+1. **backend/services/validation_service.py**
+   - `ValidationService` 验证服务类
+   - 必填字段完整性验证
+   - 医学术语正确性验证（字典+UMLS）
+   - 验证评分和质量等级计算
+
+### 修改文件
+
+1. **backend/services/llm_pipeline_service.py**
+   - 导入 `ValidationService`
+   - 在 `__init__` 中初始化验证服务
+   - 修改 `_save_emr_record()`：保存前进行验证
+
+2. **backend/services/emr_generation_service.py**
+   - 导入 `ValidationService`
+   - 在 `__init__` 中初始化验证服务
+   - 修改 `save_emr()`：保存前进行验证
+
+### 验证功能说明
+
+**必填字段验证**：
+
+| 字段 | 是否必填 | 最小长度 |
+|------|----------|----------|
+| 主诉 | 是 | 2 |
+| 现病史 | 是 | 10 |
+| 既往史 | 否 | - |
+| 体格检查 | 否 | - |
+| 辅助检查 | 否 | - |
+| 诊断 | 是 | 2 |
+| 鉴别诊断 | 否 | - |
+| 治疗方案 | 是 | 2 |
+| 医嘱 | 否 | - |
+
+**医学术语验证**：
+
+- 使用 `config/medical_terms.json` 进行本地字典匹配
+- 支持症状、药物、诊断、检查等术语类型
+- 验证结果包含置信度和规范化术语
+
+**验证评分**：
+
+- 字段完整性占 70%
+- 术语正确性占 30%
+- 质量等级：优秀(≥90%)、良好(≥80%)、合格(≥60%)、需改进(≥40%)、不合格(<40%)
+
+### 验证结果示例
+
+```
+============================================================
+病历验证结果
+============================================================
+【总体评分】100.00% (优秀)
+【验证状态】✓ 通过
+【字段完整性】
+  ✓ 主诉: 完整
+  ✓ 现病史: 完整
+  ✓ 诊断: 完整
+  ✓ 治疗方案: 完整
+【术语验证】
+  ✓ 头痛 -> 头痛 (置信度: 1.00)
+  ✓ 高血压 -> 高血压 (置信度: 1.00)
+【警告】
+  △ [既往史] 可选字段为空
+  △ [辅助检查] 可选字段为空
+============================================================
+```
+
+### 数据库字段
+
+验证结果保存到 `emr_records.validation_errors` 字段，JSON格式：
+
+```json
+{
+  "is_valid": true,
+  "score": 1.0,
+  "errors": [],
+  "warnings": ["[既往史] 可选字段为空"],
+  "summary": {
+    "total_score": 1.0,
+    "quality_level": "优秀",
+    "field_completeness": {...},
+    "term_validation": {...}
+  },
+  "field_validations": {...},
+  "term_validations": [...]
+}
+```
+
+---
+
 ## 2026-04-19 病历生成评估测试工具
 
 ### 已完成
@@ -1562,3 +1665,293 @@ tail -f data/logs/app_20260417.log
 2. **日志轮转**：支持日志文件按大小或时间轮转
 3. **结构化日志**：支持JSON格式日志，方便日志分析
 4. **性能监控**：记录各阶段处理时间，方便性能优化
+
+---
+
+## 2026-04-21 基于LLM的病历质量评估系统
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 评估记录模型 | ✅ 完成 | 创建EvaluationRecord模型存储评估结果 |
+| 评估提示词模板 | ✅ 完成 | 添加6个结构化评估提示词 |
+| 评估器基类 | ✅ 完成 | 提供LLM调用和JSON解析通用功能 |
+| 一致性评估服务 | ✅ 完成 | 评估事实支持率和内部一致性 |
+| 完整性评估服务 | ✅ 完成 | 评估关键事实召回率 |
+| 文档质量评估服务 | ✅ 完成 | 评估五维度文档质量 |
+| 安全风险评估服务 | ✅ 完成 | 检测高风险错误 |
+| 评估流水线 | ✅ 完成 | 协调四层评估流程 |
+| 评估API路由 | ✅ 完成 | 提供5个REST API端点 |
+
+### 新增文件
+
+1. **backend/models/evaluation_record.py**
+   - `EvaluationRecord` 评估记录模型
+   - 存储四层评估结果和综合得分
+
+2. **backend/services/evaluation/__init__.py**
+   - 评估模块入口
+   - 导出所有评估服务类
+
+3. **backend/services/evaluation/base.py**
+   - `BaseEvaluator` 评估器基类
+   - 提供LLM调用、JSON解析、病历格式化等通用功能
+
+4. **backend/services/evaluation/consistency.py**
+   - `ConsistencyEvaluator` 一致性评估服务
+   - 评估事实支持率、幻觉率、内部一致性
+
+5. **backend/services/evaluation/completeness.py**
+   - `CompletenessEvaluator` 完整性评估服务
+   - 提取关键事实清单，计算召回率
+
+6. **backend/services/evaluation/quality.py**
+   - `QualityEvaluator` 文档质量评估服务
+   - 评估结构完整性、组织清晰度、表达简洁性、可理解性、术语规范性
+
+7. **backend/services/evaluation/safety.py**
+   - `SafetyEvaluator` 安全风险评估服务
+   - 检测重大幻觉、重大遗漏、否定反转等高风险错误
+
+8. **backend/services/evaluation/evaluation_pipeline.py**
+   - `EvaluationPipeline` 评估流水线
+   - 协调四层评估，计算综合得分，保存评估结果
+
+9. **backend/api/evaluation.py**
+   - 评估API路由
+   - 提供5个REST API端点
+
+### 修改文件
+
+1. **backend/models/emr_record.py**
+   - 添加 `evaluations` 关系
+
+2. **backend/models/__init__.py**
+   - 导出 `EvaluationRecord`
+
+3. **backend/services/llm/prompts.py**
+   - 添加6个评估提示词模板：
+     - `consistency_check`：一致性评估
+     - `internal_consistency_check`：内部一致性检查
+     - `key_fact_extraction`：关键事实提取
+     - `completeness_check`：完整性评估
+     - `document_quality_check`：文档质量评估
+     - `safety_risk_check`：安全风险评估
+
+4. **backend/api/__init__.py**
+   - 导出 `evaluation_router`
+
+5. **backend/main.py**
+   - 注册 `evaluation_router`
+
+### 评估层级结构
+
+```
+第一层：一致性评估 (Consistency)
+├── 事实支持率
+├── 幻觉率
+└── 内部一致性
+
+第二层：完整性评估 (Completeness)
+├── 关键事实召回率
+└── 加权遗漏率
+
+第三层：文档质量评估 (Quality)
+├── 结构完整性 (0-2分)
+├── 组织清晰度 (0-2分)
+├── 表达简洁性 (0-2分)
+├── 可理解性 (0-2分)
+└── 术语规范性 (0-2分)
+
+第四层：安全风险评估 (Safety)
+├── 重大幻觉检测
+├── 重大遗漏检测
+├── 否定反转检测
+├── 部位侧别错误检测
+├── 时间错误检测
+└── 章节错放检测
+```
+
+### API端点
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/evaluation/evaluate` | POST | 评估单份病历 |
+| `/api/evaluation/batch` | POST | 批量评估病历 |
+| `/api/evaluation/result/{id}` | GET | 获取评估结果 |
+| `/api/evaluation/list/{record_id}` | GET | 获取病历的评估历史 |
+| `/api/evaluation/statistics` | GET | 获取评估统计数据 |
+
+### 综合得分计算
+
+```
+综合得分 = 0.35 × 一致性 × 内部一致性
+         + 0.30 × 完整性召回率
+         + 0.20 × 文档质量得分
+         - 安全扣分
+```
+
+### 设计原则
+
+| 原则 | 说明 |
+|------|------|
+| 结构化二值判断 | 所有评估问题设计为"是/否"或有限选项 |
+| 对话为证据源 | 所有判断基于原始对话，而非参考病历 |
+| 分层独立评估 | 四层评估独立进行，每层输出结构化结果 |
+| 可追溯性 | 每个判断结果附带LLM的推理过程和证据文本 |
+
+### 数据库迁移
+
+数据库使用自动迁移机制，启动服务时会自动创建 `evaluation_records` 表。
+
+已更新 `backend/database.py` 的 `init_db()` 函数，包含 `EvaluationRecord` 模型。
+
+---
+
+## 2026-04-22 前端评估展示
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 评估页面HTML | ✅ 完成 | 创建evaluation.html评估结果展示页面 |
+| 评估页面JS | ✅ 完成 | 创建evaluation.js处理评估逻辑 |
+| 评估样式CSS | ✅ 完成 | 添加评估相关样式 |
+| 病历页面集成 | ✅ 完成 | 在emr.html添加评估按钮 |
+| API返回record_id | ✅ 完成 | 更新status API返回latest_record_id |
+
+### 新增文件
+
+1. **frontend/evaluation.html**
+   - 评估结果展示页面
+   - 包含综合得分、四层评估详情展示
+
+2. **frontend/js/evaluation.js**
+   - 评估页面交互逻辑
+   - 处理评估结果展示、标签切换
+
+### 修改文件
+
+1. **frontend/css/style.css**
+   - 添加评估相关样式（评分圆环、进度条、标签页等）
+   - 添加btn-info按钮样式
+
+2. **frontend/emr.html**
+   - 添加"质量评估"按钮
+
+3. **frontend/js/emr.js**
+   - 添加evaluateBtn按钮引用和事件处理
+   - 添加currentRecordId变量存储当前病历ID
+   - 在病历生成成功后显示评估按钮
+
+4. **backend/database.py**
+   - 在init_db()中添加EvaluationRecord模型
+
+5. **backend/services/medical_record_pipeline.py**
+   - get_processing_status()返回latest_record_id
+
+### 前端功能
+
+**评估概览**：
+
+- 综合得分圆环显示（颜色区分：绿色/橙色/红色）
+- 一致性、完整性、文档质量进度条
+- 安全风险状态指示
+
+**四层评估详情**：
+
+- 一致性评估：事实支持列表、内部矛盾检测
+- 完整性评估：关键事实覆盖情况
+- 文档质量：五维度评分
+- 安全风险：高风险问题列表
+
+### 页面导航流程
+
+```
+病历页面 (emr.html)
+    ↓ 点击"质量评估"
+评估页面 (evaluation.html)
+    ↓ 显示评估结果
+    ↓ 点击"返回病历"
+病历页面 (emr.html)
+```
+
+---
+
+## 2026-04-22 评估页面调试模式
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 调试按钮 | ✅ 完成 | 在评估页面添加调试模式按钮 |
+| 调试模态框 | ✅ 完成 | 添加调试模态框HTML |
+| 调试API | ✅ 完成 | 添加调试阶段获取和处理API |
+| 调试JS逻辑 | ✅ 完成 | 添加调试交互逻辑 |
+
+### 修改文件
+
+1. **frontend/evaluation.html**
+   - 添加"调试模式"按钮
+   - 添加调试模态框
+
+2. **frontend/js/evaluation.js**
+   - 添加调试模式事件处理
+   - 添加阶段选择和提交逻辑
+
+3. **backend/api/evaluation.py**
+   - 添加 `GET /api/evaluation/debug/prompts/{record_id}` 获取调试阶段
+   - 添加 `POST /api/evaluation/debug/process-stage` 处理调试阶段
+
+### 调试阶段
+
+评估调试模式包含6个阶段：
+
+| 阶段 | 说明 |
+|------|------|
+| consistency | 一致性评估 - 事实支持检查 |
+| internal_consistency | 一致性评估 - 内部一致性检查 |
+| key_fact_extraction | 完整性评估 - 关键事实提取 |
+| completeness | 完整性评估 - 覆盖情况检查 |
+| quality | 文档质量评估 |
+| safety | 安全风险评估 |
+
+### 使用方法
+
+1. 在评估页面点击"调试模式"按钮
+2. 选择要处理的阶段
+3. 复制提示词到大模型获取响应
+4. 将大模型返回的JSON粘贴到输入框
+5. 点击"提交并继续"处理下一阶段
+6. 完成所有阶段后自动保存评估结果
+
+### 修复记录
+
+**2026-04-22 修复前端字段名不匹配问题**
+
+问题：前端期望的字段名与大模型返回的字段名不一致，导致显示 undefined 或 0。
+
+修复内容：
+
+| 模块 | 前端期望字段 | 大模型返回字段 | 修复方式 |
+|------|-------------|---------------|---------|
+| 一致性评估 | `fact.supported` | `fact.is_supported` | 兼容两种字段名 |
+| 一致性评估 | `fact.fact_text` | `fact.fact` | 兼容两种字段名 |
+| 一致性评估 | `fact.evidence` | `fact.evidence_text` | 兼容两种字段名 |
+| 完整性评估 | `key_facts` | `coverage` | 兼容两种字段名 |
+| 完整性评估 | `fact.coverage` | `fact.coverage_status` | 兼容两种字段名 |
+| 完整性评估 | `fact.emr_content` | `fact.emr_text` | 兼容两种字段名 |
+| 文档质量 | `scores.structure` | `scores.structure_completeness` | 兼容两种字段名 |
+| 文档质量 | `score` (数字) | `score` (对象) | 处理对象格式 |
+| 安全风险 | `risk.type` | `risk.risk_type` | 兼容两种字段名 |
+| 安全风险 | `risk.original_text` | `risk.emr_content` | 兼容两种字段名 |
+| 安全风险 | `risk.suggestion` | `risk.correct_content` | 兼容两种字段名 |
+
+**2026-04-22 修复调试模式保存错误**
+
+问题：调试模式保存评估结果时，`quality_result` 被错误地赋值为安全风险评估结果。
+
+修复：在 `backend/api/evaluation.py` 的 `process_debug_stage` 函数中，将 `quality_result = result` 改为 `quality_result = request.context.get("quality_result", {})`。
+
+影响：之前通过调试模式保存的评估结果中，文档质量数据被安全风险数据覆盖。需要重新运行调试模式以保存正确的评估结果。

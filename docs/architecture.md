@@ -60,7 +60,8 @@ MedicalAssisstant/
 │   │   ├── task.py            # 任务管理 API
 │   │   ├── upload.py          # 上传 API
 │   │   ├── llm.py             # LLM 配置管理 API
-│   │   └── emr.py             # 病历生成 API
+│   │   ├── emr.py             # 病历生成 API
+│   │   └── evaluation.py      # 病历质量评估 API
 │   ├── models/                # 数据模型
 │   │   ├── __init__.py
 │   │   ├── task.py            # 任务模型
@@ -70,7 +71,8 @@ MedicalAssisstant/
 │   │   ├── evidence.py        # 证据片段模型
 │   │   ├── term.py            # 规范化术语模型（含UMLS编码）
 │   │   ├── extracted_item.py  # 抽取要素模型
-│   │   └── emr_record.py      # 病历记录模型
+│   │   ├── emr_record.py      # 病历记录模型
+│   │   └── evaluation_record.py # 评估记录模型
 │   ├── services/              # 业务服务
 │   │   ├── __init__.py
 │   │   ├── asr_service.py     # ASR 服务（封装FunASR）
@@ -90,7 +92,16 @@ MedicalAssisstant/
 │   │   ├── terminology_service.py # 术语规范化服务（集成UMLS）
 │   │   ├── extraction_service.py # 病历要素抽取服务
 │   │   ├── emr_generation_service.py # 病历生成服务
-│   │   └── medical_record_pipeline.py # 病历生成流水线
+│   │   ├── medical_record_pipeline.py # 病历生成流水线
+│   │   ├── evaluation/         # 病历质量评估模块
+│   │   │   ├── __init__.py     # 模块入口
+│   │   │   ├── base.py         # 评估器基类
+│   │   │   ├── consistency.py  # 一致性评估服务
+│   │   │   ├── completeness.py # 完整性评估服务
+│   │   │   ├── quality.py      # 文档质量评估服务
+│   │   │   ├── safety.py       # 安全风险评估服务
+│   │   │   └── evaluation_pipeline.py # 评估流水线
+│   │   └── validation_service.py # 病历验证服务（规则验证）
 │   ├── utils/                 # 工具函数
 │   │   ├── __init__.py
 │   │   └── audio_utils.py     # 音频处理工具
@@ -120,10 +131,12 @@ MedicalAssisstant/
 │   │   ├── result.js          # 结果页面脚本
 │   │   ├── upload.js          # 上传页面脚本
 │   │   ├── emr.js             # 病历生成页面脚本
+│   │   ├── evaluation.js      # 病历质量评估页面脚本
 │   │   └── config.js          # LLM配置页面脚本
 │   ├── index.html             # 上传页面
 │   ├── result.html            # 结果展示页面
 │   ├── emr.html               # 病历生成页面
+│   ├── evaluation.html        # 病历质量评估页面
 │   └── config.html            # LLM配置页面
 ├── output/                     # 输出目录
 │   └── raw_asr_result.json    # ASR原始输出
@@ -894,7 +907,7 @@ graph TB
 | 术语规范化模块 | 口语化表述映射到专业术语 | 字典匹配 + UMLS + LLM | ✅ 已实现 |
 | 病历要素抽取模块 | 从证据中抽取SOAP要素 | 规则抽取 + LLM | ✅ 已实现 |
 | 病历生成模块 | 基于抽取结果生成结构化病历 | 模板生成 + LLM | ✅ 已实现 |
-| 验证模块 | 检查病历与对话一致性 | 规则检查 / LLM 验证 | 📋 待实现 |
+| 验证模块 | 检查病历完整性和术语正确性 | 字典匹配 + UMLS | ✅ 已实现 |
 
 ### 输出层
 

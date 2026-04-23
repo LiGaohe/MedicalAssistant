@@ -197,5 +197,6 @@ class MedicalRecordPipeline:
             "normalized_terms_count": terms_count,
             "extracted_items_count": items_count,
             "has_emr": emr is not None,
-            "emr_version": emr.version if emr else 0
+            "emr_version": emr.version if emr else 0,
+            "latest_record_id": emr.record_id if emr else None
         }

@@ -18,6 +18,7 @@ class EMRRecord(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     visit = relationship("Visit", back_populates="emr_records")
+    evaluations = relationship("EvaluationRecord", back_populates="emr_record")
     
     def to_dict(self):
         return {

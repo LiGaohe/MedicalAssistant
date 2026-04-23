@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .config import settings
 from .database import init_db
-from .api import upload_router, asr_router, task_router, llm_router, emr_router
+from .api import upload_router, asr_router, task_router, llm_router, emr_router, evaluation_router
 from .utils.logger import logger
 
 app = FastAPI(
@@ -19,6 +19,7 @@ app.include_router(asr_router)
 app.include_router(task_router)
 app.include_router(llm_router)
 app.include_router(emr_router)
+app.include_router(evaluation_router)
 
 frontend_path = Path(__file__).parent.parent / "frontend"
 if frontend_path.exists():

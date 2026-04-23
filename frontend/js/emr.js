@@ -11,6 +11,7 @@ document.addEventListener('DOMContentLoaded', async function() {
     
     const generateBtn = document.getElementById('generateEMR');
     const viewBtn = document.getElementById('viewEMR');
+    const evaluateBtn = document.getElementById('evaluateEMR');
     const backBtn = document.getElementById('backToResult');
     const editBtn = document.getElementById('editEMR');
     const saveBtn = document.getElementById('saveEMR');
@@ -21,6 +22,7 @@ document.addEventListener('DOMContentLoaded', async function() {
     const emrSection = document.getElementById('emrSection');
     
     let currentEMRRecord = null;
+    let currentRecordId = null;
     let isEditing = false;
     let evidenceVisible = false;
     let evidenceData = [];
@@ -50,6 +52,8 @@ document.addEventListener('DOMContentLoaded', async function() {
                 loadingSection.style.display = 'none';
                 emrSection.style.display = 'block';
                 viewBtn.style.display = 'none';
+                evaluateBtn.style.display = 'block';
+                currentRecordId = result.emr_record.record_id;
                 await displayEMR(result.emr_record);
                 await loadEMRVersions(visitId);
             } else {
@@ -70,6 +74,14 @@ document.addEventListener('DOMContentLoaded', async function() {
     
     backBtn.addEventListener('click', () => {
         window.location.href = `/static/result.html?visit_id=${visitId}`;
+    });
+    
+    evaluateBtn.addEventListener('click', () => {
+        if (currentRecordId) {
+            window.location.href = `/static/evaluation.html?record_id=${currentRecordId}&visit_id=${visitId}`;
+        } else {
+            alert('请先生成病历');
+        }
     });
     
     document.getElementById('versionSelect').addEventListener('change', async (e) => {
@@ -118,7 +130,11 @@ document.addEventListener('DOMContentLoaded', async function() {
             
             if (result.has_emr) {
                 viewBtn.style.display = 'block';
+                evaluateBtn.style.display = 'block';
                 generateBtn.textContent = '重新生成病历';
+                if (result.latest_record_id) {
+                    currentRecordId = result.latest_record_id;
+                }
             }
         } catch (error) {
             console.error('加载病历状态失败:', error);
@@ -223,9 +239,6 @@ document.addEventListener('DOMContentLoaded', async function() {
                         <div class="field-item" data-field="${sectionName}.${field}">
                             <div class="field-name">${getFieldName(field)}</div>
                             <div class="field-value">${fieldData.value || '暂无'}</div>
-                            <div class="field-meta">
-                                置信度: ${((fieldData.confidence || 0) * 100).toFixed(1)}%
-                            </div>
                             ${evidenceHtml}
                         </div>
                     `;
@@ -257,7 +270,6 @@ document.addEventListener('DOMContentLoaded', async function() {
             const content = trace.content || '';
             const turnText = trace.turn_text || '';
             const turnIndex = trace.turn_index !== undefined ? trace.turn_index : '-';
-            const confidence = ((trace.confidence || 0) * 100).toFixed(0);
             
             const displayContent = content.length > 80 ? content.substring(0, 80) + '...' : content;
             const displayTurnText = turnText.length > 100 ? turnText.substring(0, 100) + '...' : turnText;
@@ -275,7 +287,6 @@ document.addEventListener('DOMContentLoaded', async function() {
                     <div class="evidence-header">
                         ${speakerHtml}
                         <span class="evidence-turn">轮次 ${turnIndex}</span>
-                        <span class="evidence-confidence">置信度: ${confidence}%</span>
                     </div>
                     <div class="evidence-detail">
                         <div class="evidence-label">LLM标注片段：</div>
@@ -479,7 +490,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             list.innerHTML = '<p class="empty">暂无证据溯源数据</p>';
         } else {
             let html = '<table class="evidence-table"><thead><tr>';
-            html += '<th>字段类型</th><th>最终病历</th><th>标注片段</th><th>原始转写</th><th>说话人</th><th>轮次</th><th>置信度</th>';
+            html += '<th>字段类型</th><th>最终病历</th><th>标注片段</th><th>原始转写</th><th>说话人</th><th>轮次</th>';
             html += '</tr></thead><tbody>';
             
             evidenceData.forEach(ev => {
@@ -496,7 +507,6 @@ document.addEventListener('DOMContentLoaded', async function() {
                     <td class="evidence-turn-cell">${displayTurnText}</td>
                     <td>${ev.speaker || '-'}</td>
                     <td>${ev.turn_index !== null ? ev.turn_index : '-'}</td>
-                    <td>${((ev.confidence || 0) * 100).toFixed(0)}%</td>
                 </tr>`;
             });
             

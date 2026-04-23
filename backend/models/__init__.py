@@ -7,6 +7,7 @@ from .evidence import EvidenceSpan
 from .term import NormalizedTerm
 from .extracted_item import ExtractedItem
 from .emr_record import EMRRecord
+from .evaluation_record import EvaluationRecord
 
 __all__ = [
     "Visit", 
@@ -17,5 +18,6 @@ __all__ = [
     "EvidenceSpan",
     "NormalizedTerm",
     "ExtractedItem",
-    "EMRRecord"
+    "EMRRecord",
+    "EvaluationRecord"
 ]

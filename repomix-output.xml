@@ -42,12 +42,14 @@ The content is organized as follows:
 </file_summary>
 
 <directory_structure>
+.env.example
 .gitignore
 .repomixignore
 backend/__init__.py
 backend/api/__init__.py
 backend/api/asr.py
 backend/api/emr.py
+backend/api/evaluation.py
 backend/api/llm.py
 backend/api/task.py
 backend/api/upload.py
@@ -56,6 +58,7 @@ backend/database.py
 backend/main.py
 backend/models/__init__.py
 backend/models/emr_record.py
+backend/models/evaluation_record.py
 backend/models/evidence.py
 backend/models/extracted_item.py
 backend/models/llm_config.py
@@ -63,9 +66,19 @@ backend/models/task.py
 backend/models/term.py
 backend/models/transcript.py
 backend/models/visit.py
+backend/scripts/__init__.py
+backend/scripts/add_corrected_speaker_column.py
 backend/services/__init__.py
 backend/services/asr_service.py
 backend/services/emr_generation_service.py
+backend/services/evaluation_service.py
+backend/services/evaluation/__init__.py
+backend/services/evaluation/base.py
+backend/services/evaluation/completeness.py
+backend/services/evaluation/consistency.py
+backend/services/evaluation/evaluation_pipeline.py
+backend/services/evaluation/quality.py
+backend/services/evaluation/safety.py
 backend/services/evidence_service.py
 backend/services/extraction_service.py
 backend/services/llm_pipeline_service.py
@@ -79,6 +92,10 @@ backend/services/normalizer.py
 backend/services/postprocessor.py
 backend/services/speaker_role_classifier.py
 backend/services/terminology_service.py
+backend/services/umls/__init__.py
+backend/services/umls/term_cache.py
+backend/services/umls/umls_client.py
+backend/services/validation_service.py
 backend/utils/__init__.py
 backend/utils/audio_utils.py
 backend/utils/logger.py
@@ -89,18 +106,20 @@ config/medical_terms.json
 frontend/config.html
 frontend/css/style.css
 frontend/emr.html
+frontend/evaluation.html
 frontend/index.html
 frontend/js/config.js
 frontend/js/emr.js
+frontend/js/evaluation.js
 frontend/js/result.js
 frontend/js/upload.js
 frontend/result.html
-QWEN.md
-README.md
 repomix.config.json
 requirements-asr.txt
 requirements.txt
 scripts/demo_diarization.py
+scripts/evaluation_analyzer.py
+scripts/generate_test_dialogs.py
 scripts/set_cache_path.bat
 scripts/test_asr_no_role.py
 scripts/test_diarization.py
@@ -118,13 +137,750 @@ src/asr/factory.py
 src/asr/funasr_engine.py
 src/asr/medasr_engine.py
 src/asr/qwen3_asr_engine.py
-src/asr/test_confid.py
 tests/test_confidence_feature.py
 tests/test_llm_service.py
 </directory_structure>
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="backend/api/evaluation.py">
+"""
+病历质量评估API路由
+"""
+⋮----
+logger = logging.getLogger(__name__)
+⋮----
+router = APIRouter(prefix="/api/evaluation", tags=["evaluation"])
+⋮----
+class EvaluationRequest(BaseModel)
+⋮----
+record_id: int
+skip_consistency: bool = False
+skip_completeness: bool = False
+skip_quality: bool = False
+skip_safety: bool = False
+⋮----
+class BatchEvaluationRequest(BaseModel)
+⋮----
+record_ids: List[int]
+⋮----
+llm_service = LLMService(db)
+pipeline = EvaluationPipeline(db, llm_service)
+⋮----
+results = pipeline.evaluate(
+⋮----
+results = pipeline.batch_evaluate(
+⋮----
+evaluation = db.query(EvaluationRecord).filter(
+⋮----
+evaluations = db.query(EvaluationRecord).filter(
+⋮----
+total_evaluations = db.query(func.count(EvaluationRecord.evaluation_id)).scalar()
+⋮----
+avg_support_rate = db.query(
+⋮----
+avg_recall_rate = db.query(
+⋮----
+avg_quality_score = db.query(
+⋮----
+high_risk_count = db.query(
+⋮----
+class DebugStageRequest(BaseModel)
+⋮----
+stage: str
+user_response: str
+context: Optional[Dict[str, Any]] = None
+⋮----
+emr_record = db.query(EMRRecord).filter(EMRRecord.record_id == record_id).first()
+⋮----
+turns = db.query(TranscriptTurn).filter(
+transcript = "\n".join([f"[{t.speaker}]: {t.text}" for t in turns])
+⋮----
+emr_content = emr_record.emr_json
+formatted_emr = QualityEvaluator(llm_service)._format_emr_content(emr_content)
+⋮----
+stages = [
+⋮----
+json_start = request.user_response.find("{")
+json_end = request.user_response.rfind("}") + 1
+⋮----
+result = json.loads(request.user_response[json_start:json_end])
+⋮----
+result = json.loads(request.user_response)
+⋮----
+context_update = {}
+next_stage = None
+next_prompt = None
+⋮----
+next_stage = "internal_consistency"
+⋮----
+next_stage = "key_fact_extraction"
+⋮----
+next_stage = "completeness"
+⋮----
+emr_record_id = request.context.get("record_id") if request.context else None
+⋮----
+emr_record = db.query(EMRRecord).filter(EMRRecord.record_id == emr_record_id).first()
+⋮----
+formatted_emr = QualityEvaluator(llm_service)._format_emr_content(emr_record.emr_json)
+key_facts_str = json.dumps(result.get("key_facts", []), ensure_ascii=False, indent=2)
+next_prompt = llm_service.prompt_manager.render(
+⋮----
+next_stage = "quality"
+⋮----
+next_stage = "safety"
+⋮----
+emr_record_id = request.context["record_id"]
+⋮----
+consistency_result = request.context.get("consistency_result", {})
+completeness_result = request.context.get("completeness_result", {})
+quality_result = result
+⋮----
+support_rate = consistency_result.get("summary", {}).get("support_rate", 0)
+recall_rate = completeness_result.get("summary", {}).get("recall_rate", 0)
+quality_score = quality_result.get("total_score", 0)
+⋮----
+overall_score = (
+⋮----
+safety_result = result
+⋮----
+high_risk_count = safety_result.get("high_risk_count", 0)
+safety_penalty = min(high_risk_count * 0.15, 0.30)
+⋮----
+overall_score = max(0.0, min(1.0, overall_score))
+⋮----
+evaluation = EvaluationRecord(
+</file>
+
+<file path="backend/models/evaluation_record.py">
+"""
+病历质量评估记录模型
+
+存储基于LLM的病历质量评估结果
+"""
+⋮----
+class EvaluationRecord(Base)
+⋮----
+__tablename__ = "evaluation_records"
+⋮----
+evaluation_id = Column(Integer, primary_key=True, autoincrement=True)
+record_id = Column(Integer, ForeignKey("emr_records.record_id"), nullable=False)
+⋮----
+consistency_result = Column(JSON, nullable=True)
+support_rate = Column(Float, nullable=True)
+hallucination_rate = Column(Float, nullable=True)
+internal_consistency_score = Column(Float, nullable=True)
+⋮----
+completeness_result = Column(JSON, nullable=True)
+recall_rate = Column(Float, nullable=True)
+weighted_recall = Column(Float, nullable=True)
+⋮----
+quality_result = Column(JSON, nullable=True)
+quality_total_score = Column(Float, nullable=True)
+⋮----
+safety_result = Column(JSON, nullable=True)
+has_high_risk = Column(Integer, nullable=True)
+high_risk_count = Column(Integer, nullable=True)
+⋮----
+overall_score = Column(Float, nullable=True)
+evaluation_metadata = Column(JSON, nullable=True)
+⋮----
+created_at = Column(DateTime, default=datetime.utcnow)
+⋮----
+emr_record = relationship("EMRRecord", back_populates="evaluations")
+⋮----
+def to_dict(self)
+</file>
+
+<file path="backend/services/evaluation/__init__.py">
+"""
+病历质量评估模块
+
+基于LLM的病历质量评估系统，包含四层评估：
+- 一致性评估
+- 完整性评估
+- 文档质量评估
+- 安全风险评估
+"""
+⋮----
+__all__ = [
+</file>
+
+<file path="backend/services/evaluation/base.py">
+"""
+评估器基类
+
+提供LLM调用和JSON解析的通用功能
+"""
+⋮----
+logger = logging.getLogger(__name__)
+⋮----
+class BaseEvaluator(ABC)
+⋮----
+def __init__(self, llm_service)
+⋮----
+@abstractmethod
+    def evaluate(self, *args, **kwargs) -> Dict[str, Any]
+⋮----
+prompt = self.llm_service.prompt_manager.render(template_name, **kwargs)
+⋮----
+response = self.llm_service.generate(
+⋮----
+def _parse_json_response(self, text: str) -> Dict[str, Any]
+⋮----
+json_start = text.find("{")
+json_end = text.rfind("}") + 1
+⋮----
+json_str = text[json_start:json_end]
+⋮----
+def _format_emr_content(self, emr_content: Dict[str, Any]) -> str
+⋮----
+sections = []
+⋮----
+text = emr_content["subjective"].get("text", "")
+⋮----
+text = emr_content["objective"].get("text", "")
+⋮----
+text = emr_content["assessment"].get("text", "")
+⋮----
+text = emr_content["plan"].get("text", "")
+</file>
+
+<file path="backend/services/evaluation/completeness.py">
+"""
+完整性评估服务
+
+评估病历对关键事实的覆盖情况
+"""
+⋮----
+logger = logging.getLogger(__name__)
+⋮----
+class CompletenessEvaluator(BaseEvaluator)
+⋮----
+def extract_key_facts(self, transcript: str) -> Dict[str, Any]
+⋮----
+result = self._call_llm_json(
+⋮----
+total_count = result.get("total_count", 0)
+⋮----
+emr_text = self._format_emr_content(emr_content)
+⋮----
+recall_rate = result.get("summary", {}).get("recall_rate", 0)
+</file>
+
+<file path="backend/services/evaluation/consistency.py">
+"""
+一致性评估服务
+
+评估病历内容是否被原始对话支持，以及内部是否存在自相矛盾
+"""
+⋮----
+logger = logging.getLogger(__name__)
+⋮----
+class ConsistencyEvaluator(BaseEvaluator)
+⋮----
+emr_text = self._format_emr_content(emr_content)
+⋮----
+consistency_result = self._call_llm_json(
+⋮----
+internal_result = self._call_llm_json(
+⋮----
+result = {
+⋮----
+support_rate = result["summary"].get("support_rate", 0)
+consistency_score = result.get("consistency_score", 1.0)
+</file>
+
+<file path="backend/services/evaluation/evaluation_pipeline.py">
+"""
+病历质量评估流水线
+
+协调四层评估流程，计算综合得分
+"""
+⋮----
+logger = logging.getLogger(__name__)
+⋮----
+class EvaluationPipeline
+⋮----
+def __init__(self, db: Session, llm_service)
+⋮----
+emr_record = self.db.query(EMRRecord).filter(
+⋮----
+visit = emr_record.visit
+transcript = self._get_transcript(visit.visit_id)
+emr_content = emr_record.emr_json
+⋮----
+results = {
+⋮----
+key_facts = None
+⋮----
+key_facts = self.completeness.extract_key_facts(transcript)
+⋮----
+overall_score = self._calculate_overall_score(results)
+⋮----
+evaluation_record = self._save_evaluation(record_id, results)
+⋮----
+results = []
+⋮----
+result = self.evaluate(
+⋮----
+def _get_transcript(self, visit_id: str) -> str
+⋮----
+turns = self.db.query(TranscriptTurn).filter(
+⋮----
+def _calculate_overall_score(self, results: Dict) -> float
+⋮----
+score = 0.0
+weight_sum = 0.0
+⋮----
+support_rate = results["consistency"]["summary"].get("support_rate", 0)
+consistency_score = results["consistency"].get("consistency_score", 1.0)
+⋮----
+recall_rate = results["completeness"]["summary"].get("recall_rate", 0)
+⋮----
+quality_score = results["quality"].get("total_score", 0) / 10.0
+⋮----
+high_risk_count = results["safety"].get("high_risk_count", 0)
+safety_penalty = min(high_risk_count * 0.15, 0.30)
+⋮----
+score = score / weight_sum * 0.85
+⋮----
+def _save_evaluation(self, record_id: int, results: Dict) -> EvaluationRecord
+⋮----
+consistency_result = results.get("consistency")
+completeness_result = results.get("completeness")
+quality_result = results.get("quality")
+safety_result = results.get("safety")
+⋮----
+evaluation = EvaluationRecord(
+</file>
+
+<file path="backend/services/evaluation/quality.py">
+"""
+文档质量评估服务
+
+评估病历的文档质量，包括结构完整性、组织清晰度、表达简洁性、可理解性和术语规范性
+"""
+⋮----
+logger = logging.getLogger(__name__)
+⋮----
+class QualityEvaluator(BaseEvaluator)
+⋮----
+def evaluate(self, emr_content: Dict[str, Any]) -> Dict[str, Any]
+⋮----
+emr_text = self._format_emr_content(emr_content)
+⋮----
+result = self._call_llm_json(
+⋮----
+total_score = result.get("total_score", 0)
+</file>
+
+<file path="backend/services/evaluation/safety.py">
+"""
+安全风险评估服务
+
+评估病历中是否存在高风险错误
+"""
+⋮----
+logger = logging.getLogger(__name__)
+⋮----
+class SafetyEvaluator(BaseEvaluator)
+⋮----
+emr_text = self._format_emr_content(emr_content)
+⋮----
+result = self._call_llm_json(
+⋮----
+has_high_risk = result.get("has_high_risk", False)
+high_risk_count = result.get("high_risk_count", 0)
+</file>
+
+<file path="backend/services/validation_service.py">
+"""
+病历验证服务
+
+在病历生成后自动验证：
+1. 必填字段完整性
+2. 医学术语正确性（字典+UMLS）
+"""
+⋮----
+@dataclass
+class FieldValidation
+⋮----
+field_name: str
+field_name_cn: str
+is_valid: bool
+is_required: bool
+value: str
+errors: List[str] = field(default_factory=list)
+warnings: List[str] = field(default_factory=list)
+⋮----
+@dataclass
+class TermValidation
+⋮----
+original_term: str
+normalized_term: Optional[str]
+⋮----
+confidence: float
+source: str
+cui: Optional[str] = None
+code: Optional[str] = None
+code_system: Optional[str] = None
+⋮----
+@dataclass
+class ValidationResult
+⋮----
+score: float
+field_validations: Dict[str, FieldValidation]
+term_validations: List[TermValidation]
+errors: List[str]
+warnings: List[str]
+summary: Dict[str, Any]
+⋮----
+SOAP_REQUIRED_FIELDS = {
+⋮----
+class ValidationService
+⋮----
+def _load_term_dict(self) -> Dict[str, Any]
+⋮----
+config_path = Path(__file__).parent.parent.parent / "config" / "medical_terms.json"
+⋮----
+field_validations = self._validate_fields(emr_result)
+⋮----
+term_validations = []
+⋮----
+term_validations = self._validate_terms(emr_result)
+⋮----
+errors = []
+warnings = []
+⋮----
+invalid_terms = [t for t in term_validations if not t.is_valid and t.confidence < 0.5]
+⋮----
+score = self._calculate_score(field_validations, term_validations)
+is_valid = len(errors) == 0 and score >= 0.6
+⋮----
+summary = self._build_summary(field_validations, term_validations, score)
+⋮----
+result = ValidationResult(
+⋮----
+def _validate_fields(self, emr_result: Dict[str, Any]) -> Dict[str, FieldValidation]
+⋮----
+validations = {}
+⋮----
+section_data = emr_result.get(section, {})
+⋮----
+section_data = {}
+⋮----
+field_key = f"{section}.{field_name}"
+field_data = section_data.get(field_name, {})
+⋮----
+value = field_data.get("value", "")
+⋮----
+value = field_data
+⋮----
+value = ""
+⋮----
+validation = self._validate_single_field(
+⋮----
+value = value.strip() if value else ""
+⋮----
+is_valid = True
+⋮----
+is_valid = False
+⋮----
+def _validate_terms(self, emr_result: Dict[str, Any]) -> List[TermValidation]
+⋮----
+validations = []
+⋮----
+text_to_validate = self._extract_text_for_term_validation(emr_result)
+⋮----
+found_terms = self._extract_terms_from_text(text_to_validate)
+⋮----
+term = term_info["term"]
+term_type = term_info["type"]
+context = term_info["context"]
+⋮----
+validation = self._validate_single_term(term, term_type, context)
+⋮----
+def _extract_text_for_term_validation(self, emr_result: Dict[str, Any]) -> str
+⋮----
+texts = []
+⋮----
+def _extract_terms_from_text(self, text: str) -> List[Dict[str, str]]
+⋮----
+found_terms = []
+seen_terms = set()
+⋮----
+all_terms = [standard_term] + aliases
+⋮----
+context_start = max(0, text.find(term) - 20)
+context_end = min(len(text), text.find(term) + len(term) + 20)
+context = text[context_start:context_end]
+⋮----
+normalized_term = None
+confidence = 0.0
+source = "none"
+cui = None
+code = None
+code_system = None
+⋮----
+result = self.terminology_service.normalize_term(term, context, term_type)
+normalized_term = result.normalized_term
+confidence = result.confidence
+source = result.source or "none"
+cui = result.cui
+code = result.code
+code_system = result.code_system
+is_valid = confidence >= 0.5
+⋮----
+type_dict = self.term_dict.get(term_type, {})
+⋮----
+normalized_term = standard
+confidence = 1.0
+source = "dict_exact"
+⋮----
+confidence = 0.95
+source = "dict_alias"
+⋮----
+required_fields = [v for v in field_validations.values() if v.is_required]
+⋮----
+field_score = 1.0
+⋮----
+valid_required = sum(1 for v in required_fields if v.is_valid)
+field_score = valid_required / len(required_fields)
+⋮----
+valid_terms = sum(1 for t in term_validations if t.is_valid)
+term_score = valid_terms / len(term_validations)
+⋮----
+term_score = 1.0
+⋮----
+score = field_score * 0.7 + term_score * 0.3
+⋮----
+optional_fields = [v for v in field_validations.values() if not v.is_required]
+valid_optional = sum(1 for v in optional_fields if v.is_valid or not v.value)
+⋮----
+def _get_quality_level(self, score: float) -> str
+⋮----
+def _log_result(self, result: ValidationResult)
+⋮----
+status = "✓" if field_val.is_valid else "✗"
+⋮----
+status = "✓" if term_val.is_valid else "△"
+norm = term_val.normalized_term or "未规范化"
+⋮----
+def to_dict(self, result: ValidationResult) -> Dict[str, Any]
+</file>
+
+<file path="frontend/evaluation.html">
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>病历质量评估 - 中文门诊病历生成系统</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>病历质量评估</h1>
+        
+        <div class="info-section">
+            <p><strong>病历记录:</strong> <span id="recordId"></span></p>
+            <p><strong>就诊记录:</strong> <span id="visitId"></span></p>
+        </div>
+        
+        <div class="actions">
+            <button id="runEvaluation" class="btn-primary">开始评估</button>
+            <button id="debugEvaluation" class="btn-warning">调试模式</button>
+            <button id="backToEMR" class="btn-secondary">返回病历</button>
+        </div>
+        
+        <div class="loading" id="loadingSection" style="display: none;">
+            <p>正在进行评估，请稍候...</p>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+        </div>
+        
+        <div id="debugModal" class="modal" style="display: none;">
+            <div class="modal-content modal-large">
+                <div class="modal-header">
+                    <h2>调试模式 - 手动输入评估结果</h2>
+                    <span class="close" id="closeDebugModal">&times;</span>
+                </div>
+                <div class="modal-body">
+                    <div id="debugStages">
+                        <div class="debug-stage-selector">
+                            <label>选择阶段：</label>
+                            <select id="stageSelect"></select>
+                        </div>
+                        <div class="debug-prompt">
+                            <h4>提示词：</h4>
+                            <pre id="promptContent"></pre>
+                        </div>
+                        <div class="debug-input">
+                            <h4>请输入大模型返回结果：</h4>
+                            <textarea id="userResponse" rows="15" placeholder="请输入JSON格式的返回结果..."></textarea>
+                        </div>
+                        <div class="debug-actions">
+                            <button id="submitStage" class="btn-primary">提交并继续</button>
+                            <button id="skipStage" class="btn-secondary">跳过此阶段</button>
+                        </div>
+                    </div>
+                    <div id="debugResult" style="display: none;">
+                        <h4>处理结果：</h4>
+                        <pre id="resultContent"></pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="evaluationSection" style="display: none;">
+            <div class="evaluation-summary">
+                <h2>评估概览</h2>
+                <div class="score-overview">
+                    <div class="score-main">
+                        <div class="score-circle" id="overallScoreCircle">
+                            <span class="score-value" id="overallScore">--</span>
+                            <span class="score-label">综合得分</span>
+                        </div>
+                    </div>
+                    <div class="score-details">
+                        <div class="score-item">
+                            <span class="score-name">一致性</span>
+                            <div class="score-bar">
+                                <div class="score-bar-fill" id="consistencyBar"></div>
+                            </div>
+                            <span class="score-percent" id="consistencyScore">--%</span>
+                        </div>
+                        <div class="score-item">
+                            <span class="score-name">完整性</span>
+                            <div class="score-bar">
+                                <div class="score-bar-fill" id="completenessBar"></div>
+                            </div>
+                            <span class="score-percent" id="completenessScore">--%</span>
+                        </div>
+                        <div class="score-item">
+                            <span class="score-name">文档质量</span>
+                            <div class="score-bar">
+                                <div class="score-bar-fill" id="qualityBar"></div>
+                            </div>
+                            <span class="score-percent" id="qualityScore">--%</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="risk-indicator" id="riskIndicator">
+                    <span class="risk-label">安全风险:</span>
+                    <span class="risk-status" id="riskStatus">--</span>
+                </div>
+            </div>
+            
+            <div class="evaluation-tabs">
+                <button class="tab-btn active" data-tab="consistency">一致性评估</button>
+                <button class="tab-btn" data-tab="completeness">完整性评估</button>
+                <button class="tab-btn" data-tab="quality">文档质量</button>
+                <button class="tab-btn" data-tab="safety">安全风险</button>
+            </div>
+            
+            <div class="tab-content" id="consistencyTab">
+                <h3>事实支持情况</h3>
+                <div class="stats-row">
+                    <div class="stat-item">
+                        <span class="stat-value" id="totalFacts">--</span>
+                        <span class="stat-label">总事实数</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-value" id="supportedFacts">--</span>
+                        <span class="stat-label">支持数</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-value" id="unsupportedFacts">--</span>
+                        <span class="stat-label">不支持数</span>
+                    </div>
+                </div>
+                <div id="factsList" class="facts-list"></div>
+                
+                <h3>内部一致性</h3>
+                <div id="conflictsList" class="conflicts-list"></div>
+            </div>
+            
+            <div class="tab-content" id="completenessTab" style="display: none;">
+                <h3>关键事实覆盖情况</h3>
+                <div class="stats-row">
+                    <div class="stat-item">
+                        <span class="stat-value" id="totalKeyFacts">--</span>
+                        <span class="stat-label">关键事实总数</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-value" id="fullCoverage">--</span>
+                        <span class="stat-label">完全覆盖</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-value" id="partialCoverage">--</span>
+                        <span class="stat-label">部分覆盖</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-value" id="noCoverage">--</span>
+                        <span class="stat-label">未覆盖</span>
+                    </div>
+                </div>
+                <div id="coverageList" class="coverage-list"></div>
+            </div>
+            
+            <div class="tab-content" id="qualityTab" style="display: none;">
+                <h3>文档质量评分</h3>
+                <div id="qualityScores" class="quality-scores"></div>
+                <div class="quality-assessment">
+                    <strong>整体评价：</strong>
+                    <span id="overallAssessment">--</span>
+                </div>
+            </div>
+            
+            <div class="tab-content" id="safetyTab" style="display: none;">
+                <h3>安全风险评估</h3>
+                <div class="safety-summary">
+                    <div class="safety-status" id="safetyStatus">
+                        <span class="safety-icon" id="safetyIcon">✓</span>
+                        <span class="safety-text" id="safetyText">未发现高风险错误</span>
+                    </div>
+                </div>
+                <div id="risksList" class="risks-list"></div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/static/js/evaluation.js"></script>
+</body>
+</html>
+</file>
+
+<file path="frontend/js/evaluation.js">
+async function loadDebugPrompts()
+⋮----
+function displayCurrentStage()
+⋮----
+async function loadExistingEvaluation(recordId)
+⋮----
+async function displayEvaluationResult(result)
+⋮----
+function displayConsistencyResult(consistencyResult)
+⋮----
+function displayCompletenessResult(completenessResult)
+⋮----
+function displayQualityResult(qualityResult)
+⋮----
+function displaySafetyResult(safetyResult)
+</file>
+
+<file path=".env.example">
+UMLS_API_KEY=your-umls-api-key-here
+UMLS_ENABLED=false
+UMLS_CACHE_DIR=data/cache/umls
+UMLS_CACHE_TTL_HOURS=168
+UMLS_REQUEST_TIMEOUT=30
+UMLS_MAX_RETRIES=3
+UMLS_RATE_LIMIT_DELAY=0.1
+</file>
 
 <file path=".repomixignore">
 # Add patterns to ignore here, one per line
@@ -147,6 +903,8 @@ This section contains the contents of the repository's files.
 /tests/__pycache__
 /med_env
 /docs
+README.md
+CLAUDE.md
 </file>
 
 <file path="backend/__init__.py">
@@ -194,6 +952,7 @@ validation_errors = Column(JSON, nullable=True)
 created_at = Column(DateTime, default=datetime.utcnow)
 ⋮----
 visit = relationship("Visit", back_populates="emr_records")
+evaluations = relationship("EvaluationRecord", back_populates="emr_record")
 ⋮----
 def to_dict(self)
 </file>
@@ -252,24 +1011,142 @@ updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 visit = relationship("Visit", back_populates="tasks")
 </file>
 
-<file path="backend/models/term.py">
-class NormalizedTerm(Base)
+<file path="backend/scripts/__init__.py">
+"""数据库迁移脚本"""
+</file>
+
+<file path="backend/scripts/add_corrected_speaker_column.py">
+"""
+数据库迁移脚本：添加 corrected_speaker 字段到 transcript_turns 表
+
+运行方式：
+    python -m backend.scripts.add_corrected_speaker_column
+"""
 ⋮----
-__tablename__ = "normalized_terms"
+def migrate()
 ⋮----
-term_id = Column(Integer, primary_key=True, autoincrement=True)
-visit_id = Column(String, ForeignKey("visits.visit_id"), nullable=False)
-turn_id = Column(Integer, ForeignKey("transcript_turns.turn_id"), nullable=True)
-original_term = Column(String, nullable=False)
-normalized_term = Column(String, nullable=False)
-term_type = Column(String, nullable=False)
-confidence = Column(Float, nullable=False, default=0.0)
-is_risky = Column(Boolean, default=False)
-reasoning = Column(Text, nullable=True)
-created_at = Column(DateTime, default=datetime.utcnow)
+"""添加 corrected_speaker 字段到 transcript_turns 表"""
 ⋮----
-visit = relationship("Visit", back_populates="normalized_terms")
-turn = relationship("TranscriptTurn", back_populates="normalized_terms")
+result = conn.execute(text(
+exists = result.fetchone() is not None
+</file>
+
+<file path="backend/services/evaluation_service.py">
+"""
+病历生成评估服务
+
+在病历生成后自动评估结果质量
+"""
+⋮----
+@dataclass
+class EvaluationResult
+⋮----
+diagnosis_match: str
+symptom_precision: float
+symptom_recall: float
+symptom_f1: float
+soap_completeness: Dict[str, bool]
+⋮----
+class EMREvaluationService
+⋮----
+DATA_DIR = Path(__file__).parent.parent.parent / "data" / "text"
+⋮----
+def __init__(self)
+⋮----
+def _load_test_data(self)
+⋮----
+"""加载测试数据集"""
+test_file = self.DATA_DIR / "test.json"
+test_input_file = self.DATA_DIR / "test_input.json"
+⋮----
+def _normalize_text(self, text: str) -> str
+⋮----
+"""标准化文本"""
+⋮----
+text = text.strip()
+text = re.sub(r'[，。、；：！？\s]', '', text)
+⋮----
+def _check_diagnosis_match(self, predicted: str, ground_truth: str) -> str
+⋮----
+"""检查诊断匹配程度"""
+pred_norm = self._normalize_text(predicted)
+truth_norm = self._normalize_text(ground_truth)
+⋮----
+common_chars = set(pred_norm) & set(truth_norm)
+⋮----
+"""计算症状抽取指标"""
+pred_set = set(self._normalize_text(s) for s in predicted if s)
+truth_set = set(self._normalize_text(s) for s in ground_truth if s)
+⋮----
+intersection = pred_set & truth_set
+⋮----
+precision = len(intersection) / len(pred_set)
+recall = len(intersection) / len(truth_set)
+f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+⋮----
+def _extract_symptoms_from_test(self, test_sample: Dict) -> List[str]
+⋮----
+"""从测试数据中提取症状"""
+symptoms = set()
+⋮----
+explicit_info = test_sample.get("explicit_info", {})
+⋮----
+def _extract_symptoms_from_emr(self, emr_result: Dict) -> List[str]
+⋮----
+"""从生成的病历中提取症状"""
+⋮----
+chief_complaint = emr_result.get("subjective", {}).get("chief_complaint", {}).get("value", "")
+⋮----
+history = emr_result.get("subjective", {}).get("history_present_illness", {}).get("value", "")
+⋮----
+def _extract_symptom_keywords(self, text: str) -> set
+⋮----
+"""从文本中提取症状关键词"""
+⋮----
+patterns = [
+⋮----
+matches = re.findall(pattern, text)
+⋮----
+match = match[0]
+match = match.strip()
+⋮----
+def _extract_diagnosis_from_emr(self, emr_result: Dict) -> str
+⋮----
+"""从生成的病历中提取诊断"""
+diagnosis = emr_result.get("assessment", {}).get("diagnosis", {}).get("value", "")
+⋮----
+def _check_soap_completeness(self, emr_result: Dict) -> Dict[str, bool]
+⋮----
+"""检查SOAP完整性"""
+⋮----
+def find_matching_test_sample(self, dialogue_text: str) -> Optional[Dict]
+⋮----
+"""根据对话内容匹配测试样本"""
+⋮----
+dialogue_content = re.sub(r'\[[^\]]+\]:\s*', '', dialogue_text)
+dialogue_content = self._normalize_text(dialogue_content)
+⋮----
+sample_dialogue = sample.get("dialogue", [])
+sample_text = " ".join(
+sample_normalized = self._normalize_text(sample_text)
+⋮----
+"""评估病历生成结果"""
+⋮----
+test_sample = self.test_data.get(sample_id)
+⋮----
+ground_truth_diagnosis = test_sample.get("diagnosis", "")
+ground_truth_symptoms = self._extract_symptoms_from_test(test_sample)
+⋮----
+predicted_diagnosis = self._extract_diagnosis_from_emr(emr_result)
+predicted_symptoms = self._extract_symptoms_from_emr(emr_result)
+⋮----
+diagnosis_match = self._check_diagnosis_match(predicted_diagnosis, ground_truth_diagnosis)
+⋮----
+soap_completeness = self._check_soap_completeness(emr_result)
+⋮----
+"""输出评估结果到日志"""
+⋮----
+status = "✓" if is_complete else "✗"
 </file>
 
 <file path="backend/services/extraction_service.py">
@@ -386,177 +1263,163 @@ items_count = self.db.query(ExtractedItem).filter(
 emr = self.db.query(EMRRecord).filter(
 </file>
 
-<file path="backend/services/speaker_role_classifier.py">
-"""说话人角色识别模块"""
+<file path="backend/services/umls/__init__.py">
+@dataclass
+class UMLSCandidate
 ⋮----
-class SpeakerRole(Enum)
-⋮----
-DOCTOR = "doctor"
-PATIENT = "patient"
-UNKNOWN = "unknown"
+term: str
+cui: str
+semantic_types: List[str] = field(default_factory=list)
+preferred: bool = False
+score: float = 0.0
 ⋮----
 @dataclass
-class SpeakerSegment
+class UMLSConcept
 ⋮----
-text: str
-start_ms: int
-end_ms: int
-speaker_id: str
-original_role: SpeakerRole
-corrected_role: SpeakerRole
-confidence: float
-correction_reason: str
+name: str
 ⋮----
-class SpeakerRoleClassifier
+definitions: List[str] = field(default_factory=list)
+atoms: List[dict] = field(default_factory=list)
+relations: List[dict] = field(default_factory=list)
 ⋮----
-DOCTOR_PATTERNS = [
+@dataclass
+class UMLSSearchResult
 ⋮----
-PATIENT_PATTERNS = [
-⋮----
-DOCTOR_QUESTION_PATTERNS = [
-⋮----
-PATIENT_QUESTION_PATTERNS = [
-⋮----
-QUESTION_ENDINGS = ["？", "?", "吗", "呢"]
-⋮----
-SYMPTOM_KEYWORDS = [
-⋮----
-DIAGNOSIS_KEYWORDS = [
-⋮----
-MEDICINE_KEYWORDS = [
-⋮----
-DOCTOR_ADVICE_KEYWORDS = [
-⋮----
-def __init__(self, use_llm: bool = False, llm_config: Optional[Dict] = None)
-⋮----
-def _compile_patterns(self)
-⋮----
-speaker_id_mapping = {}
-⋮----
-results = []
-speaker_roles = {}
-⋮----
-text = segment.get("text", "")
-speaker_id = segment.get("speaker_id", segment.get("speaker", "unknown"))
-start_ms = segment.get("start_ms", segment.get("start", 0))
-end_ms = segment.get("end_ms", segment.get("end", 0))
-⋮----
-original_role = SpeakerRole(speaker_id_mapping[speaker_id])
-⋮----
-original_role = self._map_speaker_id_to_role(speaker_id)
-⋮----
-text = text.strip()
-⋮----
-confidence = min(0.95, 0.5 + (doctor_score - patient_score) * 0.1)
-⋮----
-confidence = min(0.95, 0.5 + (patient_score - doctor_score) * 0.1)
-⋮----
-def _calculate_doctor_score(self, text: str) -> Tuple[float, List[str]]
-⋮----
-score = 0.0
-reasons = []
-⋮----
-def _calculate_patient_score(self, text: str) -> Tuple[float, List[str]]
-⋮----
-def _calculate_question_scores(self, text: str) -> Tuple[float, float]
-⋮----
-doctor_score = 0.0
-patient_score = 0.0
-⋮----
-def _detect_mixed_speakers(self, text: str) -> Tuple[bool, str]
-⋮----
-has_patient_pattern = False
-has_doctor_pattern = False
-reason = ""
-⋮----
-patient_indicators = ["特别是", "我这", "有时候", "大概", "没有"]
-doctor_indicators = ["持续多长时间", "有没有.*症状", "请问", "哪里不舒服"]
-⋮----
-has_patient_pattern = True
-reason = f"患者特征: {indicator}"
-⋮----
-has_doctor_pattern = True
-⋮----
-reason = f"医生特征: {pattern}"
-⋮----
-def _analyze_first_half(self, text: str) -> Tuple[float, SpeakerRole]
-⋮----
-mid_point = len(text) // 2
-first_half = text[:mid_point]
-⋮----
-patient_indicators = ["特别是", "我这", "有时候", "大概", "早上", "晚上", "没有"]
-doctor_indicators = ["持续多长时间", "有没有", "请问", "哪里不舒服", "症状"]
-⋮----
-prev_segment = all_segments[current_index - 1]
-prev_text = prev_segment.get("text", "")
-prev_speaker_id = prev_segment.get("speaker_id", prev_segment.get("speaker", "unknown"))
-⋮----
-prev_role = speaker_roles[prev_speaker_id]
-⋮----
-def _map_speaker_id_to_role(self, speaker_id: str) -> SpeakerRole
-⋮----
-spk_num = int(speaker_id.replace("spk", ""))
-⋮----
-speaker_doctor_scores: Dict[str, float] = {}
-speaker_patient_scores: Dict[str, float] = {}
-⋮----
-classified = self.classify_segments(segments)
-⋮----
-speaker_id = seg.speaker_id
-⋮----
-speaker_mapping = {}
-⋮----
-doctor_score = speaker_doctor_scores.get(speaker_id, 0)
-patient_score = speaker_patient_scores.get(speaker_id, 0)
-⋮----
-def get_correction_summary(self, segments: List[SpeakerSegment]) -> Dict
-⋮----
-total = len(segments)
-corrected = sum(1 for s in segments if s.original_role != s.corrected_role)
-doctor_count = sum(1 for s in segments if s.corrected_role == SpeakerRole.DOCTOR)
-patient_count = sum(1 for s in segments if s.corrected_role == SpeakerRole.PATIENT)
-unknown_count = sum(1 for s in segments if s.corrected_role == SpeakerRole.UNKNOWN)
+query: str
+candidates: List[UMLSCandidate] = field(default_factory=list)
+total_count: int = 0
+source: str = "UMLS"
+timestamp: datetime = field(default_factory=datetime.now)
+error: Optional[str] = None
 </file>
 
-<file path="backend/services/terminology_service.py">
-class TerminologyService
+<file path="backend/services/umls/term_cache.py">
+class TermCache
 ⋮----
-def __init__(self, db: Session, llm_service: Optional[LLMService] = None)
+def _get_cache_key(self, term: str, language: str = "CHI") -> str
 ⋮----
-def _load_term_dict(self) -> Dict[str, Any]
+key_string = f"{term.lower()}:{language}"
 ⋮----
-normalized = llm_normalized
-confidence = llm_confidence
-reasoning = llm_reasoning
+def _get_cache_file_path(self, cache_key: str) -> Path
 ⋮----
-is_risky = confidence < 0.5
+cache_key = self._get_cache_key(term, language)
 ⋮----
-type_dict = self.term_dict[term_type]
+cached_entry = self._memory_cache[cache_key]
 ⋮----
-similar_terms = self._find_similar_terms(term)
+cache_file = self._get_cache_file_path(cache_key)
 ⋮----
-response = self.llm_service.generate_with_template(
+cached_entry = json.load(f)
 ⋮----
-result = json.loads(response.text)
+result = self._dict_to_result(cached_entry["data"])
 ⋮----
-def _find_similar_terms(self, term: str) -> List[Tuple[str, float]]
+ttl = ttl_hours or self.default_ttl_hours
 ⋮----
-similar = []
+cached_entry = {
 ⋮----
-all_terms = [standard] + aliases
+def _add_to_memory_cache(self, cache_key: str, entry: Dict[str, Any]) -> None
 ⋮----
-similarity = self._calculate_similarity(term, t)
+oldest_key = min(
 ⋮----
-def _calculate_similarity(self, term1: str, term2: str) -> float
+def _is_entry_valid(self, entry: Dict[str, Any]) -> bool
 ⋮----
-max_len = max(len1, len2)
-min_len = min(len1, len2)
+expires_at = datetime.fromisoformat(entry.get("expires_at", ""))
 ⋮----
-common_chars = 0
+def _result_to_dict(self, result: UMLSSearchResult) -> Dict[str, Any]
 ⋮----
-terms = []
+def _dict_to_result(self, data: Dict[str, Any]) -> UMLSSearchResult
 ⋮----
-normalized = self.normalize_term(term, context, type_name)
+candidates = [
+⋮----
+def clear_expired(self) -> int
+⋮----
+cleared_count = 0
+now = datetime.now()
+⋮----
+expired_keys = [
+⋮----
+entry = json.load(f)
+⋮----
+def clear_all(self) -> int
+⋮----
+def get_stats(self) -> Dict[str, Any]
+⋮----
+file_count = len(list(self.cache_dir.glob("*.json")))
+⋮----
+memory_count = len(self._memory_cache)
+</file>
+
+<file path="backend/services/umls/umls_client.py">
+class UMLSClient
+⋮----
+UMLS_API_BASE = "https://uts-ws.nlm.nih.gov/rest"
+⋮----
+def _get_service_ticket(self) -> str
+⋮----
+now = datetime.now()
+⋮----
+st_url = f"https://utslogin.nlm.nih.gov/sso/serviceTicket"
+params = {"service": self.UMLS_API_BASE}
+headers = {"Content-Type": "application/x-www-form-urlencoded"}
+⋮----
+response = requests.post(
+⋮----
+auth_url = "https://utslogin.nlm.nih.gov/cas/v1/api-key"
+⋮----
+data = {"apikey": self.api_key}
+⋮----
+st_url = "https://utslogin.nlm.nih.gov/sso/serviceTicket"
+⋮----
+def _rate_limit(self)
+⋮----
+elapsed = time.time() - self._last_request_time
+⋮----
+service_ticket = self._get_service_ticket()
+⋮----
+url = f"{self.UMLS_API_BASE}{endpoint}"
+request_params = {"ticket": service_ticket}
+⋮----
+response = requests.get(
+⋮----
+cached = self.cache_service.get(term, language)
+⋮----
+params = {
+⋮----
+params = {k: v for k, v in params.items() if v is not None}
+⋮----
+result = self._make_request("/search/current", params)
+⋮----
+candidates = []
+results = result.get("result", {}).get("results", [])
+⋮----
+candidate = UMLSCandidate(
+⋮----
+search_result = UMLSSearchResult(
+⋮----
+def get_concept(self, cui: str) -> Optional[UMLSConcept]
+⋮----
+result = self._make_request(f"/content/current/CUI/{cui}")
+⋮----
+concept_data = result.get("result", {})
+⋮----
+def get_atoms(self, cui: str, language: Optional[str] = None) -> List[Dict]
+⋮----
+params = {}
+⋮----
+result = self._make_request(f"/content/current/CUI/{cui}/atoms", params)
+⋮----
+def get_definitions(self, cui: str) -> List[Dict]
+⋮----
+result = self._make_request(f"/content/current/CUI/{cui}/definitions")
+⋮----
+def get_relations(self, cui: str) -> List[Dict]
+⋮----
+result = self._make_request(f"/content/current/CUI/{cui}/relations")
+⋮----
+item = results[0]
+⋮----
+def health_check(self) -> bool
+⋮----
+result = self.search_term("headache", language="ENG", page_size=1)
 </file>
 
 <file path="backend/utils/__init__.py">
@@ -1145,6 +2008,154 @@ output_path = "output/diarization_result.json"
 result_dict = {
 </file>
 
+<file path="scripts/evaluation_analyzer.py">
+"""
+病历生成评估结果分析工具
+
+用于记录手动测试结果并计算评估指标
+"""
+⋮----
+DATA_DIR = Path(__file__).parent.parent / "data" / "text"
+⋮----
+@dataclass
+class SampleResult
+⋮----
+sample_id: str
+ground_truth_diagnosis: str
+predicted_diagnosis: str
+ground_truth_symptoms: List[str]
+predicted_symptoms: List[str]
+diagnosis_match: str  # "完全匹配", "部分匹配", "不匹配"
+symptom_precision: float = 0.0
+symptom_recall: float = 0.0
+symptom_f1: float = 0.0
+soap_completeness: Dict[str, bool] = field(default_factory=dict)
+notes: str = ""
+⋮----
+def normalize_text(text: str) -> str
+⋮----
+"""标准化文本用于比较"""
+⋮----
+text = text.strip()
+text = re.sub(r'[，。、；：！？\s]', '', text)
+⋮----
+"""计算症状抽取指标"""
+pred_set = set(normalize_text(s) for s in predicted if s)
+truth_set = set(normalize_text(s) for s in ground_truth if s)
+⋮----
+intersection = pred_set & truth_set
+⋮----
+precision = len(intersection) / len(pred_set)
+recall = len(intersection) / len(truth_set)
+f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+⋮----
+def check_diagnosis_match(predicted: str, ground_truth: str) -> str
+⋮----
+"""检查诊断匹配程度"""
+pred_norm = normalize_text(predicted)
+truth_norm = normalize_text(ground_truth)
+⋮----
+common_chars = set(pred_norm) & set(truth_norm)
+⋮----
+@dataclass
+class EvaluationReport
+⋮----
+total_samples: int = 0
+diagnosis_full_match: int = 0
+diagnosis_partial_match: int = 0
+diagnosis_no_match: int = 0
+avg_symptom_precision: float = 0.0
+avg_symptom_recall: float = 0.0
+avg_symptom_f1: float = 0.0
+soap_completeness_rate: Dict[str, float] = field(default_factory=dict)
+results: List[Dict] = field(default_factory=list)
+⋮----
+def to_dict(self)
+⋮----
+def analyze_results(results: List[SampleResult]) -> EvaluationReport
+⋮----
+"""分析评估结果"""
+report = EvaluationReport()
+⋮----
+total_precision = 0.0
+total_recall = 0.0
+total_f1 = 0.0
+soap_counts = {
+⋮----
+def print_report(report: EvaluationReport)
+⋮----
+"""打印评估报告"""
+⋮----
+status = "✓" if rate >= 0.8 else "△" if rate >= 0.5 else "✗"
+⋮----
+def save_report(report: EvaluationReport, output_file: str = "evaluation_report.json")
+⋮----
+"""保存评估报告"""
+output_path = DATA_DIR / output_file
+⋮----
+"""创建样本评估结果（辅助函数）"""
+diagnosis_match = check_diagnosis_match(predicted_diagnosis, ground_truth_diagnosis)
+⋮----
+example_results = [
+⋮----
+report = analyze_results(example_results)
+</file>
+
+<file path="scripts/generate_test_dialogs.py">
+"""
+从测试数据集生成调试测试对话文件
+
+将test.json中的对话转换为调试模式可用的格式
+"""
+⋮----
+DATA_DIR = Path(__file__).parent.parent / "data" / "text"
+⋮----
+def load_test_data()
+⋮----
+"""加载测试数据集"""
+test_file = DATA_DIR / "test.json"
+test_input_file = DATA_DIR / "test_input.json"
+⋮----
+test_data = json.load(f)
+⋮----
+test_input_data = json.load(f)
+⋮----
+def convert_to_debug_format(dialogue: list) -> str
+⋮----
+"""将对话转换为调试模式格式"""
+lines = []
+⋮----
+speaker = turn.get("speaker", "unknown")
+text = turn.get("sentence", "")
+⋮----
+def generate_test_dialogs(output_file: str = "test_dialogs.txt", num_samples: int = 10)
+⋮----
+"""生成测试对话文件"""
+⋮----
+sample_ids = list(test_data.keys())[:num_samples]
+⋮----
+output_path = DATA_DIR / output_file
+⋮----
+test_sample = test_data.get(sample_id, {})
+test_input_sample = test_input_data.get(sample_id, {})
+⋮----
+diagnosis = test_sample.get("diagnosis", "未知")
+symptoms = test_sample.get("explicit_info", {}).get("Symptom", [])
+⋮----
+dialogue = test_input_sample.get("dialogue", [])
+dialog_text = convert_to_debug_format(dialogue)
+⋮----
+all_symptoms = set(symptoms)
+⋮----
+def generate_single_sample(sample_id: str, output_file: str = None)
+⋮----
+"""生成单个样本的测试对话"""
+⋮----
+parser = argparse.ArgumentParser(description="生成测试对话")
+⋮----
+args = parser.parse_args()
+</file>
+
 <file path="scripts/set_cache_path.bat">
 @echo off
 REM 模型缓存路径配置脚本
@@ -1483,60 +2494,6 @@ end_ms = int(end_sample / sr * 1000)
 full_text = " ".join(all_text)
 </file>
 
-<file path="src/asr/test_confid.py">
-# 1. 固定缓存路径（与你原代码一致）
-_DEFAULT_CACHE_DIR = Path("D:/models/modelscope_cache")
-⋮----
-# 2. 模型初始化（关键：强制开启置信度相关参数）
-model = AutoModel(
-⋮----
-model="paraformer-zh",           # 基础模型
-vad_model="fsmn-vad",            # VAD分割
-punc_model="ct-punc",            # 标点恢复
-timestamp_extractor=True,        # 时间戳（词级对齐的基础）
-beam_search=True,                # ★ 核心：启用束搜索才能输出细粒度置信度
-device="cpu",                    # CPU运行
-disable_update=True,             # 锁定配置
-⋮----
-# 3. 音频路径（保持你的测试文件）
-wav_path = "d:/practice/MedicalAssisstant/data/audio/speech_asr_aishell1_testsets/wav/test/S0764/BAC009S0764W0121.wav"
-⋮----
-# 4. 生成结果（关键参数组合）
-result = model.generate(
-⋮----
-batch_size_s=300,                # 批次时长
-batch_type="seg",                # ★ 核心：分段处理配合beam_search
-return_raw=False                 # 确保结构化输出
-⋮----
-# ==================== 结果解析 ====================
-⋮----
-# 场景A：理想情况 - 存在sentence_info词级置信度
-⋮----
-sentences = result[0]["sentence_info"]
-⋮----
-# 优先提取词级置信度
-⋮----
-words = sent.get("words", ["未知"] * len(sent["word_conf"]))
-⋮----
-# 次选：整句置信度
-⋮----
-# 场景B：只有顶层置信度列表
-⋮----
-conf_list = result[0]["confidence"]
-text = result[0]["text"]
-words = text.split() if isinstance(text, str) else []
-⋮----
-word_display = words[i] if i < len(words) else f"词位_{i}"
-⋮----
-# 场景C：原始logits（部分历史版本）
-⋮----
-logits = result[0]["pred_logits"]
-⋮----
-# 可在此添加softmax转换逻辑
-⋮----
-# 场景D：完全缺失（最终兜底）
-</file>
-
 <file path="tests/test_confidence_feature.py">
 @pytest.fixture
 def db_session()
@@ -1717,20 +2674,6 @@ existing = db.query(LLMConfig).filter(LLMConfig.id == config_id).first()
 config = db.query(LLMConfig).filter(LLMConfig.id == config_id).first()
 </file>
 
-<file path="backend/database.py">
-engine = create_engine(
-⋮----
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-⋮----
-Base = declarative_base()
-⋮----
-def get_db()
-⋮----
-db = SessionLocal()
-⋮----
-def init_db()
-</file>
-
 <file path="backend/models/evidence.py">
 class EvidenceSpan(Base)
 ⋮----
@@ -1752,6 +2695,35 @@ created_at = Column(DateTime, default=datetime.utcnow)
 ⋮----
 visit = relationship("Visit", back_populates="evidence_spans")
 turn = relationship("TranscriptTurn", back_populates="evidence_spans")
+</file>
+
+<file path="backend/models/term.py">
+class NormalizedTerm(Base)
+⋮----
+__tablename__ = "normalized_terms"
+⋮----
+term_id = Column(Integer, primary_key=True, autoincrement=True)
+visit_id = Column(String, ForeignKey("visits.visit_id"), nullable=False)
+turn_id = Column(Integer, ForeignKey("transcript_turns.turn_id"), nullable=True)
+original_term = Column(String, nullable=False)
+normalized_term = Column(String, nullable=False)
+term_type = Column(String, nullable=False)
+confidence = Column(Float, nullable=False, default=0.0)
+is_risky = Column(Boolean, default=False)
+reasoning = Column(Text, nullable=True)
+⋮----
+code = Column(String, nullable=True)
+code_system = Column(String, nullable=True)
+source = Column(String, nullable=True, default="LLM")
+candidates = Column(JSON, nullable=True)
+cui = Column(String, nullable=True)
+⋮----
+created_at = Column(DateTime, default=datetime.utcnow)
+⋮----
+visit = relationship("Visit", back_populates="normalized_terms")
+turn = relationship("TranscriptTurn", back_populates="normalized_terms")
+⋮----
+def to_dict(self) -> dict
 </file>
 
 <file path="backend/models/visit.py">
@@ -1920,6 +2892,8 @@ latest = self.db.query(EMRRecord).filter(
 def _create_empty_emr(self, visit_id: str) -> EMRRecord
 ⋮----
 def save_emr(self, emr: EMRRecord)
+⋮----
+validation_result = self.validation_service.validate(emr.emr_json)
 ⋮----
 query = self.db.query(EMRRecord).filter(
 ⋮----
@@ -2252,56 +3226,241 @@ sentence_info = result["sentence_info"]
 full_text = "".join(seg.get("text", "") for seg in new_sentence_info)
 </file>
 
-<file path="frontend/index.html">
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>中文门诊病历生成系统</title>
-    <link rel="stylesheet" href="/static/css/style.css">
-</head>
-<body>
-    <div class="container">
-        <h1>中文门诊病历生成系统</h1>
-        
-        <div class="upload-section">
-            <div class="drop-zone" id="dropZone">
-                <p>拖拽音频文件到此处</p>
-                <p>或点击选择文件</p>
-                <p class="hint">支持: wav, mp3</p>
-                <input type="file" id="audioFile" accept=".wav,.mp3" hidden>
-            </div>
-            
-            <div class="form-group">
-                <label for="patientName">患者姓名:</label>
-                <input type="text" id="patientName" placeholder="可选">
-            </div>
-            
-            <div class="form-group">
-                <label for="visitDate">就诊日期:</label>
-                <input type="date" id="visitDate">
-            </div>
-            
-            <button id="uploadBtn" class="btn-primary" disabled>开始上传</button>
-            <button id="configBtn" class="btn-secondary">配置大模型</button>
-            
-            <div class="progress-section" id="progressSection" style="display: none;">
-                <div class="progress-bar">
-                    <div class="progress-fill" id="progressFill"></div>
-                </div>
-                <p id="progressText">上传进度: 0%</p>
-            </div>
-        </div>
-    </div>
+<file path="backend/services/speaker_role_classifier.py">
+"""
+说话人角色识别模块
+
+.. deprecated::
+    该模块已废弃，不再推荐使用。
     
-    <script src="/static/js/upload.js"></script>
-</body>
-</html>
+    废弃原因：
+    1. 基于词表的语义推断覆盖不全，无法处理所有医疗对话场景
+    2. 说话人分离(spk0/spk1)与医生/患者角色无固定对应关系
+    3. 角色识别已改由LLM在处理流程中完成，语义理解更准确
+    
+    该模块将在未来版本中移除。
+"""
+⋮----
+class SpeakerRole(Enum)
+⋮----
+DOCTOR = "doctor"
+PATIENT = "patient"
+UNKNOWN = "unknown"
+⋮----
+@dataclass
+class SpeakerSegment
+⋮----
+text: str
+start_ms: int
+end_ms: int
+speaker_id: str
+original_role: SpeakerRole
+corrected_role: SpeakerRole
+confidence: float
+correction_reason: str
+⋮----
+class SpeakerRoleClassifier
+⋮----
+DOCTOR_PATTERNS = [
+⋮----
+PATIENT_PATTERNS = [
+⋮----
+DOCTOR_QUESTION_PATTERNS = [
+⋮----
+PATIENT_QUESTION_PATTERNS = [
+⋮----
+QUESTION_ENDINGS = ["？", "?", "吗", "呢"]
+⋮----
+SYMPTOM_KEYWORDS = [
+⋮----
+DIAGNOSIS_KEYWORDS = [
+⋮----
+MEDICINE_KEYWORDS = [
+⋮----
+DOCTOR_ADVICE_KEYWORDS = [
+⋮----
+def __init__(self, use_llm: bool = False, llm_config: Optional[Dict] = None)
+⋮----
+def _compile_patterns(self)
+⋮----
+speaker_id_mapping = {}
+⋮----
+results = []
+speaker_roles = {}
+⋮----
+text = segment.get("text", "")
+speaker_id = segment.get("speaker_id", segment.get("speaker", "unknown"))
+start_ms = segment.get("start_ms", segment.get("start", 0))
+end_ms = segment.get("end_ms", segment.get("end", 0))
+⋮----
+original_role = SpeakerRole(speaker_id_mapping[speaker_id])
+⋮----
+original_role = self._map_speaker_id_to_role(speaker_id)
+⋮----
+text = text.strip()
+⋮----
+confidence = min(0.95, 0.5 + (doctor_score - patient_score) * 0.1)
+⋮----
+confidence = min(0.95, 0.5 + (patient_score - doctor_score) * 0.1)
+⋮----
+def _calculate_doctor_score(self, text: str) -> Tuple[float, List[str]]
+⋮----
+score = 0.0
+reasons = []
+⋮----
+def _calculate_patient_score(self, text: str) -> Tuple[float, List[str]]
+⋮----
+def _calculate_question_scores(self, text: str) -> Tuple[float, float]
+⋮----
+doctor_score = 0.0
+patient_score = 0.0
+⋮----
+def _detect_mixed_speakers(self, text: str) -> Tuple[bool, str]
+⋮----
+has_patient_pattern = False
+has_doctor_pattern = False
+reason = ""
+⋮----
+patient_indicators = ["特别是", "我这", "有时候", "大概", "没有"]
+doctor_indicators = ["持续多长时间", "有没有.*症状", "请问", "哪里不舒服"]
+⋮----
+has_patient_pattern = True
+reason = f"患者特征: {indicator}"
+⋮----
+has_doctor_pattern = True
+⋮----
+reason = f"医生特征: {pattern}"
+⋮----
+def _analyze_first_half(self, text: str) -> Tuple[float, SpeakerRole]
+⋮----
+mid_point = len(text) // 2
+first_half = text[:mid_point]
+⋮----
+patient_indicators = ["特别是", "我这", "有时候", "大概", "早上", "晚上", "没有"]
+doctor_indicators = ["持续多长时间", "有没有", "请问", "哪里不舒服", "症状"]
+⋮----
+prev_segment = all_segments[current_index - 1]
+prev_text = prev_segment.get("text", "")
+prev_speaker_id = prev_segment.get("speaker_id", prev_segment.get("speaker", "unknown"))
+⋮----
+prev_role = speaker_roles[prev_speaker_id]
+⋮----
+def _map_speaker_id_to_role(self, speaker_id: str) -> SpeakerRole
+⋮----
+spk_num = int(speaker_id.replace("spk", ""))
+⋮----
+speaker_doctor_scores: Dict[str, float] = {}
+speaker_patient_scores: Dict[str, float] = {}
+⋮----
+classified = self.classify_segments(segments)
+⋮----
+speaker_id = seg.speaker_id
+⋮----
+speaker_mapping = {}
+⋮----
+doctor_score = speaker_doctor_scores.get(speaker_id, 0)
+patient_score = speaker_patient_scores.get(speaker_id, 0)
+⋮----
+def get_correction_summary(self, segments: List[SpeakerSegment]) -> Dict
+⋮----
+total = len(segments)
+corrected = sum(1 for s in segments if s.original_role != s.corrected_role)
+doctor_count = sum(1 for s in segments if s.corrected_role == SpeakerRole.DOCTOR)
+patient_count = sum(1 for s in segments if s.corrected_role == SpeakerRole.PATIENT)
+unknown_count = sum(1 for s in segments if s.corrected_role == SpeakerRole.UNKNOWN)
 </file>
 
-<file path="frontend/js/upload.js">
-function handleFileSelect(file)
+<file path="backend/services/terminology_service.py">
+class TerminologyService
+⋮----
+def _init_umls(self)
+⋮----
+def _load_term_dict(self) -> Dict[str, Any]
+⋮----
+umls_result = self._normalize_by_umls(term, context)
+⋮----
+llm_result = self._normalize_by_llm(term, context)
+⋮----
+source = "LLM"
+⋮----
+is_risky = confidence < 0.5
+⋮----
+def _infer_term_type(self, term: str) -> str
+⋮----
+type_dict = self.term_dict[type_name]
+⋮----
+type_dict = self.term_dict[term_type]
+⋮----
+similar_terms = self._find_similar_terms(term)
+⋮----
+search_result = self.umls_client.search_term(term, language="CHI")
+⋮----
+search_result = self.umls_client.search_term(term, language="ENG")
+⋮----
+candidates = search_result.candidates[:5]
+⋮----
+selected = self._llm_select_candidate(term, context, candidates)
+⋮----
+best_candidate = selected
+⋮----
+best_candidate = candidates[0]
+⋮----
+candidates_data = [
+⋮----
+confidence = min(0.95, 0.7 + best_candidate.score * 0.25)
+⋮----
+reasoning = f"UMLS匹配: {term} -> {best_candidate.term} (CUI: {best_candidate.cui})"
+⋮----
+candidates_text = "\n".join([
+⋮----
+prompt = f"""你是一个医学术语专家。请从以下候选术语中选择最匹配原始术语的一个。
+⋮----
+response = self.llm_service.generate(prompt, max_tokens=10)
+⋮----
+match = re.search(r'(\d+)', response.text)
+⋮----
+idx = int(match.group(1)) - 1
+⋮----
+atoms = self.umls_client.get_atoms(candidate.cui)
+⋮----
+code_sources = ["ICD10CM", "ICD10", "SNOMEDCT_US", "RXNORM"]
+⋮----
+source = atom.get("rootSource", "")
+⋮----
+code = atom.get("code", "")
+⋮----
+icd_pattern = r'(?:ICD[-_]?10[-_]?CM?[:\s]*)([A-Z]\d{2}(?:\.\w+)?)'
+match = re.search(icd_pattern, reasoning, re.IGNORECASE)
+⋮----
+snomed_pattern = r'(?:SNOMED[-_]?CT?[:\s]*)(\d+)'
+match = re.search(snomed_pattern, reasoning, re.IGNORECASE)
+⋮----
+response = self.llm_service.generate_with_template(
+⋮----
+result = json.loads(response.text)
+⋮----
+def _find_similar_terms(self, term: str) -> List[Tuple[str, float]]
+⋮----
+similar = []
+⋮----
+all_terms = [standard] + aliases
+⋮----
+similarity = self._calculate_similarity(term, t)
+⋮----
+def _calculate_similarity(self, term1: str, term2: str) -> float
+⋮----
+max_len = max(len1, len2)
+min_len = min(len1, len2)
+⋮----
+common_chars = 0
+⋮----
+terms = []
+⋮----
+normalized = self.normalize_term(term, context, type_name)
+⋮----
+def clear_cache(self) -> int
+⋮----
+def get_cache_stats(self) -> Optional[Dict[str, Any]]
 </file>
 
 <file path="frontend/result.html">
@@ -2346,1087 +3505,6 @@ function handleFileSelect(file)
     <script src="/static/js/result.js"></script>
 </body>
 </html>
-</file>
-
-<file path="QWEN.md">
-# 中文门诊病历生成系统 - QWEN Context
-
-## 项目概述
-
-这是一个**中文医疗 AI 问诊助手**项目，核心目标是将医患对话的语音输入转为结构化病历（SOAP 格式）。系统采用分层架构，当前已实现完整的 **ASR（语音识别）模块** 和 **Web 应用界面**。
-
-### 核心功能
-
-1. **语音转文字**：使用 FunASR（Paraformer-large 模型）将中文医疗对话转为文本
-2. **说话人分离**：自动区分医生和患者发言（偶数段→医生，奇数段→患者）
-3. **医疗术语增强**：通过热词定制（80+ 术语）提升药名、病名、检查名的识别准确率
-4. **ASR 纠错**：基于规则和拼音相似性的医疗术语智能纠错
-5. **Web 界面**：支持音频上传、转写任务管理、结果展示（医生/患者对话区分显示）
-6. **结构化病历生成**：将转写文本生成 SOAP 格式病历（规划中）
-
-### 技术栈
-
-| 层级 | 技术选型 |
-|------|---------|
-| **后端框架** | FastAPI + SQLAlchemy + SQLite |
-| **前端** | HTML + CSS + JavaScript（原生） |
-| **ASR 引擎** | FunASR (Paraformer-large) |
-| **音频处理** | librosa + soundfile |
-| **术语纠错** | pypinyin + python-Levenshtein |
-
-### 系统架构
-
-```
-输入层 → 处理层 → 输出层
- ASR      证据选择    结构化病历
- 文本      术语规范化   SOAP 格式
-          LLM 生成
-          验证检查
-```
-
-**当前已实现**：输入层（ASR）+ 部分处理层（后处理纠错、术语规范化）
-
-## 项目结构
-
-```
-MedicalAssisstant/
-├── backend/                    # 后端服务（FastAPI）
-│   ├── api/                   # API 路由
-│   │   ├── upload.py          # 音频上传接口
-│   │   ├── asr.py             # ASR 转写接口
-│   │   └── task.py            # 任务状态接口
-│   ├── models/                # SQLAlchemy 数据模型
-│   │   ├── visit.py           # 就诊记录模型
-│   │   ├── transcript.py      # 转写记录模型
-│   │   └── task.py            # 任务状态模型
-│   ├── services/              # 业务逻辑
-│   │   ├── asr_service.py     # ASR 服务（封装 FunASR）
-│   │   ├── postprocessor.py   # 后处理服务（纠错）
-│   │   └── normalizer.py      # 术语规范化服务
-│   ├── utils/                 # 工具函数
-│   │   └── audio_utils.py     # 音频处理工具
-│   ├── config.py              # 配置管理（pydantic-settings）
-│   ├── database.py            # 数据库连接（SQLite）
-│   └── main.py                # FastAPI 应用入口
-├── frontend/                   # 前端界面（原生 HTML/CSS/JS）
-│   ├── css/
-│   │   └── style.css
-│   ├── js/
-│   │   ├── upload.js          # 上传页面逻辑
-│   │   └── result.js          # 结果展示逻辑
-│   ├── index.html             # 音频上传页面
-│   └── result.html            # 转写结果页面
-├── src/asr/                    # ASR 模块（工厂模式 + 策略模式）
-│   ├── base.py                # ASRBase 抽象基类 + ASRResult 数据类
-│   ├── factory.py             # ASRFactory 工厂类
-│   ├── funasr_engine.py       # FunASR 引擎实现
-│   └── medasr_engine.py       # MedASR 引擎实现（⚠️ 仅支持英文）
-├── config/                     # 配置文件
-│   ├── hotwords_medical.txt    # 医疗热词表（80+ 术语）
-│   └── asr_correction_rules.json # ASR 纠错规则
-├── data/                       # 数据存储
-│   ├── audio/                 # 音频文件存储
-│   ├── database/              # SQLite 数据库文件
-│   └── logs/                  # 日志文件
-├── docs/                       # 项目文档
-│   ├── architecture.md         # 系统架构设计（详细）
-│   ├── 技术选型文档.md          # ASR 方案对比
-│   ├── completion_status.md    # 开发完成状态
-│   └── ...
-├── tests/                      # 测试脚本
-│   ├── test_asr_oneclick.py   # 一键测试
-│   └── test_asr_quick.py      # 快速测试
-├── scripts/                    # 工具脚本
-│   ├── compare_asr.py         # ASR 对比测试
-│   └── download_medical_dataset.py  # 医疗数据集/合成音频
-├── requirements.txt            # 项目完整依赖
-├── requirements-asr.txt        # ASR 模块依赖
-└── README.md                   # 项目文档
-```
-
-## 构建与运行
-
-### 环境准备
-
-```bash
-# 创建虚拟环境（如尚未激活）
-# Windows:
-med_env\Scripts\activate
-
-# 安装所有依赖
-pip install -r requirements.txt
-
-# 如需 CPU 版 PyTorch（推荐，适合 AMD 780M 集成显卡）
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-```
-
-### 初始化数据库
-
-```bash
-# 初始化 SQLite 数据库
-python -c "from backend.database import init_db; init_db()"
-```
-
-### 启动服务
-
-```bash
-# 启动 FastAPI 服务（开发模式）
-uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-首次启动时，FunASR 会自动下载模型（约 1GB），请耐心等待。
-
-### 访问系统
-
-- **主页**：http://localhost:8000/
-- **API 文档（Swagger）**：http://localhost:8000/docs
-- **API 文档（ReDoc）**：http://localhost:8000/redoc
-
-### 运行 ASR 测试
-
-```bash
-# 对比测试所有引擎
-python scripts/compare_asr.py --audio test.wav --device cpu
-
-# 只测试 FunASR
-python scripts/compare_asr.py --audio test.wav --engine funasr
-
-# 使用医疗热词
-python scripts/compare_asr.py --audio test.wav --hotword config/hotwords_medical.txt
-```
-
-### 生成测试数据
-
-```bash
-# 使用 Edge-TTS 合成医疗对话音频
-python scripts/download_medical_dataset.py --method synthetic --output_dir ./data/medical
-
-# 或使用离线 pyttsx3 合成
-python scripts/download_medical_dataset.py --method pyttsx3 --output_dir ./data/medical
-```
-
-## 配置说明
-
-### 环境变量（.env 文件，可选）
-
-```env
-APP_NAME=中文门诊病历生成系统
-APP_VERSION=1.0.0
-DEBUG=True
-
-DATABASE_URL=sqlite:///data/database/medical.db
-
-AUDIO_STORAGE_PATH=data/audio
-MAX_AUDIO_SIZE=104857600  # 100MB
-
-ASR_ENGINE=funasr
-ASR_DEVICE=cpu  # 或 cuda
-
-HOTWORD_PATH=config/hotwords_medical.txt
-
-ENABLE_DIARIZATION=True
-ENABLE_ASR_CORRECTION=True
-CORRECTION_CONFIDENCE_THRESHOLD=0.7
-```
-
-### 配置管理
-
-配置通过 `backend/config.py` 的 `Settings` 类管理，使用 `pydantic-settings`，支持从环境变量或 `.env` 文件读取。
-
-## API 接口
-
-### 1. 上传音频
-
-```http
-POST /api/upload
-Content-Type: multipart/form-data
-
-Parameters:
-- audio_file: 音频文件（WAV/MP3）
-- patient_name: 患者姓名（可选）
-- visit_date: 就诊日期（可选）
-
-Response:
-{
-  "success": true,
-  "visit_id": "uuid",
-  "audio_path": "data/audio/uuid.wav",
-  "audio_duration": 120.5,
-  "message": "音频上传成功"
-}
-```
-
-### 2. 开始转写
-
-```http
-POST /api/asr/transcribe/{visit_id}
-
-Response:
-{
-  "success": true,
-  "visit_id": "uuid",
-  "task_id": "uuid",
-  "status": "processing",
-  "message": "ASR转写任务已启动"
-}
-```
-
-### 3. 查询任务状态
-
-```http
-GET /api/task/{task_id}
-
-Response:
-{
-  "task_id": "uuid",
-  "visit_id": "uuid",
-  "task_type": "asr",
-  "status": "completed",
-  "progress": 100,
-  "error_message": null,
-  "created_at": "2024-01-01T00:00:00",
-  "updated_at": "2024-01-01T00:01:00"
-}
-```
-
-### 4. 获取转写结果
-
-```http
-GET /api/asr/transcript/{visit_id}
-
-Response:
-{
-  "visit_id": "uuid",
-  "status": "completed",
-  "audio_duration": 120.5,
-  "turns": [
-    {
-      "turn_id": 1,
-      "turn_index": 0,
-      "speaker": "doctor",
-      "text": "您好，请问哪里不舒服？",
-      "original_text": "您好，请问哪里不舒服？",
-      "corrected_text": "您好，请问哪里不舒服？",
-      "start_ms": 0,
-      "end_ms": 3000,
-      "confidence": 0.95
-    }
-  ]
-}
-```
-
-## 架构设计
-
-### ASR 模块架构
-
-采用**工厂模式 + 策略模式**：
-
-- **`ASRBase`**：抽象基类，定义 `load_model()` 和 `transcribe()` 接口
-- **`FunASREngine`**：FunASR 实现，支持 VAD、标点恢复、热词定制
-- **`MedASREngine`**：MedASR 实现（⚠️ 仅支持英文医疗场景）
-- **`ASRFactory`**：统一创建入口，支持动态注册新引擎
-- **`ASRResult`**：统一返回数据结构（文本、RTF、时间戳等）
-
-### ASR 数据流
-
-```
-音频输入 → 预处理（16kHz/单声道） → VAD 切分 → ASR 转写 → 标点恢复 → 热词增强 → 文本输出
-```
-
-### 说话人分离策略
-
-当前版本使用简单的**交替映射策略**：
-- 偶数段（0, 2, 4...） → 医生（doctor）
-- 奇数段（1, 3, 5...） → 患者（patient）
-
-后续版本将集成专业的说话人分离模型。
-
-### 扩展新引擎
-
-```python
-from src.asr import ASRBase, ASRResult, ASRFactory
-
-class WhisperEngine(ASRBase):
-    def __init__(self, device="cpu"):
-        super().__init__("Whisper", device)
-    
-    def load_model(self):
-        # 加载模型
-        pass
-    
-    def transcribe(self, audio_path, **kwargs) -> ASRResult:
-        # 转写逻辑
-        pass
-
-# 注册
-ASRFactory.register("whisper", WhisperEngine)
-```
-
-## 开发约定
-
-### 代码风格
-
-- 使用 Python 类型提示（type hints）
-- 抽象基类定义接口，具体实现通过继承扩展
-- 数据类使用 `@dataclass`
-- 工厂模式管理引擎注册和创建
-- FastAPI 路由按功能模块组织（api/ 目录）
-
-### 测试
-
-```bash
-# 运行所有测试
-pytest tests/
-
-# 运行特定测试
-pytest tests/test_asr.py -v
-```
-
-### 代码质量
-
-```bash
-# 格式化代码
-black backend/
-
-# 检查代码风格
-flake8 backend/
-```
-
-## 重要注意事项
-
-1. **MedASR 仅支持英文**：官方暂无中文版本，对中文音频会输出警告
-2. **AMD 780M 建议使用 CPU 模式**：ROCm 对集成显卡支持有限
-3. **热词文件**：`config/hotwords_medical.txt` 包含 80+ 常见医疗术语，可根据科室扩展
-4. **长音频处理**：VAD 自动切分，单段不超过 30 秒
-5. **依赖安装**：首次运行需安装 `funasr`、`modelscope`、`librosa` 等
-6. **模型下载**：首次运行 FunASR 会自动下载约 1GB 模型文件
-7. **音频格式推荐**：16kHz、WAV（PCM 编码）、单声道
-
-## 技术选型结论
-
-| 模块 | 选择方案 | 理由 |
-|------|---------|------|
-| ASR 主线 | **FunASR + Paraformer** | 流程完整（VAD + 标点 + 热词）、部署友好、上手门槛低 |
-| 备选方案 | WeNet 2.0、Qwen3 ASR、FireRedASR | 用于并行 POC 验证 |
-| 硬件适配 | CPU 模式优先 | AMD 780M 集成显卡，ROCm 支持有限 |
-
-## 相关文档
-
-- **技术选型**：`docs/技术选型文档.md`（FunASR vs WeNet vs Qwen3 ASR 等详细对比）
-- **系统架构**：`docs/architecture.md`（完整架构设计、数据流图、模块接口）
-- **完成状态**：`docs/completion_status.md`（已完成任务和待验证项）
-- **上手指南**：`docs/中文医疗_ASR_上手路线.md`
-- **ASR 测试指南**：`docs/asr_test_guide.md`
-</file>
-
-<file path="README.md">
-# 中文门诊病历生成系统
-
-基于FunASR的中文门诊音频转写系统，支持说话人分离和医疗术语纠错。
-
-## 功能特性
-
-### M1里程碑：音频到文本
-- ✅ 音频文件上传（支持WAV/MP3格式）
-- ✅ 自动语音识别（ASR）转写
-- ✅ 说话人分离（区分不同说话人）
-- ✅ 医疗术语智能纠错
-- ✅ 转写结果标准化
-- ✅ Web界面展示
-- ✅ 任务状态跟踪
-
-### M2里程碑：文本到病历
-- ✅ 证据选择（从对话中筛选相关片段）
-- ✅ 术语规范化（口语化表述映射到标准术语）
-- ✅ 病历要素抽取（SOAP格式）
-- ✅ 结构化病历生成
-- ✅ 证据回链（每个字段可追溯到原始对话）
-- ✅ 版本化管理（支持多版本病历）
-
-## 技术栈
-
-- **后端**: FastAPI + SQLAlchemy + SQLite
-- **前端**: HTML + CSS + JavaScript
-- **ASR引擎**: FunASR (Paraformer-large)
-- **音频处理**: librosa + soundfile
-
-## 快速开始
-
-### 1. 环境要求
-
-- Python 3.9+
-- 操作系统: Windows/Linux/macOS
-
-### 2. 安装依赖
-
-```bash
-# 克隆项目
-git clone <repository-url>
-cd MedicalAssisstant
-
-# 创建虚拟环境（推荐）
-python -m venv venv
-
-# 激活虚拟环境
-# Windows:
-venv\Scripts\activate
-# Linux/Mac:
-source venv/bin/activate
-
-# 安装依赖
-pip install -r requirements.txt
-```
-
-### 3. 初始化数据库
-
-```bash
-# 初始化SQLite数据库
-python -c "from backend.database import init_db; init_db()"
-```
-
-### 4. 启动服务
-
-```bash
-# 启动FastAPI服务
-uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-首次启动时，FunASR会自动下载模型（约1GB），请耐心等待。
-
-### 5. 访问系统
-
-打开浏览器访问: http://localhost:8000/
-
-## 使用流程
-
-### 阶段一：音频转写（M1里程碑）
-
-#### 1. 上传音频
-
-- 访问首页
-- 拖拽或点击上传音频文件（支持WAV/MP3）
-- 填写患者姓名和就诊日期（可选）
-- 点击"开始上传"
-
-#### 2. 开始转写
-
-- 上传成功后自动跳转到结果页面
-- 点击"开始转写"按钮
-- 系统会在后台处理音频
-
-#### 3. 查看转写结果
-
-- 转写完成后自动显示结果
-- 不同说话人用不同颜色区分
-- 每段对话显示时间戳和置信度
-
-### 阶段二：病历生成（M2里程碑）
-
-#### 4. 配置LLM服务（可选但推荐）
-
-**方式1：通过前端界面配置（推荐）**
-
-- 点击首页或转写结果页面的"配置大模型"按钮
-- 填写配置信息（以魔搭ModelScope为例）：
-  - 配置名称：例如 `modelscope`
-  - 服务商：选择 `OpenAI兼容接口`
-  - 模型名称：例如 `ZhipuAI/GLM-5.1`
-  - API Key：输入您的API Key（如 `ms-xxxxx`）
-  - API Endpoint：例如 `https://api-inference.modelscope.cn/v1`
-  - 其他参数保持默认即可
-- 点击"保存配置"
-
-**支持的LLM服务商**：
-
-- **魔搭ModelScope**（推荐）：免费使用，支持多种开源模型
-  - Endpoint: `https://api-inference.modelscope.cn/v1`
-  - 模型: `ZhipuAI/GLM-5.1`, `Qwen/Qwen2.5-72B-Instruct` 等
-  
-- **通义千问**：阿里云大模型服务
-  - Endpoint: `https://dashscope.aliyuncs.com/compatible-mode/v1`
-  - 模型: `qwen-plus`, `qwen-turbo` 等
-  
-- **OpenAI**：GPT系列模型
-  - Endpoint: `https://api.openai.com/v1`
-  - 模型: `gpt-4`, `gpt-3.5-turbo` 等
-  
-- **本地模型**：如Ollama
-  - Endpoint: `http://localhost:11434/v1`
-  - 模型: `qwen2.5:7b`, `llama3.1:8b` 等
-
-**方式2：通过API配置**
-
-```bash
-# 魔搭ModelScope示例
-POST /api/llm/config
-{
-  "config_name": "modelscope",
-  "provider": "openai_compatible",
-  "model_name": "ZhipuAI/GLM-5.1",
-  "api_key": "ms-xxxxx",
-  "api_endpoint": "https://api-inference.modelscope.cn/v1",
-  "is_active": true
-}
-
-# 通义千问示例
-POST /api/llm/config
-{
-  "config_name": "qwen",
-  "provider": "openai_compatible",
-  "model_name": "qwen-plus",
-  "api_key": "your-api-key",
-  "api_endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-  "is_active": true
-}
-```
-
-#### 5. 生成病历
-
-**方式1：通过前端界面生成（推荐）**
-
-- 转写完成后，点击"生成病历"按钮
-- 系统自动跳转到病历生成页面
-- 点击"生成病历"按钮开始生成
-- 生成完成后点击"查看病历"查看结果
-
-**方式2：通过API生成**
-
-```bash
-POST /api/emr/process
-{
-  "visit_id": "your-visit-id",
-  "use_llm": true,
-  "save_intermediate": true
-}
-```
-
-**方式3：使用测试脚本**
-
-```bash
-python scripts/test_m2_milestone.py
-```
-
-#### 6. 查看病历
-
-**方式1：通过前端界面查看（推荐）**
-
-- 在病历生成页面点击"查看病历"
-- 选择不同版本查看历史病历
-- 病历内容按SOAP格式展示：
-  - 主观数据（Subjective）
-  - 客观数据（Objective）
-  - 评估（Assessment）
-  - 计划（Plan）
-
-**方式2：通过API查看**
-
-```bash
-# 获取最新病历
-GET /api/emr/record/{visit_id}
-
-# 获取指定版本病历
-GET /api/emr/record/{visit_id}?version=1
-
-# 获取所有版本
-GET /api/emr/versions/{visit_id}
-```
-
-#### 7. 病历内容说明
-
-生成的病历包含以下部分：
-
-- **主观数据（Subjective）**：主诉、现病史、既往史
-- **客观数据（Objective）**：体格检查、辅助检查
-- **评估（Assessment）**：诊断
-- **计划（Plan）**：治疗方案、医嘱
-
-每个字段都包含：
-- `value`：字段内容
-- `evidence_ids`：证据ID列表（可追溯到原始对话）
-- `confidence`：置信度
-
-## 项目结构
-
-```
-MedicalAssisstant/
-├── backend/                 # 后端代码
-│   ├── api/                # API接口
-│   │   ├── upload.py      # 上传接口
-│   │   ├── asr.py         # ASR转写接口
-│   │   ├── task.py        # 任务状态接口
-│   │   ├── llm.py         # LLM配置接口
-│   │   └── emr.py         # 病历生成接口
-│   ├── models/            # 数据模型
-│   │   ├── visit.py       # 就诊记录模型
-│   │   ├── transcript.py  # 转写记录模型
-│   │   ├── task.py        # 任务状态模型
-│   │   ├── llm_config.py  # LLM配置模型
-│   │   ├── evidence.py    # 证据片段模型
-│   │   ├── term.py        # 规范化术语模型
-│   │   ├── extracted_item.py # 病历要素模型
-│   │   └── emr_record.py  # 病历记录模型
-│   ├── services/          # 业务逻辑
-│   │   ├── asr_service.py # ASR服务
-│   │   ├── postprocessor.py # 后处理纠错
-│   │   ├── normalizer.py  # 结果标准化
-│   │   ├── evidence_service.py # 证据选择服务
-│   │   ├── terminology_service.py # 术语规范化服务
-│   │   ├── extraction_service.py # 病历要素抽取服务
-│   │   ├── emr_generation_service.py # 病历生成服务
-│   │   ├── medical_record_pipeline.py # 整合服务
-│   │   └── llm/           # LLM服务模块
-│   │       ├── llm_service.py # LLM服务
-│   │       ├── base.py    # 基础接口
-│   │       ├── openai_compatible_adapter.py # OpenAI兼容适配器
-│   │       └── prompts.py # Prompt模板
-│   ├── utils/             # 工具函数
-│   │   └── audio_utils.py # 音频处理工具
-│   ├── config.py          # 配置管理
-│   ├── database.py        # 数据库连接
-│   └── main.py            # FastAPI应用入口
-├── frontend/              # 前端代码
-│   ├── css/              # 样式文件
-│   │   └── style.css
-│   ├── js/               # JavaScript逻辑
-│   │   ├── upload.js     # 上传逻辑
-│   │   └── result.js     # 结果展示逻辑
-│   ├── index.html        # 上传页面
-│   └── result.html       # 结果页面
-├── config/               # 配置文件
-│   ├── asr_correction_rules.json  # ASR纠错规则
-│   ├── hotwords_medical.txt       # 医疗热词
-│   ├── field_triggers.json        # 字段触发词表
-│   └── medical_terms.json         # 医学术语词表
-├── scripts/              # 测试脚本
-│   ├── test_m2_milestone.py # M2里程碑测试
-│   ├── test_qwen3_asr.py # Qwen3-ASR测试
-│   └── demo_diarization.py # 说话人分离演示
-├── data/                 # 数据存储
-│   ├── audio/           # 音频文件存储
-│   ├── database/        # SQLite数据库
-│   └── logs/            # 日志文件
-├── src/                  # FunASR模块
-│   └── asr/             # ASR引擎
-│       ├── funasr_engine.py # FunASR引擎
-│       ├── qwen3_asr_engine.py # Qwen3-ASR引擎
-│       └── factory.py   # ASR工厂
-├── docs/                 # 文档
-│   ├── architecture.md  # 架构文档
-│   ├── completion_status.md # 完成状态记录
-│   └── 开发任务清单.md  # 开发任务清单
-├── requirements.txt      # Python依赖
-└── README.md            # 项目文档
-```
-
-## API文档
-
-启动服务后，访问以下地址查看API文档：
-
-- Swagger UI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
-
-### 主要接口
-
-#### M1里程碑：音频转写接口
-
-##### 1. 上传音频
-
-```http
-POST /api/upload
-Content-Type: multipart/form-data
-
-Parameters:
-- audio_file: 音频文件（WAV/MP3）
-- patient_name: 患者姓名（可选）
-- visit_date: 就诊日期（可选）
-
-Response:
-{
-  "success": true,
-  "visit_id": "uuid",
-  "audio_path": "data/audio/uuid.wav",
-  "audio_duration": 120.5,
-  "message": "音频上传成功"
-}
-```
-
-##### 2. 开始转写
-
-```http
-POST /api/asr/transcribe/{visit_id}
-
-Response:
-{
-  "success": true,
-  "visit_id": "uuid",
-  "task_id": "uuid",
-  "status": "processing",
-  "message": "ASR转写任务已启动"
-}
-```
-
-##### 3. 查询任务状态
-
-```http
-GET /api/task/{task_id}
-
-Response:
-{
-  "task_id": "uuid",
-  "visit_id": "uuid",
-  "task_type": "asr",
-  "status": "completed",
-  "progress": 100,
-  "error_message": null,
-  "created_at": "2024-01-01T00:00:00",
-  "updated_at": "2024-01-01T00:01:00"
-}
-```
-
-##### 4. 获取转写结果
-
-```http
-GET /api/asr/transcript/{visit_id}
-
-Response:
-{
-  "visit_id": "uuid",
-  "status": "completed",
-  "audio_duration": 120.5,
-  "turns": [
-    {
-      "turn_id": 1,
-      "turn_index": 0,
-      "speaker": "spk0",
-      "text": "您好，请问哪里不舒服？",
-      "original_text": "您好，请问哪里不舒服？",
-      "corrected_text": "您好，请问哪里不舒服？",
-      "start_ms": 0,
-      "end_ms": 3000,
-      "confidence": 0.95
-    }
-  ]
-}
-```
-
-#### M2里程碑：病历生成接口
-
-##### 5. 配置LLM服务
-
-```http
-POST /api/llm/config
-Content-Type: application/json
-
-Request:
-{
-  "config_name": "qwen",
-  "provider": "openai_compatible",
-  "model_name": "qwen-plus",
-  "api_key": "your-api-key",
-  "api_endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-  "max_tokens": 2048,
-  "temperature": "0.7",
-  "is_active": true
-}
-
-Response:
-{
-  "success": true,
-  "config_id": 1,
-  "message": "LLM配置创建成功"
-}
-```
-
-##### 6. 处理就诊记录生成病历
-
-```http
-POST /api/emr/process
-Content-Type: application/json
-
-Request:
-{
-  "visit_id": "uuid",
-  "use_llm": true,
-  "save_intermediate": true
-}
-
-Response:
-{
-  "visit_id": "uuid",
-  "status": "completed",
-  "evidence_count": 10,
-  "normalized_terms_count": 11,
-  "extracted_items_count": 20,
-  "emr_record": {
-    "record_id": 1,
-    "version": 1,
-    "record_type": "system_draft",
-    "emr_json": {
-      "subjective": {
-        "text": "主诉：头疼三天...",
-        "chief_complaint": {...},
-        "history_present_illness": {...}
-      },
-      "objective": {...},
-      "assessment": {...},
-      "plan": {...}
-    }
-  },
-  "errors": []
-}
-```
-
-##### 7. 查询处理状态
-
-```http
-GET /api/emr/status/{visit_id}
-
-Response:
-{
-  "visit_id": "uuid",
-  "evidence_count": 10,
-  "normalized_terms_count": 11,
-  "extracted_items_count": 20,
-  "has_emr": true,
-  "emr_version": 1
-}
-```
-
-##### 8. 获取病历记录
-
-```http
-GET /api/emr/record/{visit_id}?version=1
-
-Response:
-{
-  "record_id": 1,
-  "visit_id": "uuid",
-  "version": 1,
-  "record_type": "system_draft",
-  "emr_json": {
-    "subjective": {...},
-    "objective": {...},
-    "assessment": {...},
-    "plan": {...}
-  },
-  "evidence_mapping": {
-    "subjective.chief_complaint": [1, 2, 3],
-    "assessment.diagnosis": [5, 6]
-  },
-  "validation_errors": null,
-  "created_at": "2026-04-17T00:00:00"
-}
-```
-
-##### 9. 获取所有版本
-
-```http
-GET /api/emr/versions/{visit_id}
-
-Response:
-{
-  "visit_id": "uuid",
-  "versions": [
-    {
-      "version": 1,
-      "record_type": "system_draft",
-      "created_at": "2026-04-17T00:00:00"
-    },
-    {
-      "version": 2,
-      "record_type": "reviewed",
-      "created_at": "2026-04-17T01:00:00"
-    }
-  ]
-}
-```
-
-## 配置说明
-
-### 环境变量
-
-创建 `.env` 文件（可选）：
-
-```env
-# 应用配置
-APP_NAME=中文门诊病历生成系统
-APP_VERSION=1.0.0
-DEBUG=True
-
-# 数据库配置
-DATABASE_URL=sqlite:///data/database/medical.db
-
-# 音频配置
-AUDIO_STORAGE_PATH=data/audio
-MAX_AUDIO_SIZE=104857600  # 100MB
-
-# ASR配置
-ASR_ENGINE=funasr
-ASR_DEVICE=cpu  # 或 cuda
-HOTWORD_PATH=config/hotwords_medical.txt
-
-# 功能开关
-ENABLE_DIARIZATION=True
-ENABLE_ASR_CORRECTION=True
-CORRECTION_CONFIDENCE_THRESHOLD=0.7
-```
-
-### ASR纠错规则
-
-编辑 `config/asr_correction_rules.json` 添加自定义纠错规则：
-
-```json
-{
-    "medical_terms": {
-        "标准术语": ["错误识别1", "错误识别2"]
-    },
-    "pinyin_similar": {
-        "标准术语": ["拼音相似词1", "拼音相似词2"]
-    }
-}
-```
-
-### 字段触发词表
-
-编辑 `config/field_triggers.json` 配置证据选择触发词：
-
-```json
-{
-  "chief_complaint": {
-    "description": "主诉",
-    "speaker_preference": "patient",
-    "triggers": ["主诉", "哪里不舒服", "怎么了"],
-    "weight": 1.0
-  }
-}
-```
-
-### 医学术语词表
-
-编辑 `config/medical_terms.json` 配置术语规范化映射：
-
-```json
-{
-  "symptoms": {
-    "头痛": ["头疼", "脑袋疼", "头昏"],
-    "发热": ["发烧", "体温高"]
-  },
-  "drugs": {
-    "阿莫西林": ["阿莫西林", "阿莫仙"]
-  }
-}
-```
-
-## 注意事项
-
-### 1. 模型下载
-
-首次运行时，FunASR会自动下载以下模型：
-- Paraformer-large（语音识别）
-- FSMN-VAD（语音活动检测）
-- CT-Transformer（标点恢复）
-
-模型大小约1GB，下载时间取决于网络速度。
-
-### 2. 音频格式
-
-推荐使用：
-- 采样率：16kHz
-- 格式：WAV（PCM编码）
-- 声道：单声道
-
-系统会自动转换其他格式，但可能影响识别效果。
-
-### 3. 说话人分离
-
-当前版本使用FunASR的CAM++模型进行说话人分离：
-- 支持自动识别不同说话人
-- 输出格式：spk0, spk1, spk2...
-- 角色识别（医生/患者）由后续大模型模块处理
-
-### 4. 性能优化
-
-- CPU模式：适合开发测试，速度较慢
-- GPU模式：推荐使用CUDA，速度提升10-20倍
-
-启用GPU：
-```bash
-# 安装CUDA版本的PyTorch
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-
-# 修改配置
-ASR_DEVICE=cuda
-```
-
-## 故障排除
-
-### 1. 模型下载失败
-
-```bash
-# 手动下载模型到本地
-export MODELSCOPE_CACHE=/path/to/model/cache
-```
-
-### 2. 音频处理错误
-
-```bash
-# 安装音频处理依赖
-pip install librosa soundfile
-```
-
-### 3. 数据库错误
-
-```bash
-# 重新初始化数据库
-rm data/database/medical.db
-python -c "from backend.database import init_db; init_db()"
-```
-
-## 开发指南
-
-### 里程碑进度
-
-| 里程碑 | 目标 | 状态 |
-|--------|------|------|
-| M1 | 跑通音频到转写 | ✅ 已完成 |
-| M2 | 跑通文本到病历 | ✅ 已完成 |
-| M3 | 跑通审核闭环 | 📋 待实现 |
-| M4 | 跑通评测闭环 | 📋 待实现 |
-
-### 运行测试
-
-```bash
-# 测试M1里程碑（音频转写）
-pytest tests/
-
-# 测试M2里程碑（病历生成）
-python scripts/test_m2_milestone.py
-
-# 测试ASR引擎
-python scripts/test_qwen3_asr.py audio.wav --device cpu
-```
-
-### 代码风格
-
-```bash
-# 格式化代码
-black backend/
-
-# 检查代码风格
-flake8 backend/
-```
-
-## 贡献指南
-
-欢迎提交Issue和Pull Request！
-
-## 许可证
-
-MIT License
-
-## 联系方式
-
-如有问题，请提交Issue或联系开发团队。
 </file>
 
 <file path="scripts/test_llm_pipeline.py">
@@ -3533,41 +3611,56 @@ engines = {}
 <file path="backend/api/__init__.py">
 """API路由"""
 ⋮----
-__all__ = ["upload_router", "asr_router", "task_router", "llm_router", "emr_router"]
+__all__ = ["upload_router", "asr_router", "task_router", "llm_router", "emr_router", "evaluation_router"]
 </file>
 
-<file path="backend/config.py">
-class Settings(BaseSettings)
+<file path="backend/database.py">
+engine = create_engine(
 ⋮----
-APP_NAME: str = "中文门诊病历生成系统"
-APP_VERSION: str = "1.0.0"
-DEBUG: bool = True
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 ⋮----
-DATABASE_URL: str = "sqlite:///data/database/medical.db"
+Base = declarative_base()
 ⋮----
-AUDIO_STORAGE_PATH: str = "data/audio"
-MAX_AUDIO_SIZE: int = 100 * 1024 * 1024
+def get_db()
 ⋮----
-ASR_ENGINE: str = "funasr"
-ASR_DEVICE: str = "cpu"
-HOTWORD_PATH: str = "config/hotwords_medical.txt"
+db = SessionLocal()
 ⋮----
-QWEN3_ASR_MODEL_SIZE: str = "1.7B"
-QWEN3_ASR_LANGUAGE: str = "Chinese"
+def _get_table_columns(table_name: str) -> set
 ⋮----
-ENABLE_DIARIZATION: bool = True
-ENABLE_ASR_CORRECTION: bool = True
-CORRECTION_CONFIDENCE_THRESHOLD: float = 0.7
+"""获取数据库表中已存在的列名"""
+inspector = inspect(engine)
 ⋮----
-LLM_DEBUG_MODE: bool = False
-LLM_SEGMENT_TURNS: int = 10
+columns = inspector.get_columns(table_name)
 ⋮----
-class Config
+def _get_model_columns(model_class) -> dict
 ⋮----
-env_file = ".env"
-case_sensitive = True
+"""获取模型定义中的列信息"""
+columns = {}
 ⋮----
-settings = Settings()
+def _add_missing_columns(model_class)
+⋮----
+"""检测并添加缺失的列"""
+table_name = model_class.__tablename__
+existing_columns = _get_table_columns(table_name)
+model_columns = _get_model_columns(model_class)
+⋮----
+missing_columns = set(model_columns.keys()) - existing_columns
+⋮----
+col_type = model_columns[col_name]
+type_str = _sqlalchemy_type_to_sql(col_type)
+⋮----
+sql = f"ALTER TABLE {table_name} ADD COLUMN {col_name} {type_str}"
+⋮----
+def _sqlalchemy_type_to_sql(col_type) -> str
+⋮----
+"""将SQLAlchemy类型转换为SQL类型字符串"""
+type_name = type(col_type).__name__.upper()
+⋮----
+type_mapping = {
+⋮----
+def init_db()
+⋮----
+models = [
 </file>
 
 <file path="backend/main.py">
@@ -3591,284 +3684,6 @@ async def health_check()
 """数据模型"""
 ⋮----
 __all__ = [
-</file>
-
-<file path="backend/services/__init__.py">
-"""业务逻辑服务"""
-⋮----
-__all__ = [
-</file>
-
-<file path="backend/services/llm_pipeline_service.py">
-class LLMPipelineService
-⋮----
-FIELD_TYPE_MAPPING = {
-⋮----
-STAGE_DELAY = 3.0
-⋮----
-def __init__(self, db: Session, llm_service: Optional[LLMService] = None)
-⋮----
-turns = self.db.query(TranscriptTurn).filter(
-⋮----
-segments = self._segment_turns(turns)
-⋮----
-all_role_mappings = {}
-all_annotated_texts = []
-all_evidence_traces = []
-⋮----
-result = self._process_segment(segment, i)
-⋮----
-combined_text = "\n\n".join(all_annotated_texts)
-⋮----
-normalized_result = self._normalize_terms_stage(combined_text, all_role_mappings)
-⋮----
-extraction_result = self._extract_fields_stage(
-⋮----
-emr_result = self._generate_emr_stage(
-⋮----
-def _segment_turns(self, turns: List[TranscriptTurn]) -> List[List[TranscriptTurn]]
-⋮----
-segments = []
-current_segment = []
-⋮----
-transcript_text = self._format_segment(segment)
-⋮----
-prompt = self._build_role_annotation_prompt(transcript_text)
-⋮----
-response_text = self._debug_interact(
-⋮----
-response = self.llm_service.generate(prompt)
-response_text = response.text
-⋮----
-def _format_segment(self, segment: List[TranscriptTurn]) -> str
-⋮----
-lines = []
-⋮----
-def _build_role_annotation_prompt(self, transcript: str) -> str
-⋮----
-json_start = response_text.find("{")
-json_end = response_text.rfind("}") + 1
-⋮----
-json_str = response_text[json_start:json_end]
-result = json.loads(json_str)
-⋮----
-role_mapping = result.get("role_mapping", {})
-annotated_text = result.get("annotated_text", "")
-⋮----
-evidence_traces = self._extract_evidence_traces(annotated_text, segment, role_mapping)
-⋮----
-FIELD_EXPECTED_ROLE = {
-⋮----
-confidence = 0.5
-⋮----
-content_words = set(content)
-turn_words = set(turn_text)
-⋮----
-overlap = len(content_words & turn_words) / len(content_words)
-⋮----
-expected_role = self.FIELD_EXPECTED_ROLE.get(field_type)
-⋮----
-actual_role = role_mapping.get(speaker)
-⋮----
-evidence_traces = []
-⋮----
-tag_pattern = r'<(主诉|现病史|既往史|体格检查|辅助检查|诊断|治疗|医嘱|其他)>(.*?)</\1>'
-⋮----
-turn_by_speaker = {}
-turn_by_index = {}
-⋮----
-field_type_cn = match.group(1)
-content = match.group(2).strip()
-⋮----
-field_type = self.FIELD_TYPE_MAPPING.get(field_type_cn, "other")
-⋮----
-start_char = match.start()
-end_char = match.end()
-⋮----
-speaker = None
-turn_id = None
-turn_index = None
-turn_text = None
-turn_confidence = 1.0
-⋮----
-speaker_markers = re.findall(r'\[(spk\d+)\]:\s*([^[]+)', content)
-⋮----
-matched_turns = []
-matched_speakers = set()
-⋮----
-first_marker_pos = content.find('[spk')
-⋮----
-prefix_text = content[:first_marker_pos].strip().rstrip('，。,')
-⋮----
-first_speaker = speaker_markers[0][0] if speaker_markers else None
-⋮----
-text_part = text_part.strip().rstrip('，。,')
-⋮----
-speaker = matched_turns[0].speaker
-turn_id = matched_turns[0].turn_id
-turn_index = matched_turns[0].turn_index
-turn_text = "\n".join([f"[{t.speaker}]: {t.text}" for t in matched_turns])
-turn_confidence = matched_turns[0].confidence if matched_turns[0].confidence else 1.0
-⋮----
-line_start = annotated_text.rfind('\n', 0, start_char) + 1
-line_end = annotated_text.find('\n', start_char)
-⋮----
-line_end = len(annotated_text)
-⋮----
-line = annotated_text[line_start:line_end]
-⋮----
-speaker_match = re.match(r'\[(spk\d+)\]', line)
-⋮----
-speaker = speaker_match.group(1)
-⋮----
-turn_id = turn.turn_id
-turn_index = turn.turn_index
-turn_text = turn.text
-turn_confidence = turn.confidence if turn.confidence else 1.0
-⋮----
-turn = turn_by_speaker[speaker][0]
-⋮----
-confidence = self._calculate_evidence_confidence(
-⋮----
-evidence_trace = {
-⋮----
-def _fallback_role_annotation(self, segment: List[TranscriptTurn]) -> Dict[str, Any]
-⋮----
-role_mapping = self._infer_roles_by_rules(segment)
-⋮----
-annotated_lines = []
-⋮----
-def _infer_roles_by_rules(self, segment: List[TranscriptTurn]) -> Dict[str, str]
-⋮----
-doctor_indicators = [
-⋮----
-patient_indicators = [
-⋮----
-speaker_scores = {}
-⋮----
-speaker = turn.speaker
-⋮----
-text = turn.text
-⋮----
-role_mapping = {}
-⋮----
-prompt = self._build_normalization_prompt(annotated_text)
-⋮----
-def _build_normalization_prompt(self, annotated_text: str) -> str
-⋮----
-prompt = self._build_extraction_prompt(normalized_text, role_mapping)
-⋮----
-role_desc = "\n".join([f"- {spk}: {role}" for spk, role in role_mapping.items()])
-⋮----
-result = self._attach_evidence_traces(result, evidence_traces)
-⋮----
-field_to_section = {
-⋮----
-field_type = trace.get("field_type")
-section = field_to_section.get(field_type)
-⋮----
-field_data = extraction_result[section].get(field_type, {})
-⋮----
-result = {
-⋮----
-prompt = self._build_emr_generation_prompt(extraction_result, role_mapping)
-⋮----
-extraction_json = json.dumps(extraction_result, ensure_ascii=False, indent=2)
-⋮----
-result = self._attach_evidence_to_emr(result, extraction_result)
-⋮----
-saved_count = 0
-⋮----
-evidence_traces = field_data.get("evidence_traces", [])
-⋮----
-field_value = None
-⋮----
-field_info = emr_result[section].get(field_name, {})
-⋮----
-field_value = field_info.get("value", "")
-⋮----
-field_value = field_info
-⋮----
-turn_id = trace.get("turn_id")
-⋮----
-evidence = EvidenceSpan(
-⋮----
-max_version = self.db.query(EMRRecord).filter(
-⋮----
-new_version = max_version + 1
-⋮----
-emr_record = EMRRecord(
-⋮----
-def get_value(section: str, field: str) -> str
-⋮----
-def get_evidence_traces(section: str, field: str) -> List[Dict[str, Any]]
-⋮----
-chief_complaint = get_value("subjective", "chief_complaint")
-history = get_value("subjective", "history_present_illness")
-past_history = get_value("subjective", "past_history")
-physical = get_value("objective", "physical_examination")
-auxiliary = get_value("objective", "auxiliary_examination")
-diagnosis = get_value("assessment", "diagnosis")
-treatment = get_value("plan", "treatment")
-advice = get_value("plan", "advice")
-⋮----
-subjective_text = []
-⋮----
-objective_text = []
-⋮----
-assessment_text = f"诊断：{diagnosis}" if diagnosis else "诊断：待定"
-⋮----
-plan_text = []
-⋮----
-user_input = input("\n请选择操作：\n  y - 确认发送给大模型\n  n - 不发送，手动输入结果\n  q - 取消操作\n\n请输入选择: ").strip().lower()
-⋮----
-line = input()
-⋮----
-result = "\n".join(lines)
-⋮----
-def get_all_prompts(self, turns: List[TranscriptTurn]) -> List[Dict[str, Any]]
-⋮----
-stages = []
-⋮----
-total_segments = len(segments)
-⋮----
-segment_index = context.get("segment_index", 0)
-segment = segments[segment_index] if segment_index < len(segments) else segments[0]
-⋮----
-result = self._parse_role_annotation_response(user_response, segment)
-⋮----
-all_annotated_texts = context.get("all_annotated_texts", [])
-all_evidence_traces = context.get("all_evidence_traces", [])
-⋮----
-next_stage = None
-next_prompt = None
-next_segment_index = None
-next_description = None
-⋮----
-next_stage = "role_annotation"
-next_segment_index = segment_index + 1
-next_prompt = self._build_role_annotation_prompt(
-next_description = f"阶段1.{next_segment_index + 1}/{total_segments}: 角色识别与证据标注"
-⋮----
-next_stage = "term_normalization"
-combined_annotated_text = "\n\n".join(all_annotated_texts)
-next_prompt = self._build_normalization_prompt(combined_annotated_text)
-next_description = "阶段2: 术语规范化"
-⋮----
-combined_annotated_text = "\n\n".join(all_annotated_texts) if all_annotated_texts else "\n\n".join([self._format_segment(s) for s in segments])
-⋮----
-result = self._parse_normalization_response(user_response, combined_annotated_text)
-⋮----
-normalized_text = result.get("normalized_text", combined_annotated_text)
-⋮----
-normalized_text = context.get("normalized_text", "")
-⋮----
-normalized_text = "\n\n".join(all_annotated_texts) if all_annotated_texts else "\n\n".join([self._format_segment(s) for s in segments])
-⋮----
-result = self._parse_extraction_response(user_response, all_evidence_traces)
-⋮----
-extraction_result = context.get("extraction_result", {})
-result = self._parse_emr_response(user_response, extraction_result, visit_id, True)
 </file>
 
 <file path="backend/services/normalizer.py">
@@ -3901,6 +3716,214 @@ text = text.replace(en_punc, cn_punc)
 def _normalize_numbers(self, text: str) -> str
 </file>
 
+<file path="frontend/index.html">
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>中文门诊病历生成系统</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>中文门诊病历生成系统</h1>
+        
+        <div class="upload-section">
+            <div class="drop-zone" id="dropZone">
+                <p>拖拽音频文件到此处</p>
+                <p>或点击选择文件</p>
+                <p class="hint">支持: wav, mp3</p>
+                <input type="file" id="audioFile" accept=".wav,.mp3" hidden>
+            </div>
+            
+            <div class="form-group">
+                <label for="patientName">患者姓名:</label>
+                <input type="text" id="patientName" placeholder="可选">
+            </div>
+            
+            <div class="form-group">
+                <label for="visitDate">就诊日期:</label>
+                <input type="date" id="visitDate">
+            </div>
+            
+            <div class="upload-actions">
+                <button id="uploadBtn" class="btn-primary" disabled>开始上传</button>
+                <button id="textDebugBtn" class="btn-success">文本调试模式</button>
+                <button id="configBtn" class="btn-secondary">配置大模型</button>
+            </div>
+            
+            <div class="progress-section" id="progressSection" style="display: none;">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <p id="progressText">上传进度: 0%</p>
+            </div>
+        </div>
+    </div>
+    
+    <div id="textDebugModal" class="modal" style="display: none;">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h2>文本调试模式</h2>
+                <span class="close" id="closeTextDebugModal">&times;</span>
+            </div>
+            <div class="modal-body">
+                <div class="text-input-section">
+                    <h3>输入对话文本</h3>
+                    <div class="text-input-format-hint">
+                        <p><strong>支持的格式：</strong></p>
+                        <ul>
+                            <li><strong>有说话人标签：</strong><code>[spk0]: 对话内容</code> 或 <code>[医生]: 对话内容</code></li>
+                            <li><strong>无标签：</strong>每行一句话，系统会自动识别说话人</li>
+                        </ul>
+                    </div>
+                    <textarea id="dialogTextInput" rows="12" placeholder="示例：
+[spk0]: 我最近头痛三天了
+[spk1]: 请问头痛的位置在哪里？
+[spk0]: 主要是前额和太阳穴
+[spk1]: 是持续性的还是阵发性的？
+
+或无标签格式：
+我最近头痛三天了
+请问头痛的位置在哪里？
+主要是前额和太阳穴
+是持续性的还是阵发性的？"></textarea>
+                    <div class="text-input-actions">
+                        <button id="startTextDebug" class="btn-primary">开始调试</button>
+                        <button id="cancelTextDebug" class="btn-secondary">取消</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/static/js/upload.js"></script>
+</body>
+</html>
+</file>
+
+<file path="frontend/js/upload.js">
+function handleFileSelect(file)
+</file>
+
+<file path="requirements.txt">
+# requirements.txt
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+sqlalchemy>=2.0.0
+pydantic-settings>=2.0.0
+funasr>=1.0.0
+modelscope>=1.10.0
+librosa>=0.10.0
+soundfile>=0.12.0
+pypinyin>=0.49.0
+python-Levenshtein>=0.21.0
+httpx>=0.25.0
+qwen-asr>=0.0.6
+</file>
+
+<file path="backend/config.py">
+class Settings(BaseSettings)
+⋮----
+APP_NAME: str = "中文门诊病历生成系统"
+APP_VERSION: str = "1.0.0"
+DEBUG: bool = True
+⋮----
+DATABASE_URL: str = "sqlite:///data/database/medical.db"
+⋮----
+AUDIO_STORAGE_PATH: str = "data/audio"
+MAX_AUDIO_SIZE: int = 100 * 1024 * 1024
+⋮----
+ASR_ENGINE: str = "funasr"
+ASR_DEVICE: str = "cpu"
+HOTWORD_PATH: str = "config/hotwords_medical.txt"
+⋮----
+QWEN3_ASR_MODEL_SIZE: str = "1.7B"
+QWEN3_ASR_LANGUAGE: str = "Chinese"
+⋮----
+ENABLE_DIARIZATION: bool = True
+ENABLE_ASR_CORRECTION: bool = True
+CORRECTION_CONFIDENCE_THRESHOLD: float = 0.7
+⋮----
+LLM_DEBUG_MODE: bool = False
+LLM_SEGMENT_TURNS: int = 10
+⋮----
+UMLS_API_KEY: str = ""
+UMLS_ENABLED: bool = False
+UMLS_CACHE_DIR: str = "data/cache/umls"
+UMLS_CACHE_TTL_HOURS: int = 168
+UMLS_REQUEST_TIMEOUT: int = 30
+UMLS_MAX_RETRIES: int = 3
+UMLS_RATE_LIMIT_DELAY: float = 0.1
+⋮----
+class Config
+⋮----
+env_file = ".env"
+case_sensitive = True
+⋮----
+settings = Settings()
+</file>
+
+<file path="backend/services/__init__.py">
+"""业务逻辑服务"""
+⋮----
+__all__ = [
+</file>
+
+<file path="backend/services/llm/openai_compatible_adapter.py">
+class OpenAICompatibleAdapter(LLMAdapter)
+⋮----
+def __init__(self, config: Dict[str, Any])
+⋮----
+api_endpoint = config.get("api_endpoint", "https://api.openai.com/v1")
+⋮----
+api_endpoint = f"{api_endpoint}/chat/completions"
+⋮----
+api_endpoint = f"{api_endpoint}/v1/chat/completions"
+⋮----
+api_endpoint = f"{api_endpoint}v1/chat/completions"
+⋮----
+def generate(self, request: LLMRequest) -> LLMResponse
+⋮----
+headers = {
+⋮----
+payload = {
+⋮----
+last_error = None
+⋮----
+elapsed = time.time() - self._last_request_time
+⋮----
+wait_time = self.request_interval - elapsed
+⋮----
+response = client.post(
+⋮----
+data = response.json()
+⋮----
+choices = data.get("choices", [])
+⋮----
+error_info = data.get("error", {})
+⋮----
+usage = data.get("usage", {})
+⋮----
+message = choices[0].get("message", {})
+content = message.get("content")
+⋮----
+last_error = RuntimeError(f"{self.provider_name} API error: {str(e)}")
+⋮----
+last_error = RuntimeError(f"Invalid {self.provider_name} response format: {str(e)}")
+⋮----
+last_error = e
+⋮----
+wait_time = self.retry_delay * (attempt + 1)
+⋮----
+def is_available(self) -> bool
+⋮----
+base_url = self.api_endpoint.rsplit("/chat/completions", 1)[0]
+response = client.get(
+</file>
+
 <file path="frontend/emr.html">
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -3923,6 +3946,7 @@ def _normalize_numbers(self, text: str) -> str
             <button id="generateEMR" class="btn-primary">生成病历</button>
             <button id="debugEMR" class="btn-warning">调试模式</button>
             <button id="viewEMR" class="btn-success" style="display: none;">查看病历</button>
+            <button id="evaluateEMR" class="btn-info" style="display: none;">质量评估</button>
             <button id="backToResult" class="btn-secondary">返回转写结果</button>
         </div>
         
@@ -3934,7 +3958,7 @@ def _normalize_numbers(self, text: str) -> str
         </div>
         
         <div id="debugModal" class="modal" style="display: none;">
-            <div class="modal-content">
+            <div class="modal-content modal-large">
                 <div class="modal-header">
                     <h2>调试模式 - 手动输入大模型结果</h2>
                     <span class="close" id="closeDebugModal">&times;</span>
@@ -4056,221 +4080,6 @@ async function loadDebugPrompts()
 function displayCurrentStage()
 </file>
 
-<file path="requirements.txt">
-# requirements.txt
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-python-multipart>=0.0.6
-sqlalchemy>=2.0.0
-pydantic-settings>=2.0.0
-funasr>=1.0.0
-modelscope>=1.10.0
-librosa>=0.10.0
-soundfile>=0.12.0
-pypinyin>=0.49.0
-python-Levenshtein>=0.21.0
-httpx>=0.25.0
-qwen-asr>=0.0.6
-</file>
-
-<file path="backend/api/emr.py">
-router = APIRouter(prefix="/api/emr", tags=["EMR"])
-⋮----
-class ProcessRequest(BaseModel)
-⋮----
-visit_id: str
-use_llm: bool = True
-save_intermediate: bool = True
-⋮----
-class ProcessResponse(BaseModel)
-⋮----
-status: str
-evidence_count: int
-normalized_terms_count: int
-extracted_items_count: int
-emr_record: Optional[Dict[str, Any]]
-errors: list
-⋮----
-llm_service = LLMService(db)
-⋮----
-pipeline = LLMPipelineService(db, llm_service)
-result = pipeline.process_transcript(request.visit_id)
-⋮----
-evidence_count = len(result.get("evidence_traces", []))
-normalized_terms_count = len(result.get("normalized_result", {}).get("terms", []))
-⋮----
-emr_result = result.get("emr_result", {})
-emr_record = {
-⋮----
-pipeline = MedicalRecordPipeline(db, llm_service)
-⋮----
-result = pipeline.process_visit(
-⋮----
-status = pipeline.get_processing_status(visit_id)
-⋮----
-emr_service = EMRGenerationService(db, llm_service)
-⋮----
-emr = emr_service.get_emr_by_visit(visit_id, version)
-⋮----
-versions = emr_service.get_all_versions(visit_id)
-⋮----
-class PipelineProcessRequest(BaseModel)
-⋮----
-class PipelineProcessResponse(BaseModel)
-⋮----
-role_mapping: Optional[Dict[str, str]] = None
-annotated_text: Optional[str] = None
-normalized_result: Optional[Dict[str, Any]] = None
-extraction_result: Optional[Dict[str, Any]] = None
-emr_result: Optional[Dict[str, Any]] = None
-error: Optional[str] = None
-⋮----
-@router.get("/config/debug-mode")
-async def get_debug_mode()
-⋮----
-class DebugPromptsResponse(BaseModel)
-⋮----
-stages: List[Dict[str, Any]]
-⋮----
-class DebugProcessStageRequest(BaseModel)
-⋮----
-stage: str
-user_response: str
-context: Optional[Dict[str, Any]] = None
-⋮----
-class DebugProcessStageResponse(BaseModel)
-⋮----
-result: Optional[Dict[str, Any]] = None
-next_stage: Optional[str] = None
-next_prompt: Optional[str] = None
-next_segment_index: Optional[int] = None
-next_description: Optional[str] = None
-context_update: Optional[Dict[str, Any]] = None
-completed: Optional[bool] = None
-⋮----
-turns = db.query(TranscriptTurn).filter(
-⋮----
-pipeline = LLMPipelineService(db)
-stages = pipeline.get_all_prompts(turns)
-⋮----
-result = pipeline.process_stage_with_user_input(
-⋮----
-class UpdateEMRRequest(BaseModel)
-⋮----
-emr_json: Dict[str, Any]
-record_type: str = "user_edited"
-⋮----
-class UpdateEMRResponse(BaseModel)
-⋮----
-record_id: int
-version: int
-message: Optional[str] = None
-⋮----
-latest_version = emr_service._get_latest_version(visit_id)
-new_version = latest_version + 1
-⋮----
-emr = EMRRecord(
-⋮----
-evidence_list = db.query(EvidenceSpan).filter(
-⋮----
-result = []
-⋮----
-turn = db.query(TranscriptTurn).filter(
-⋮----
-turn_text = ev.turn_text
-⋮----
-turn_text = turn.text
-</file>
-
-<file path="backend/models/transcript.py">
-class TranscriptTurn(Base)
-⋮----
-__tablename__ = "transcript_turns"
-⋮----
-turn_id = Column(Integer, primary_key=True, autoincrement=True)
-visit_id = Column(String, ForeignKey("visits.visit_id"), nullable=False)
-turn_index = Column(Integer, nullable=False)
-speaker = Column(String, nullable=False)
-text = Column(String, nullable=False)
-original_text = Column(String, nullable=True)
-corrected_text = Column(String, nullable=True)
-start_ms = Column(Integer, nullable=False)
-end_ms = Column(Integer, nullable=False)
-confidence = Column(Float, nullable=True, default=1.0)
-created_at = Column(DateTime, default=datetime.utcnow)
-⋮----
-visit = relationship("Visit", back_populates="turns")
-corrections = relationship("ASRCorrection", back_populates="turn", cascade="all, delete-orphan")
-evidence_spans = relationship("EvidenceSpan", back_populates="turn", cascade="all, delete-orphan")
-normalized_terms = relationship("NormalizedTerm", back_populates="turn", cascade="all, delete-orphan")
-⋮----
-class ASRCorrection(Base)
-⋮----
-__tablename__ = "asr_corrections"
-⋮----
-correction_id = Column(Integer, primary_key=True, autoincrement=True)
-⋮----
-turn_id = Column(Integer, ForeignKey("transcript_turns.turn_id"), nullable=False)
-original_word = Column(String, nullable=False)
-corrected_word = Column(String, nullable=False)
-correction_type = Column(String, nullable=False)
-⋮----
-visit = relationship("Visit", back_populates="corrections")
-turn = relationship("TranscriptTurn", back_populates="corrections")
-</file>
-
-<file path="backend/services/llm/openai_compatible_adapter.py">
-class OpenAICompatibleAdapter(LLMAdapter)
-⋮----
-def __init__(self, config: Dict[str, Any])
-⋮----
-api_endpoint = config.get("api_endpoint", "https://api.openai.com/v1")
-⋮----
-api_endpoint = f"{api_endpoint}/chat/completions"
-⋮----
-api_endpoint = f"{api_endpoint}/v1/chat/completions"
-⋮----
-api_endpoint = f"{api_endpoint}v1/chat/completions"
-⋮----
-def generate(self, request: LLMRequest) -> LLMResponse
-⋮----
-headers = {
-⋮----
-payload = {
-⋮----
-last_error = None
-⋮----
-elapsed = time.time() - self._last_request_time
-⋮----
-wait_time = self.request_interval - elapsed
-⋮----
-response = client.post(
-⋮----
-data = response.json()
-⋮----
-choices = data.get("choices", [])
-⋮----
-error_info = data.get("error", {})
-⋮----
-usage = data.get("usage", {})
-⋮----
-message = choices[0].get("message", {})
-content = message.get("content")
-⋮----
-last_error = RuntimeError(f"{self.provider_name} API error: {str(e)}")
-⋮----
-last_error = RuntimeError(f"Invalid {self.provider_name} response format: {str(e)}")
-⋮----
-last_error = e
-⋮----
-wait_time = self.retry_delay * (attempt + 1)
-⋮----
-def is_available(self) -> bool
-⋮----
-base_url = self.api_endpoint.rsplit("/chat/completions", 1)[0]
-response = client.get(
-</file>
-
 <file path="skills-lock.json">
 {
   "version": 1,
@@ -4349,6 +4158,184 @@ turns = db.query(TranscriptTurn).filter(
 turns_data = []
 </file>
 
+<file path="backend/api/emr.py">
+router = APIRouter(prefix="/api/emr", tags=["EMR"])
+⋮----
+class ProcessRequest(BaseModel)
+⋮----
+visit_id: str
+use_llm: bool = True
+save_intermediate: bool = True
+⋮----
+class ProcessResponse(BaseModel)
+⋮----
+status: str
+evidence_count: int
+normalized_terms_count: int
+extracted_items_count: int
+emr_record: Optional[Dict[str, Any]]
+errors: list
+⋮----
+llm_service = LLMService(db)
+⋮----
+pipeline = LLMPipelineService(db, llm_service)
+result = pipeline.process_transcript(request.visit_id)
+⋮----
+evidence_count = len(result.get("evidence_traces", []))
+normalized_terms_count = len(result.get("normalized_result", {}).get("terms", []))
+⋮----
+emr_result = result.get("emr_result", {})
+emr_record = {
+⋮----
+pipeline = MedicalRecordPipeline(db, llm_service)
+⋮----
+result = pipeline.process_visit(
+⋮----
+status = pipeline.get_processing_status(visit_id)
+⋮----
+emr_service = EMRGenerationService(db, llm_service)
+⋮----
+emr = emr_service.get_emr_by_visit(visit_id, version)
+⋮----
+versions = emr_service.get_all_versions(visit_id)
+⋮----
+class PipelineProcessRequest(BaseModel)
+⋮----
+class PipelineProcessResponse(BaseModel)
+⋮----
+role_mapping: Optional[Dict[str, str]] = None
+annotated_text: Optional[str] = None
+normalized_result: Optional[Dict[str, Any]] = None
+extraction_result: Optional[Dict[str, Any]] = None
+emr_result: Optional[Dict[str, Any]] = None
+error: Optional[str] = None
+⋮----
+@router.get("/config/debug-mode")
+async def get_debug_mode()
+⋮----
+class CreateFromTextRequest(BaseModel)
+⋮----
+dialog_text: str
+⋮----
+class CreateFromTextResponse(BaseModel)
+⋮----
+visit_id: Optional[str] = None
+turn_count: Optional[int] = None
+⋮----
+visit_id = f"text_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+⋮----
+visit = Visit(
+⋮----
+lines = request.dialog_text.strip().split('\n')
+turns = []
+turn_index = 0
+⋮----
+speaker_pattern = r'^\[([^\]]+)\]:\s*(.+)$'
+⋮----
+line = line.strip()
+⋮----
+match = re.match(speaker_pattern, line)
+⋮----
+speaker = match.group(1)
+text = match.group(2)
+⋮----
+speaker = "unknown"
+text = line
+⋮----
+turn = TranscriptTurn(
+⋮----
+class DebugPromptsResponse(BaseModel)
+⋮----
+stages: List[Dict[str, Any]]
+⋮----
+class DebugProcessStageRequest(BaseModel)
+⋮----
+stage: str
+user_response: str
+context: Optional[Dict[str, Any]] = None
+⋮----
+class DebugProcessStageResponse(BaseModel)
+⋮----
+result: Optional[Dict[str, Any]] = None
+next_stage: Optional[str] = None
+next_prompt: Optional[str] = None
+next_segment_index: Optional[int] = None
+next_description: Optional[str] = None
+context_update: Optional[Dict[str, Any]] = None
+completed: Optional[bool] = None
+⋮----
+turns = db.query(TranscriptTurn).filter(
+⋮----
+pipeline = LLMPipelineService(db)
+stages = pipeline.get_all_prompts(turns)
+⋮----
+result = pipeline.process_stage_with_user_input(
+⋮----
+class UpdateEMRRequest(BaseModel)
+⋮----
+emr_json: Dict[str, Any]
+record_type: str = "user_edited"
+⋮----
+class UpdateEMRResponse(BaseModel)
+⋮----
+record_id: int
+version: int
+message: Optional[str] = None
+⋮----
+latest_version = emr_service._get_latest_version(visit_id)
+new_version = latest_version + 1
+⋮----
+emr = EMRRecord(
+⋮----
+evidence_list = db.query(EvidenceSpan).filter(
+⋮----
+result = []
+⋮----
+turn = db.query(TranscriptTurn).filter(
+⋮----
+turn_text = ev.turn_text
+⋮----
+turn_text = turn.text
+</file>
+
+<file path="backend/models/transcript.py">
+class TranscriptTurn(Base)
+⋮----
+__tablename__ = "transcript_turns"
+⋮----
+turn_id = Column(Integer, primary_key=True, autoincrement=True)
+visit_id = Column(String, ForeignKey("visits.visit_id"), nullable=False)
+turn_index = Column(Integer, nullable=False)
+speaker = Column(String, nullable=False)
+corrected_speaker = Column(String, nullable=True)
+text = Column(String, nullable=False)
+original_text = Column(String, nullable=True)
+corrected_text = Column(String, nullable=True)
+start_ms = Column(Integer, nullable=False)
+end_ms = Column(Integer, nullable=False)
+confidence = Column(Float, nullable=True, default=1.0)
+created_at = Column(DateTime, default=datetime.utcnow)
+⋮----
+visit = relationship("Visit", back_populates="turns")
+corrections = relationship("ASRCorrection", back_populates="turn", cascade="all, delete-orphan")
+evidence_spans = relationship("EvidenceSpan", back_populates="turn", cascade="all, delete-orphan")
+normalized_terms = relationship("NormalizedTerm", back_populates="turn", cascade="all, delete-orphan")
+⋮----
+class ASRCorrection(Base)
+⋮----
+__tablename__ = "asr_corrections"
+⋮----
+correction_id = Column(Integer, primary_key=True, autoincrement=True)
+⋮----
+turn_id = Column(Integer, ForeignKey("transcript_turns.turn_id"), nullable=False)
+original_word = Column(String, nullable=False)
+corrected_word = Column(String, nullable=False)
+correction_type = Column(String, nullable=False)
+⋮----
+visit = relationship("Visit", back_populates="corrections")
+turn = relationship("TranscriptTurn", back_populates="corrections")
+</file>
+
 <file path="backend/services/asr_service.py">
 class ASRService
 ⋮----
@@ -4393,6 +4380,438 @@ speaker_id = f"spk{segment.get('spk', 0)}" if "spk" in segment else "unknown"
 response = {
 </file>
 
+<file path="backend/services/llm_pipeline_service.py">
+class LLMPipelineService
+⋮----
+FIELD_TYPE_MAPPING = {
+⋮----
+STAGE_DELAY = 3.0
+⋮----
+def __init__(self, db: Session, llm_service: Optional[LLMService] = None)
+⋮----
+def _extract_json_from_response(self, response_text: str, stage_name: str = "") -> Optional[Dict[str, Any]]
+⋮----
+"""
+        从LLM响应中提取JSON对象。
+        
+        处理以下情况：
+        1. 标准JSON：{...}
+        2. 缺少开头 { 的JSON：直接以 "key": 开头
+        3. 缺少开头 {" 的JSON：直接以 key": 开头
+        4. 末尾有多余文字
+        5. 开头有多余文字
+        
+        Args:
+            response_text: LLM返回的原始文本
+            stage_name: 阶段名称，用于日志
+        
+        Returns:
+            解析后的字典，失败返回None
+        """
+response_text = response_text.strip()
+⋮----
+json_start = response_text.find("{")
+json_end = response_text.rfind("}")
+⋮----
+json_str = response_text[json_start:json_end + 1]
+⋮----
+potential_json = response_text[:json_end + 1]
+⋮----
+potential_json = response_text
+⋮----
+json_str = "{" + potential_json
+⋮----
+colon_pos = potential_json.find('":')
+⋮----
+key = potential_json[:colon_pos]
+rest = potential_json[colon_pos + 1:]
+json_str = '{"' + key + '"' + rest
+⋮----
+turns = self.db.query(TranscriptTurn).filter(
+⋮----
+segments = self._segment_turns(turns)
+⋮----
+all_role_mappings = {}
+all_annotated_texts = []
+all_evidence_traces = []
+⋮----
+result = self._process_segment(segment, i)
+⋮----
+combined_text = "\n\n".join(all_annotated_texts)
+⋮----
+normalized_result = self._normalize_terms_stage(combined_text, all_role_mappings)
+⋮----
+extraction_result = self._extract_fields_stage(
+⋮----
+emr_result = self._generate_emr_stage(
+⋮----
+dialogue_text = "\n".join(f"[{t.speaker}]: {t.text}" for t in turns)
+⋮----
+def _run_evaluation(self, dialogue_text: str, emr_result: Dict[str, Any])
+⋮----
+"""运行评估并输出结果到日志"""
+⋮----
+matched = self.evaluation_service.find_matching_test_sample(dialogue_text)
+⋮----
+sample_id = matched["sample_id"]
+test_sample = matched["test_sample"]
+⋮----
+eval_result = self.evaluation_service.evaluate(emr_result, test_sample)
+⋮----
+ground_truth_diagnosis = test_sample.get("diagnosis", "")
+ground_truth_symptoms = self.evaluation_service._extract_symptoms_from_test(test_sample)
+predicted_diagnosis = self.evaluation_service._extract_diagnosis_from_emr(emr_result)
+predicted_symptoms = self.evaluation_service._extract_symptoms_from_emr(emr_result)
+⋮----
+def _segment_turns(self, turns: List[TranscriptTurn]) -> List[List[TranscriptTurn]]
+⋮----
+segments = []
+current_segment = []
+⋮----
+transcript_text = self._format_segment(segment)
+⋮----
+prompt = self._build_role_annotation_prompt(transcript_text)
+⋮----
+response_text = self._debug_interact(
+⋮----
+response = self.llm_service.generate(prompt)
+response_text = response.text
+⋮----
+def _format_segment(self, segment: List[TranscriptTurn]) -> str
+⋮----
+"""
+        格式化对话轮次为文本。
+        
+        根据对话是否有有效的说话人标签，采用不同的格式：
+        - 有标签：[spk0]: 对话内容
+        - 无标签：直接输出对话内容（让LLM判断说话人）
+        """
+has_valid_speakers = False
+⋮----
+has_valid_speakers = True
+⋮----
+lines = []
+⋮----
+def _build_role_annotation_prompt(self, transcript: str) -> str
+⋮----
+result = self._extract_json_from_response(response_text, "角色标注")
+⋮----
+dialog_format = result.get("dialog_format", "labeled")
+role_mapping = result.get("role_mapping", {})
+annotated_text = result.get("annotated_text", "")
+corrections = result.get("corrections", [])
+speakers_found = result.get("speakers_found", [])
+⋮----
+correction_map = self._assign_speakers_from_unlabeled(
+⋮----
+correction_map = self._apply_speaker_corrections(corrections, segment)
+⋮----
+evidence_traces = self._extract_evidence_traces(
+⋮----
+"""
+        从无标签对话的标注结果中提取说话人分配。
+        
+        当原始对话没有说话人标签时，LLM会为每句话分配[医生]或[患者]标签。
+        此方法解析标注文本，更新数据库中的说话人信息。
+        
+        Args:
+            annotated_text: LLM标注后的文本（包含[医生]/[患者]标签）
+            segment: 对话轮次列表
+            role_mapping: 角色映射（如 {"医生": "doctor", "患者": "patient"}）
+        
+        Returns:
+            说话人分配映射 {turn_index: assigned_speaker}
+        """
+assignment_map = {}
+⋮----
+speaker_pattern = r'\[(医生|患者)\]:\s*([^\n\[]+)'
+matches = re.findall(speaker_pattern, annotated_text)
+⋮----
+turn_index = 0
+⋮----
+text_content = text_content.strip()
+⋮----
+turn = segment[turn_index]
+⋮----
+"""
+        应用说话人纠正到对话轮次。
+        
+        Args:
+            corrections: 纠正列表，每项包含 turn_index, original_speaker, corrected_speaker, reason
+            segment: 对话轮次列表
+        
+        Returns:
+            纠正映射字典 {turn_index: corrected_speaker}
+        """
+correction_map = {}
+⋮----
+turn_by_index = {turn.turn_index: turn for turn in segment}
+⋮----
+turn_index = correction.get("turn_index")
+original_speaker = correction.get("original_speaker")
+corrected_speaker = correction.get("corrected_speaker")
+reason = correction.get("reason", "")
+⋮----
+turn = turn_by_index.get(turn_index)
+⋮----
+FIELD_EXPECTED_ROLE = {
+⋮----
+"""
+        从标注文本中提取证据溯源信息。
+        
+        Args:
+            annotated_text: LLM标注后的文本
+            segment: 对话轮次列表
+            role_mapping: 角色映射字典（如 {"spk0": "doctor", "spk1": "patient"} 或 {"医生": "doctor", "患者": "patient"}）
+            correction_map: 说话人纠正映射 {turn_index: corrected_speaker}
+        
+        Returns:
+            证据溯源列表
+        """
+evidence_traces = []
+correction_map = correction_map or {}
+role_mapping = role_mapping or {}
+⋮----
+tag_pattern = r'<(主诉|现病史|既往史|体格检查|辅助检查|诊断|治疗|医嘱|其他)>(.*?)</\1>'
+⋮----
+turn_by_speaker = {}
+turn_by_index = {}
+⋮----
+effective_speaker = correction_map.get(turn.turn_index, turn.speaker)
+⋮----
+role_to_speaker = {}
+⋮----
+def find_turns_by_role_label(label: str) -> List[TranscriptTurn]
+⋮----
+field_type_cn = match.group(1)
+content = match.group(2).strip()
+⋮----
+field_type = self.FIELD_TYPE_MAPPING.get(field_type_cn, "other")
+⋮----
+start_char = match.start()
+end_char = match.end()
+⋮----
+speaker = None
+original_speaker = None
+turn_id = None
+turn_index = None
+turn_text = None
+⋮----
+speaker_markers = re.findall(r'\[(spk\d+|医生|患者)\]:\s*([^[]+)', content)
+⋮----
+matched_turns = []
+matched_speakers = set()
+⋮----
+first_marker_pos = content.find('[')
+⋮----
+prefix_text = content[:first_marker_pos].strip().rstrip('，。,')
+⋮----
+first_speaker = speaker_markers[0][0] if speaker_markers else None
+⋮----
+candidate_turns = find_turns_by_role_label(first_speaker)
+⋮----
+text_part = text_part.strip().rstrip('，。,')
+⋮----
+candidate_turns = find_turns_by_role_label(spk_label)
+⋮----
+first_turn = matched_turns[0]
+speaker = correction_map.get(first_turn.turn_index, first_turn.speaker)
+original_speaker = first_turn.speaker
+turn_id = first_turn.turn_id
+turn_index = first_turn.turn_index
+turn_text = "\n".join([f"[{correction_map.get(t.turn_index, t.speaker)}]: {t.text}" for t in matched_turns])
+⋮----
+line_start = annotated_text.rfind('\n', 0, start_char) + 1
+line_end = annotated_text.find('\n', start_char)
+⋮----
+line_end = len(annotated_text)
+⋮----
+line = annotated_text[line_start:line_end]
+⋮----
+speaker_match = re.match(r'\[(spk\d+|医生|患者)\]', line)
+⋮----
+speaker = speaker_match.group(1)
+⋮----
+candidate_turns = find_turns_by_role_label(speaker)
+⋮----
+original_speaker = turn.speaker
+turn_id = turn.turn_id
+turn_index = turn.turn_index
+turn_text = turn.text
+⋮----
+turn = candidate_turns[0]
+⋮----
+evidence_trace = {
+⋮----
+def _fallback_role_annotation(self, segment: List[TranscriptTurn]) -> Dict[str, Any]
+⋮----
+role_mapping = self._infer_roles_by_rules(segment)
+⋮----
+annotated_lines = []
+⋮----
+def _infer_roles_by_rules(self, segment: List[TranscriptTurn]) -> Dict[str, str]
+⋮----
+doctor_indicators = [
+⋮----
+patient_indicators = [
+⋮----
+speaker_scores = {}
+⋮----
+speaker = turn.speaker
+⋮----
+text = turn.text
+⋮----
+role_mapping = {}
+⋮----
+prompt = self._build_normalization_prompt(annotated_text)
+⋮----
+def _build_normalization_prompt(self, annotated_text: str) -> str
+⋮----
+result = self._extract_json_from_response(response_text, "术语规范化")
+⋮----
+prompt = self._build_extraction_prompt(normalized_text, role_mapping)
+⋮----
+role_desc = "\n".join([f"- {spk}: {role}" for spk, role in role_mapping.items()])
+⋮----
+result = self._extract_json_from_response(response_text, "字段抽取")
+⋮----
+result = self._attach_evidence_traces(result, evidence_traces)
+⋮----
+field_to_section = {
+⋮----
+field_type = trace.get("field_type")
+section = field_to_section.get(field_type)
+⋮----
+field_data = extraction_result[section].get(field_type, {})
+⋮----
+result = {
+⋮----
+prompt = self._build_emr_generation_prompt(extraction_result, role_mapping)
+⋮----
+extraction_json = json.dumps(extraction_result, ensure_ascii=False, indent=2)
+⋮----
+result = self._extract_json_from_response(response_text, "病历生成")
+⋮----
+result = self._attach_evidence_to_emr(result, extraction_result)
+⋮----
+evidence_traces = field_data["evidence_traces"]
+⋮----
+saved_count = 0
+⋮----
+evidence_traces = field_data.get("evidence_traces", [])
+⋮----
+field_value = None
+⋮----
+field_info = emr_result[section].get(field_name, {})
+⋮----
+field_value = field_info.get("value", "")
+⋮----
+field_value = field_info
+⋮----
+turn_id = trace.get("turn_id")
+⋮----
+evidence = EvidenceSpan(
+⋮----
+validation_result = self.validation_service.validate(emr_result)
+validation_errors = self.validation_service.to_dict(validation_result)
+⋮----
+max_version = self.db.query(EMRRecord).filter(
+⋮----
+new_version = max_version + 1
+⋮----
+emr_record = EMRRecord(
+⋮----
+def get_value(section: str, field: str) -> str
+⋮----
+def get_evidence_traces(section: str, field: str) -> List[Dict[str, Any]]
+⋮----
+chief_complaint = get_value("subjective", "chief_complaint")
+history = get_value("subjective", "history_present_illness")
+past_history = get_value("subjective", "past_history")
+physical = get_value("objective", "physical_examination")
+auxiliary = get_value("objective", "auxiliary_examination")
+diagnosis = get_value("assessment", "diagnosis")
+treatment = get_value("plan", "treatment")
+advice = get_value("plan", "advice")
+⋮----
+subjective_text = []
+⋮----
+objective_text = []
+⋮----
+assessment_text = f"诊断：{diagnosis}" if diagnosis else "诊断：待定"
+⋮----
+plan_text = []
+⋮----
+user_input = input("\n请选择操作：\n  y - 确认发送给大模型\n  n - 不发送，手动输入结果\n  q - 取消操作\n\n请输入选择: ").strip().lower()
+⋮----
+line = input()
+⋮----
+result = "\n".join(lines)
+⋮----
+def get_all_prompts(self, turns: List[TranscriptTurn]) -> List[Dict[str, Any]]
+⋮----
+stages = []
+⋮----
+total_segments = len(segments)
+⋮----
+segment_index = context.get("segment_index", 0)
+segment = segments[segment_index] if segment_index < len(segments) else segments[0]
+⋮----
+result = self._parse_role_annotation_response(user_response, segment)
+⋮----
+all_annotated_texts = context.get("all_annotated_texts", [])
+all_evidence_traces = context.get("all_evidence_traces", [])
+⋮----
+next_stage = None
+next_prompt = None
+next_segment_index = None
+next_description = None
+⋮----
+next_stage = "role_annotation"
+next_segment_index = segment_index + 1
+next_prompt = self._build_role_annotation_prompt(
+next_description = f"阶段1.{next_segment_index + 1}/{total_segments}: 角色识别与证据标注"
+⋮----
+next_stage = "term_normalization"
+combined_annotated_text = "\n\n".join(all_annotated_texts)
+next_prompt = self._build_normalization_prompt(combined_annotated_text)
+next_description = "阶段2: 术语规范化"
+⋮----
+combined_annotated_text = "\n\n".join(all_annotated_texts) if all_annotated_texts else "\n\n".join([self._format_segment(s) for s in segments])
+⋮----
+result = self._parse_normalization_response(user_response, combined_annotated_text)
+⋮----
+normalized_text = result.get("normalized_text", combined_annotated_text)
+⋮----
+normalized_text = context.get("normalized_text", "")
+⋮----
+normalized_text = "\n\n".join(all_annotated_texts) if all_annotated_texts else "\n\n".join([self._format_segment(s) for s in segments])
+⋮----
+result = self._parse_extraction_response(user_response, all_evidence_traces)
+⋮----
+extraction_result = context.get("extraction_result", {})
+result = self._parse_emr_response(user_response, extraction_result, visit_id, True)
+</file>
+
+<file path=".gitignore">
+%TEMP%install-qwen.bat
+/.qwen
+/.trae
+*.0
+/.agents
+/data
+/output
+/.agents
+/_bmad
+/backend/services/correction/__pycache__
+/backend/services/llm/__pycache__
+/docs
+/src/asr/__pycache__
+/tests/test_correction/__pycache__
+/backend/__pycache__
+/tests/__pycache__
+</file>
+
 <file path="frontend/css/style.css">
 * {
 ⋮----
@@ -4425,6 +4844,10 @@ h1 {
 .btn-primary:hover:not(:disabled) {
 ⋮----
 .btn-primary:disabled {
+⋮----
+.upload-actions {
+⋮----
+.upload-actions button {
 ⋮----
 .progress-section {
 ⋮----
@@ -4464,13 +4887,15 @@ h1 {
 ⋮----
 .turn-text {
 ⋮----
-.turn-confidence {
-⋮----
 .loading {
 ⋮----
 .btn-success {
 ⋮----
 .btn-success:hover {
+⋮----
+.btn-info {
+⋮----
+.btn-info:hover {
 ⋮----
 .btn-small {
 ⋮----
@@ -4624,9 +5049,11 @@ h1 {
 ⋮----
 .evidence-speaker {
 ⋮----
-.evidence-turn {
+.evidence-speaker.corrected {
 ⋮----
-.evidence-confidence {
+.evidence-speaker-correction {
+⋮----
+.evidence-turn {
 ⋮----
 .evidence-detail {
 ⋮----
@@ -4645,6 +5072,194 @@ h1 {
 .field-edit {
 ⋮----
 .emr-toolbar,
+⋮----
+.modal-large {
+⋮----
+.debug-input-mode {
+⋮----
+.debug-input-mode h3 {
+⋮----
+.debug-mode-buttons {
+⋮----
+.debug-mode-buttons button {
+⋮----
+.text-input-section {
+⋮----
+.text-input-section h3 {
+⋮----
+.text-input-format-hint {
+⋮----
+.text-input-format-hint p {
+⋮----
+.text-input-format-hint ul {
+⋮----
+.text-input-format-hint li {
+⋮----
+.text-input-format-hint code {
+⋮----
+#dialogTextInput {
+⋮----
+#dialogTextInput:focus {
+⋮----
+.text-input-actions {
+⋮----
+.evaluation-summary {
+⋮----
+.evaluation-summary h2 {
+⋮----
+.score-overview {
+⋮----
+.score-main {
+⋮----
+.score-circle {
+⋮----
+.score-circle.score-good {
+⋮----
+.score-circle.score-medium {
+⋮----
+.score-circle.score-poor {
+⋮----
+.score-value {
+⋮----
+.score-label {
+⋮----
+.score-details {
+⋮----
+.score-item {
+⋮----
+.score-name {
+⋮----
+.score-bar {
+⋮----
+.score-bar-fill {
+⋮----
+.score-percent {
+⋮----
+.risk-indicator {
+⋮----
+.risk-label {
+⋮----
+.risk-status {
+⋮----
+.risk-status.risk-high {
+⋮----
+.risk-status.risk-low {
+⋮----
+.evaluation-tabs {
+⋮----
+.tab-btn {
+⋮----
+.tab-btn:hover {
+⋮----
+.tab-btn.active {
+⋮----
+.tab-content {
+⋮----
+.tab-content h3 {
+⋮----
+.stats-row {
+⋮----
+.stat-item {
+⋮----
+.stat-value {
+⋮----
+.stat-label {
+⋮----
+.facts-list,
+⋮----
+.fact-item,
+⋮----
+.fact-item.supported {
+⋮----
+.fact-item.unsupported {
+⋮----
+.fact-header,
+⋮----
+.fact-status {
+⋮----
+.fact-item.supported .fact-status {
+⋮----
+.fact-item.unsupported .fact-status {
+⋮----
+.fact-text,
+⋮----
+.fact-evidence,
+⋮----
+.no-issues {
+⋮----
+.conflict-item {
+⋮----
+.conflict-description {
+⋮----
+.conflict-details p {
+⋮----
+.coverage-item.full {
+⋮----
+.coverage-item.partial {
+⋮----
+.coverage-item.none {
+⋮----
+.coverage-status {
+⋮----
+.coverage-item.full .coverage-status {
+⋮----
+.coverage-item.partial .coverage-status {
+⋮----
+.coverage-item.none .coverage-status {
+⋮----
+.quality-scores {
+⋮----
+.quality-item {
+⋮----
+.quality-name {
+⋮----
+.quality-bar {
+⋮----
+.quality-bar-fill {
+⋮----
+.quality-value {
+⋮----
+.quality-assessment {
+⋮----
+.safety-summary {
+⋮----
+.safety-status {
+⋮----
+.safety-status.no-risk {
+⋮----
+.safety-status.has-risk {
+⋮----
+.safety-icon {
+⋮----
+.safety-text {
+⋮----
+.risk-item.high-risk {
+⋮----
+.risk-item.medium-risk {
+⋮----
+.risk-type {
+⋮----
+.risk-severity {
+⋮----
+.risk-item.high-risk .risk-severity {
+⋮----
+.risk-item.medium-risk .risk-severity {
+</file>
+
+<file path="frontend/js/result.js">
+async function loadVisitInfo(visitId)
+⋮----
+async function pollTaskStatus(taskId, visitId)
+⋮----
+const poll = async () =>
+⋮----
+async function loadTranscript(visitId)
+⋮----
+function getStatusText(status)
+⋮----
+function formatDuration(seconds)
+⋮----
+function formatTime(ms)
 </file>
 
 <file path="src/asr/funasr_engine.py">
@@ -4663,6 +5278,7 @@ audio_path = Path(audio_path)
 text = ""
 segments = []
 speaker_segments = []
+overall_confidence = 0.0
 ⋮----
 text = result[0].get("text", "")
 ⋮----
@@ -4670,8 +5286,18 @@ segments = result[0]["sentence_info"]
 ⋮----
 segments = result[0]["sentences"]
 ⋮----
+confidences = []
+⋮----
 start_ms = sentence.get("start", 0)
 end_ms = sentence.get("end", 0)
+⋮----
+seg_confidence = self._extract_segment_confidence(sentence)
+⋮----
+overall_confidence = sum(confidences) / len(confidences)
+⋮----
+def _extract_segment_confidence(self, sentence: Dict[str, Any]) -> float
+⋮----
+word_confs = sentence["word_conf"]
 ⋮----
 def _get_audio_duration(self, audio_path: Path) -> float
 ⋮----
@@ -4705,41 +5331,6 @@ speaker_config = None
 speaker_config = {
 ⋮----
 vad_config = {
-</file>
-
-<file path=".gitignore">
-%TEMP%install-qwen.bat
-/.qwen
-/.trae
-*.0
-/.agents
-/data
-/output
-/.agents
-/_bmad
-/backend/services/correction/__pycache__
-/backend/services/llm/__pycache__
-/docs
-/src/asr/__pycache__
-/tests/test_correction/__pycache__
-/backend/__pycache__
-/tests/__pycache__
-</file>
-
-<file path="frontend/js/result.js">
-async function loadVisitInfo(visitId)
-⋮----
-async function pollTaskStatus(taskId, visitId)
-⋮----
-const poll = async () =>
-⋮----
-async function loadTranscript(visitId)
-⋮----
-function getStatusText(status)
-⋮----
-function formatDuration(seconds)
-⋮----
-function formatTime(ms)
 </file>
 
 </files>

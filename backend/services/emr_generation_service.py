@@ -3,6 +3,7 @@ from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 from ..models import EMRRecord, ExtractedItem, TranscriptTurn
 from .llm.llm_service import LLMService
+from .validation_service import ValidationService
 from ..utils.logger import logger
 
 
@@ -10,6 +11,7 @@ class EMRGenerationService:
     def __init__(self, db: Session, llm_service: Optional[LLMService] = None):
         self.db = db
         self.llm_service = llm_service
+        self.validation_service = ValidationService()
         logger.info("EMRGenerationService initialized")
         
     def generate_emr(
@@ -448,8 +450,13 @@ class EMRGenerationService:
         )
         
     def save_emr(self, emr: EMRRecord):
+        validation_result = self.validation_service.validate(emr.emr_json)
+        emr.validation_errors = self.validation_service.to_dict(validation_result)
+        
         self.db.add(emr)
         self.db.commit()
+        
+        logger.info(f"病历保存成功，验证评分: {validation_result.score:.2%}")
         
     def get_emr_by_visit(
         self, 

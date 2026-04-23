@@ -14,3 +14,7 @@
 /tests/test_correction/__pycache__
 /backend/__pycache__
 /tests/__pycache__
+.env
+.env
+/backend/api/__pycache__
+/backend/services/__pycache__
