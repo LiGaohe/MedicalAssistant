@@ -2,7 +2,6 @@ import requests
 import time
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
-from dataclasses import asdict
 
 from . import UMLSCandidate, UMLSConcept, UMLSSearchResult
 from ...utils.logger import logger
@@ -10,6 +9,7 @@ from ...utils.logger import logger
 
 class UMLSClient:
     UMLS_API_BASE = "https://uts-ws.nlm.nih.gov/rest"
+    UMLS_SERVICE = "http://umlsks.nlm.nih.gov"
     
     def __init__(
         self,
@@ -25,30 +25,11 @@ class UMLSClient:
         self.max_retries = max_retries
         self.rate_limit_delay = rate_limit_delay
         self._last_request_time = 0
-        self._ticket_granting_ticket: Optional[str] = None
-        self._tgt_expiry: Optional[datetime] = None
         
         logger.info(f"UMLSClient initialized with API key prefix: {api_key[:8]}...")
         
     def _get_service_ticket(self) -> str:
-        now = datetime.now()
-        
-        if self._ticket_granting_ticket and self._tgt_expiry and now < self._tgt_expiry:
-            st_url = f"https://utslogin.nlm.nih.gov/sso/serviceTicket"
-            params = {"service": self.UMLS_API_BASE}
-            headers = {"Content-Type": "application/x-www-form-urlencoded"}
-            
-            try:
-                response = requests.post(
-                    st_url,
-                    data=params,
-                    headers=headers,
-                    timeout=self.request_timeout
-                )
-                if response.status_code == 200:
-                    return response.text.strip()
-            except Exception as e:
-                logger.warning(f"Failed to get service ticket from existing TGT: {e}")
+        logger.debug("Obtaining new service ticket from UMLS")
         
         auth_url = "https://utslogin.nlm.nih.gov/cas/v1/api-key"
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
@@ -56,44 +37,49 @@ class UMLSClient:
         
         for attempt in range(self.max_retries):
             try:
-                response = requests.post(
+                session = requests.Session()
+                
+                response = session.post(
                     auth_url,
                     data=data,
                     headers=headers,
-                    timeout=self.request_timeout
+                    timeout=self.request_timeout,
+                    allow_redirects=False
                 )
                 
-                if response.status_code == 201:
-                    self._ticket_granting_ticket = response.text.strip()
-                    self._tgt_expiry = now + timedelta(hours=8)
-                    logger.debug("Successfully obtained TGT from UMLS")
-                    break
+                logger.debug(f"TGT request status: {response.status_code}")
+                
+                if response.status_code in [200, 201]:
+                    tgt_url = response.headers.get("Location")
+                    if not tgt_url:
+                        logger.warning("No Location header in TGT response")
+                        continue
+                    
+                    logger.debug(f"Got TGT URL: {tgt_url}")
+                    
+                    st_response = session.post(
+                        tgt_url,
+                        data={"service": self.UMLS_SERVICE},
+                        headers=headers,
+                        timeout=self.request_timeout
+                    )
+                    
+                    logger.debug(f"ST request status: {st_response.status_code}, body: {st_response.text[:100]}")
+                    
+                    if st_response.status_code == 200 and st_response.text:
+                        logger.debug("Successfully obtained service ticket")
+                        return st_response.text.strip()
+                    else:
+                        logger.warning(f"Service ticket request failed: {st_response.status_code}, body: {st_response.text[:100]}")
                 else:
-                    logger.warning(f"TGT request failed with status {response.status_code}")
+                    logger.warning(f"TGT request failed with status {response.status_code}: {response.text[:100]}")
                     
             except requests.RequestException as e:
                 logger.warning(f"TGT request attempt {attempt + 1} failed: {e}")
                 if attempt < self.max_retries - 1:
                     time.sleep(1)
-        else:
-            raise RuntimeError("Failed to obtain TGT from UMLS after max retries")
         
-        st_url = "https://utslogin.nlm.nih.gov/sso/serviceTicket"
-        params = {"service": self.UMLS_API_BASE}
-        
-        try:
-            response = requests.post(
-                st_url,
-                data=params,
-                headers=headers,
-                timeout=self.request_timeout
-            )
-            if response.status_code == 200:
-                return response.text.strip()
-            else:
-                raise RuntimeError(f"Failed to get service ticket: {response.status_code}")
-        except requests.RequestException as e:
-            raise RuntimeError(f"Service ticket request failed: {e}")
+        raise RuntimeError("Failed to obtain service ticket from UMLS after max retries")
     
     def _rate_limit(self):
         elapsed = time.time() - self._last_request_time
@@ -106,16 +92,19 @@ class UMLSClient:
         endpoint: str,
         params: Optional[Dict] = None
     ) -> Optional[Dict]:
-        self._rate_limit()
-        
-        service_ticket = self._get_service_ticket()
-        
         url = f"{self.UMLS_API_BASE}{endpoint}"
-        request_params = {"ticket": service_ticket}
-        if params:
-            request_params.update(params)
+        
+        logger.debug(f"Making request to: {url}")
         
         for attempt in range(self.max_retries):
+            self._rate_limit()
+            
+            service_ticket = self._get_service_ticket()
+            
+            request_params = {"ticket": service_ticket}
+            if params:
+                request_params.update(params)
+            
             try:
                 response = requests.get(
                     url,
@@ -123,19 +112,18 @@ class UMLSClient:
                     timeout=self.request_timeout
                 )
                 
+                logger.debug(f"Response status: {response.status_code}")
+                
                 if response.status_code == 200:
                     return response.json()
                 elif response.status_code == 401:
-                    logger.warning("Authentication failed, refreshing ticket")
-                    self._ticket_granting_ticket = None
-                    service_ticket = self._get_service_ticket()
-                    request_params["ticket"] = service_ticket
+                    logger.warning("Authentication failed (invalid ST), getting new ticket")
                     continue
                 elif response.status_code == 404:
                     logger.debug(f"Resource not found: {endpoint}")
                     return None
                 else:
-                    logger.warning(f"Request failed with status {response.status_code}: {response.text}")
+                    logger.warning(f"Request failed with status {response.status_code}: {response.text[:200]}")
                     if attempt < self.max_retries - 1:
                         time.sleep(1)
                         
