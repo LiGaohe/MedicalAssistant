@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Float, DateTime
+from sqlalchemy import Column, String, Float, DateTime, Text
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
@@ -13,6 +13,7 @@ class Visit(Base):
     visit_date = Column(String, nullable=True)
     audio_path = Column(String, nullable=False)
     audio_duration = Column(Float, nullable=True)
+    language = Column(String, default="zh")
     status = Column(String, default="pending")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -19,6 +19,7 @@ class ASRFactory:
         engine_type: Literal["funasr", "medasr", "qwen3-asr"],
         device: str = "cpu",
         hotword_path: Optional[str] = None,
+        language: str = "zh",
         **kwargs,
     ) -> ASRBase:
         if engine_type not in cls._registry:
@@ -30,11 +31,24 @@ class ASRFactory:
         engine_class = cls._registry[engine_type]
         
         if engine_type == "funasr":
-            return engine_class(device=device, hotword_path=hotword_path, **kwargs)
+            model_id = kwargs.pop("model_id", None)
+            if not model_id:
+                model_id = "paraformer-zh" if language == "zh" else "paraformer-en"
+            
+            punc_model = kwargs.pop("punc_model", "ct-punc")
+            
+            return engine_class(
+                device=device, 
+                hotword_path=hotword_path,
+                model_id=model_id,
+                punc_model=punc_model,
+                language=language,
+                **kwargs
+            )
         elif engine_type == "medasr":
             return engine_class(device=device, **kwargs)
         elif engine_type == "qwen3-asr":
-            return engine_class(device=device, **kwargs)
+            return engine_class(device=device, language=language, **kwargs)
         
         return engine_class(device=device, **kwargs)
     
@@ -43,6 +57,7 @@ class ASRFactory:
         cls,
         device: str = "cpu",
         hotword_path: Optional[str] = None,
+        language: str = "zh",
     ) -> dict[str, ASRBase]:
         engines = {}
         for engine_type in cls._registry:
@@ -50,7 +65,8 @@ class ASRFactory:
                 engines[engine_type] = cls.create(
                     engine_type, 
                     device=device, 
-                    hotword_path=hotword_path
+                    hotword_path=hotword_path,
+                    language=language
                 )
             except Exception as e:
                 print(f"警告: 无法创建 {engine_type} 引擎: {e}")

@@ -1,14 +1,40 @@
+import logging
 from pathlib import Path
 from typing import Tuple
 
+logger = logging.getLogger(__name__)
+
 
 def get_audio_duration(audio_path: str | Path) -> float:
+    audio_path = Path(audio_path)
+    
     try:
         import librosa
-        duration, _ = librosa.duration(path=str(audio_path))
+        duration = librosa.get_duration(path=str(audio_path))
+        logger.info(f"librosa获取音频时长成功: {audio_path.name}, 时长: {duration:.2f}秒")
         return duration
-    except Exception:
-        return 0.0
+    except Exception as e:
+        logger.warning(f"librosa获取音频时长失败: {e}")
+    
+    try:
+        from pydub import AudioSegment
+        audio = AudioSegment.from_file(str(audio_path))
+        duration = len(audio) / 1000.0
+        logger.info(f"pydub获取音频时长成功: {audio_path.name}, 时长: {duration:.2f}秒")
+        return duration
+    except Exception as e:
+        logger.warning(f"pydub获取音频时长失败: {e}")
+    
+    try:
+        import soundfile as sf
+        info = sf.info(str(audio_path))
+        logger.info(f"soundfile获取音频时长成功: {audio_path.name}, 时长: {info.duration:.2f}秒")
+        return info.duration
+    except Exception as e:
+        logger.warning(f"soundfile获取音频时长失败: {e}")
+    
+    logger.error(f"所有方法获取音频时长失败: {audio_path}")
+    return 0.0
 
 
 def validate_audio_file(file_path: str | Path, max_size: int) -> Tuple[bool, str]:

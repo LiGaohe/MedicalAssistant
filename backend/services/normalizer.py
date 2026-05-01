@@ -3,6 +3,9 @@ from typing import List, Dict
 
 
 class TranscriptNormalizer:
+    def __init__(self, language: str = "zh"):
+        self.language = language
+    
     def normalize(self, turns: List[Dict]) -> List[Dict]:
         """
         标准化转写结果。
@@ -26,6 +29,10 @@ class TranscriptNormalizer:
         return normalized_turns
     
     def _normalize_text(self, text: str) -> str:
+        if self.language == "en":
+            text = re.sub(r'\s+', ' ', text).strip()
+            return text
+        
         text = re.sub(r'\s+', '', text)
         text = self._normalize_punctuation(text)
         text = self._normalize_numbers(text)

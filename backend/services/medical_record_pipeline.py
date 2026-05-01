@@ -1,11 +1,12 @@
 from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
-from ..models import EMRRecord, EvidenceSpan, NormalizedTerm, ExtractedItem
+from ..models import EMRRecord, EvidenceSpan, NormalizedTerm, ExtractedItem, Visit
 from .evidence_service import EvidenceService
 from .terminology_service import TerminologyService
 from .extraction_service import ExtractionService
 from .emr_generation_service import EMRGenerationService
 from .llm.llm_service import LLMService
+from .llm.prompts import PromptManager
 from ..utils.logger import logger
 
 
@@ -13,13 +14,18 @@ class MedicalRecordPipeline:
     def __init__(self, db: Session, llm_service: Optional[LLMService] = None):
         self.db = db
         self.llm_service = llm_service
-        
-        self.evidence_service = EvidenceService(db, llm_service)
-        self.terminology_service = TerminologyService(db, llm_service)
-        self.extraction_service = ExtractionService(db, llm_service)
-        self.emr_generation_service = EMRGenerationService(db, llm_service)
-        
         logger.info("MedicalRecordPipeline initialized")
+    
+    def _get_language(self, visit_id: str) -> str:
+        visit = self.db.query(Visit).filter(Visit.visit_id == visit_id).first()
+        return visit.language if visit and visit.language else "zh"
+    
+    def _init_services(self, language: str):
+        self.evidence_service = EvidenceService(self.db, self.llm_service)
+        self.terminology_service = TerminologyService(self.db, self.llm_service, language=language)
+        self.extraction_service = ExtractionService(self.db, self.llm_service, language=language)
+        self.emr_generation_service = EMRGenerationService(self.db, self.llm_service, language=language)
+        self.prompt_manager = PromptManager(language=language)
         
     def process_visit(
         self, 
@@ -30,8 +36,13 @@ class MedicalRecordPipeline:
         logger.info(f"=== 开始处理就诊记录: {visit_id} ===")
         logger.info(f"参数: use_llm={use_llm}, save_intermediate={save_intermediate}")
         
+        language = self._get_language(visit_id)
+        logger.info(f"检测到语言: {language}")
+        self._init_services(language)
+        
         result = {
             "visit_id": visit_id,
+            "language": language,
             "status": "processing",
             "evidence_count": 0,
             "normalized_terms_count": 0,

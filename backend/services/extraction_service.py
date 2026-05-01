@@ -3,14 +3,17 @@ from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 from ..models import ExtractedItem, EvidenceSpan
 from .llm.llm_service import LLMService
+from .llm.prompts import PromptManager
 from ..utils.logger import logger
 
 
 class ExtractionService:
-    def __init__(self, db: Session, llm_service: Optional[LLMService] = None):
+    def __init__(self, db: Session, llm_service: Optional[LLMService] = None, language: str = "zh"):
         self.db = db
         self.llm_service = llm_service
-        logger.info("ExtractionService initialized")
+        self.language = language
+        self.prompt_manager = PromptManager(language=language)
+        logger.info(f"ExtractionService initialized with language: {language}")
         
     def extract_items(
         self, 

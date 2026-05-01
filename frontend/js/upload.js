@@ -7,6 +7,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const progressFill = document.getElementById('progressFill');
     const progressText = document.getElementById('progressText');
     const visitDate = document.getElementById('visitDate');
+    const languageSelect = document.getElementById('languageSelect');
     
     const textDebugBtn = document.getElementById('textDebugBtn');
     const textDebugModal = document.getElementById('textDebugModal');
@@ -14,6 +15,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const dialogTextInput = document.getElementById('dialogTextInput');
     const startTextDebug = document.getElementById('startTextDebug');
     const cancelTextDebug = document.getElementById('cancelTextDebug');
+    const debugLanguageSelect = document.getElementById('debugLanguageSelect');
     
     const today = new Date().toISOString().split('T')[0];
     visitDate.value = today;
@@ -76,6 +78,7 @@ document.addEventListener('DOMContentLoaded', function() {
         formData.append('audio_file', selectedFile);
         formData.append('patient_name', document.getElementById('patientName').value);
         formData.append('visit_date', visitDate.value);
+        formData.append('language', languageSelect.value);
         
         try {
             progressFill.style.width = '30%';
@@ -137,7 +140,10 @@ document.addEventListener('DOMContentLoaded', function() {
             const response = await fetch('/api/emr/debug/create-from-text', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ dialog_text: text })
+                body: JSON.stringify({ 
+                    dialog_text: text,
+                    language: debugLanguageSelect.value
+                })
             });
             
             const result = await response.json();

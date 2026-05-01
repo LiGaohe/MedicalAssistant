@@ -60,6 +60,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             
             document.getElementById('status').textContent = getStatusText(result.status);
             document.getElementById('audioDuration').textContent = formatDuration(result.audio_duration);
+            document.getElementById('audioLanguage').textContent = getLanguageText(result.language);
             
             if (result.status === 'completed') {
                 startBtn.style.display = 'none';
@@ -154,6 +155,14 @@ document.addEventListener('DOMContentLoaded', async function() {
             'failed': '失败'
         };
         return statusMap[status] || status;
+    }
+    
+    function getLanguageText(language) {
+        const languageMap = {
+            'zh': '中文',
+            'en': 'English'
+        };
+        return languageMap[language] || language;
     }
     
     function formatDuration(seconds) {

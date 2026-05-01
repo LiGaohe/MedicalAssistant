@@ -292,6 +292,7 @@ async def set_debug_mode(
 
 class CreateFromTextRequest(BaseModel):
     dialog_text: str
+    language: str = "zh"
 
 
 class CreateFromTextResponse(BaseModel):
@@ -321,6 +322,7 @@ async def create_from_text(
             patient_name="文本输入测试",
             visit_date=datetime.now().strftime("%Y-%m-%d"),
             audio_path=f"text_input://{visit_id}",
+            language=request.language,
             status="pending"
         )
         db.add(visit)

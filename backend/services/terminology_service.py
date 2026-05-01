@@ -16,10 +16,12 @@ class TerminologyService:
         self, 
         db: Session, 
         llm_service: Optional[LLMService] = None,
-        umls_client: Optional[UMLSClient] = None
+        umls_client: Optional[UMLSClient] = None,
+        language: str = "zh"
     ):
         self.db = db
         self.llm_service = llm_service
+        self.language = language
         self.term_dict = self._load_term_dict()
         
         self.umls_client = umls_client
@@ -28,7 +30,7 @@ class TerminologyService:
         if settings.UMLS_ENABLED and settings.UMLS_API_KEY:
             self._init_umls()
         
-        logger.info(f"TerminologyService initialized with {len(self.term_dict)} term types, UMLS: {'enabled' if self.umls_client else 'disabled'}")
+        logger.info(f"TerminologyService initialized with {len(self.term_dict)} term types, UMLS: {'enabled' if self.umls_client else 'disabled'}, language: {language}")
     
     def _init_umls(self):
         try:
@@ -148,11 +150,13 @@ class TerminologyService:
         try:
             logger.debug(f"Querying UMLS for term: '{term}'")
             
-            search_result = self.umls_client.search_term(term, language="CHI")
+            umls_language = "CHI" if self.language == "zh" else "ENG"
+            search_result = self.umls_client.search_term(term, language=umls_language)
             
             if search_result.error:
                 logger.warning(f"UMLS search error for '{term}': {search_result.error}")
-                search_result = self.umls_client.search_term(term, language="ENG")
+                fallback_language = "ENG" if self.language == "zh" else "CHI"
+                search_result = self.umls_client.search_term(term, language=fallback_language)
             
             if not search_result.candidates:
                 logger.debug(f"No UMLS candidates found for term: '{term}'")

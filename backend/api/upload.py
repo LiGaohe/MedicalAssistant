@@ -20,6 +20,7 @@ async def upload_audio(
     audio_file: UploadFile = File(...),
     patient_name: str = Form(None),
     visit_date: str = Form(None),
+    language: str = Form("zh"),
     db: Session = Depends(get_db)
 ):
     visit_id = str(uuid.uuid4())
@@ -27,6 +28,9 @@ async def upload_audio(
     file_ext = Path(audio_file.filename).suffix.lower()
     if file_ext not in [".wav", ".mp3"]:
         raise HTTPException(status_code=400, detail="仅支持wav和mp3格式")
+    
+    if language not in settings.SUPPORTED_LANGUAGES:
+        raise HTTPException(status_code=400, detail=f"不支持的语言: {language}，支持的语言: {settings.SUPPORTED_LANGUAGES}")
     
     audio_storage = Path(settings.AUDIO_STORAGE_PATH)
     audio_storage.mkdir(parents=True, exist_ok=True)
@@ -49,6 +53,7 @@ async def upload_audio(
         visit_date=visit_date or datetime.now().strftime("%Y-%m-%d"),
         audio_path=str(audio_path),
         audio_duration=audio_duration,
+        language=language,
         status="pending"
     )
     db.add(visit)
@@ -72,6 +77,7 @@ async def upload_audio(
             "visit_id": visit_id,
             "audio_path": str(audio_path),
             "audio_duration": audio_duration,
+            "language": language,
             "message": "音频上传成功"
         }
     )

@@ -3,12 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>中文门诊病历生成系统</title>
+    <title>门诊病历生成系统</title>
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
     <div class="container">
-        <h1>中文门诊病历生成系统</h1>
+        <h1>门诊病历生成系统</h1>
         
         <div class="upload-section">
             <div class="drop-zone" id="dropZone">
@@ -26,6 +26,14 @@
             <div class="form-group">
                 <label for="visitDate">就诊日期:</label>
                 <input type="date" id="visitDate">
+            </div>
+            
+            <div class="form-group">
+                <label for="languageSelect">音频语言:</label>
+                <select id="languageSelect">
+                    <option value="zh">中文</option>
+                    <option value="en">English</option>
+                </select>
             </div>
             
             <div class="upload-actions">
@@ -58,6 +66,13 @@
                             <li><strong>有说话人标签：</strong><code>[spk0]: 对话内容</code> 或 <code>[医生]: 对话内容</code></li>
                             <li><strong>无标签：</strong>每行一句话，系统会自动识别说话人</li>
                         </ul>
+                    </div>
+                    <div class="form-group">
+                        <label for="debugLanguageSelect">对话语言:</label>
+                        <select id="debugLanguageSelect">
+                            <option value="zh">中文</option>
+                            <option value="en">English</option>
+                        </select>
                     </div>
                     <textarea id="dialogTextInput" rows="12" placeholder="示例：
 [spk0]: 我最近头痛三天了

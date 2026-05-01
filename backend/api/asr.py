@@ -15,14 +15,7 @@ from ..config import settings
 
 router = APIRouter(prefix="/api/asr", tags=["asr"])
 
-asr_service = ASRService({
-    "device": settings.ASR_DEVICE,
-    "hotword_path": settings.HOTWORD_PATH,
-    "enable_diarization": settings.ENABLE_DIARIZATION
-})
-
 postprocessor = ASRPostprocessor()
-normalizer = TranscriptNormalizer()
 
 
 def process_asr_task(visit_id: str, db_url: str):
@@ -45,6 +38,18 @@ def process_asr_task(visit_id: str, db_url: str):
         task.status = "running"
         task.progress = 10
         db.commit()
+        
+        language = visit.language if visit.language else "zh"
+        
+        asr_service = ASRService({
+            "device": settings.ASR_DEVICE,
+            "hotword_path": settings.HOTWORD_PATH,
+            "hotword_path_en": settings.HOTWORD_PATH_EN,
+            "enable_diarization": settings.ENABLE_DIARIZATION,
+            "language": language
+        })
+        
+        normalizer = TranscriptNormalizer(language=language)
         
         result = asr_service.transcribe_with_diarization(visit.audio_path)
         task.progress = 50
@@ -162,6 +167,7 @@ async def get_transcript(
             "visit_id": visit.visit_id,
             "status": visit.status,
             "audio_duration": visit.audio_duration,
+            "language": visit.language if visit.language else "zh",
             "turns": turns_data
         }
     )

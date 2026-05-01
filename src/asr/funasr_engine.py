@@ -22,6 +22,7 @@ class FunASREngine(ASRBase):
         hotword_path: Optional[str] = None,
         speaker_diarization_config: Optional[Dict[str, Any]] = None,
         vad_kwargs: Optional[Dict[str, Any]] = None,
+        language: str = "zh",
     ):
         super().__init__(model_name="FunASR-Paraformer", device=device)
         self.model_id = model_id
@@ -31,6 +32,7 @@ class FunASREngine(ASRBase):
         self.hotword_path = hotword_path
         self.speaker_diarization_config = speaker_diarization_config or {}
         self.vad_kwargs = vad_kwargs or {}
+        self.language = language
         self._audio_duration = 0.0
     
     def load_model(self) -> None:
@@ -123,7 +125,7 @@ class FunASREngine(ASRBase):
         
         return ASRResult(
             text=text,
-            language="zh",
+            language=self.language,
             duration_seconds=self._audio_duration,
             inference_time=inference_time,
             model_name=self.model_name,

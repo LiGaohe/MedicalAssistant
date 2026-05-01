@@ -1,0 +1,153 @@
+{
+  "chief_complaint": {
+    "description": "Chief Complaint",
+    "speaker_preference": "patient",
+    "triggers": [
+      "chief complaint",
+      "what brings you",
+      "what's wrong",
+      "what symptoms",
+      "why are you here",
+      "where does it hurt",
+      "what's bothering",
+      "discomfort",
+      "symptoms",
+      "main problem"
+    ],
+    "weight": 1.0
+  },
+  "history_present_illness": {
+    "description": "History of Present Illness",
+    "speaker_preference": "patient",
+    "triggers": [
+      "how long",
+      "when did it start",
+      "duration",
+      "how many days",
+      "how many months",
+      "how did it start",
+      "at first",
+      "then what happened",
+      "worse",
+      "better",
+      "associated symptoms",
+      "any other symptoms",
+      "do you have",
+      "is it"
+    ],
+    "weight": 0.9
+  },
+  "past_history": {
+    "description": "Past Medical History",
+    "speaker_preference": "doctor",
+    "triggers": [
+      "past medical history",
+      "have you had",
+      "previous illness",
+      "do you have hypertension",
+      "do you have diabetes",
+      "do you have heart disease",
+      "surgical history",
+      "allergies",
+      "medications",
+      "family history"
+    ],
+    "weight": 0.8
+  },
+  "physical_examination": {
+    "description": "Physical Examination",
+    "speaker_preference": "doctor",
+    "triggers": [
+      "physical examination",
+      "examination",
+      "auscultation",
+      "palpation",
+      "percussion",
+      "blood pressure",
+      "heart rate",
+      "temperature",
+      "respiration",
+      "consciousness",
+      "mental status",
+      "skin",
+      "lymph nodes",
+      "heart and lungs",
+      "abdomen"
+    ],
+    "weight": 0.9
+  },
+  "auxiliary_examination": {
+    "description": "Auxiliary Examination",
+    "speaker_preference": "doctor",
+    "triggers": [
+      "test",
+      "lab work",
+      "blood test",
+      "urinalysis",
+      "chemistry",
+      "ECG",
+      "EKG",
+      "CT",
+      "MRI",
+      "ultrasound",
+      "X-ray",
+      "results",
+      "findings"
+    ],
+    "weight": 0.85
+  },
+  "diagnosis": {
+    "description": "Diagnosis",
+    "speaker_preference": "doctor",
+    "triggers": [
+      "diagnosis",
+      "considering",
+      "might be",
+      "probably",
+      "confirmed",
+      "suspected",
+      "preliminary diagnosis",
+      "impression"
+    ],
+    "weight": 1.0
+  },
+  "treatment_plan": {
+    "description": "Treatment Plan",
+    "speaker_preference": "doctor",
+    "triggers": [
+      "treatment",
+      "medication",
+      "take medicine",
+      "IV",
+      "injection",
+      "surgery",
+      "hospitalization",
+      "outpatient",
+      "follow-up",
+      "recheck",
+      "precautions",
+      "recommend",
+      "prescribe"
+    ],
+    "weight": 0.9
+  },
+  "advice": {
+    "description": "Medical Advice",
+    "speaker_preference": "doctor",
+    "triggers": [
+      "rest",
+      "drink water",
+      "eat less",
+      "eat more",
+      "avoid",
+      "do not",
+      "contraindications",
+      "diet",
+      "exercise",
+      "sleep",
+      "quit smoking",
+      "stop drinking"
+    ],
+    "weight": 0.85
+  }
+}

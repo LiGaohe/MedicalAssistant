@@ -1,0 +1,78 @@
+aspirin
+ibuprofen
+acetaminophen
+paracetamol
+cephalosporin
+penicillin
+amoxicillin
+omeprazole
+rabeprazole
+metformin
+insulin
+glimepiride
+acarbose
+amlodipine
+nifedipine
+valsartan
+losartan
+captopril
+enalapril
+metoprolol
+bisoprolol
+atenolol
+simvastatin
+atorvastatin
+rosuvastatin
+clopidogrel
+warfarin
+rivaroxaban
+dabigatran
+hypertension
+diabetes
+coronary heart disease
+myocardial infarction
+cerebral infarction
+cerebral hemorrhage
+pneumonia
+bronchitis
+asthma
+chronic obstructive pulmonary disease
+gastritis
+gastric ulcer
+duodenal ulcer
+hepatitis
+cirrhosis
+nephritis
+renal failure
+anemia
+leukemia
+tumor
+cancer
+fracture
+arthritis
+lumbar disc herniation
+cervical spondylosis
+hyperthyroidism
+hypothyroidism
+blood glucose
+blood pressure
+blood lipids
+cholesterol
+triglycerides
+hemoglobin
+white blood cell
+red blood cell
+platelet
+creatinine
+blood urea nitrogen
+alanine aminotransferase
+aspartate aminotransferase
+CT scan
+MRI
+ultrasound
+electrocardiogram
+X-ray
+complete blood count
+urinalysis
+liver function
+renal function

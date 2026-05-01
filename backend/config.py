@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     ASR_ENGINE: str = "funasr"
     ASR_DEVICE: str = "cpu"
     HOTWORD_PATH: str = "config/hotwords_medical.txt"
+    HOTWORD_PATH_EN: str = "config/hotwords_medical_en.txt"
+    
+    ASR_MODEL_ZH: str = "paraformer-zh"
+    ASR_MODEL_EN: str = "paraformer-en"
     
     QWEN3_ASR_MODEL_SIZE: str = "1.7B"
     QWEN3_ASR_LANGUAGE: str = "Chinese"
@@ -25,6 +29,9 @@ class Settings(BaseSettings):
     
     LLM_DEBUG_MODE: bool = False
     LLM_SEGMENT_TURNS: int = 10
+    
+    DEFAULT_LANGUAGE: str = "zh"
+    SUPPORTED_LANGUAGES: list = ["zh", "en"]
     
     UMLS_API_KEY: str = ""
     UMLS_ENABLED: bool = False

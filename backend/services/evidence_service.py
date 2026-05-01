@@ -3,22 +3,30 @@ from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 from ..models import TranscriptTurn, EvidenceSpan
 from .llm.llm_service import LLMService
+from .llm.prompts import PromptManager
 from ..utils.logger import logger
 
 
 class EvidenceService:
-    def __init__(self, db: Session, llm_service: Optional[LLMService] = None):
+    def __init__(self, db: Session, llm_service: Optional[LLMService] = None, language: str = "zh"):
         self.db = db
         self.llm_service = llm_service
+        self.language = language
+        self.prompt_manager = PromptManager(language=language)
         self.triggers = self._load_triggers()
-        logger.info(f"EvidenceService initialized with {len(self.triggers)} field types")
+        logger.info(f"EvidenceService initialized with {len(self.triggers)} field types, language: {language}")
         
     def _load_triggers(self) -> Dict[str, Any]:
+        config_file = f"config/field_triggers_{'en' if self.language == 'en' else 'zh'}.json"
         try:
-            with open("config/field_triggers.json", "r", encoding="utf-8") as f:
+            with open(config_file, "r", encoding="utf-8") as f:
                 return json.load(f)
         except FileNotFoundError:
-            return {}
+            try:
+                with open("config/field_triggers.json", "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except FileNotFoundError:
+                return {}
             
     def select_evidence_by_rules(
         self, 

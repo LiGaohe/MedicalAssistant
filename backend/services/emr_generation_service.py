@@ -1,18 +1,21 @@
 import json
 from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
-from ..models import EMRRecord, ExtractedItem, TranscriptTurn
+from ..models import EMRRecord, ExtractedItem, TranscriptTurn, Visit
 from .llm.llm_service import LLMService
+from .llm.prompts import PromptManager
 from .validation_service import ValidationService
 from ..utils.logger import logger
 
 
 class EMRGenerationService:
-    def __init__(self, db: Session, llm_service: Optional[LLMService] = None):
+    def __init__(self, db: Session, llm_service: Optional[LLMService] = None, language: str = "zh"):
         self.db = db
         self.llm_service = llm_service
+        self.language = language
+        self.prompt_manager = PromptManager(language=language)
         self.validation_service = ValidationService()
-        logger.info("EMRGenerationService initialized")
+        logger.info(f"EMRGenerationService initialized with language: {language}")
         
     def generate_emr(
         self, 
@@ -51,12 +54,17 @@ class EMRGenerationService:
         extracted_data = self._aggregate_items(items)
         transcript = self._format_transcript(turns)
         
+        if self.language == "en":
+            template_requirements = "Compliant with international medical record writing standards (SOAP format)"
+        else:
+            template_requirements = "符合中国医疗病历书写规范"
+        
         try:
             response = self.llm_service.generate_with_template(
                 "emr_generation_with_role",
                 extracted_data=json.dumps(extracted_data, ensure_ascii=False),
                 transcript=transcript,
-                template_requirements="符合中国医疗病历书写规范"
+                template_requirements=template_requirements
             )
             
             result = json.loads(response.text)
@@ -260,16 +268,30 @@ class EMRGenerationService:
         if not turns:
             return {}
         
-        doctor_indicators = [
-            "请问", "哪里不舒服", "持续多长时间", "有没有", "我给你", 
-            "量一下", "检查", "诊断", "考虑是", "开点", "注意", "复查",
-            "需要", "建议", "治疗"
-        ]
-        
-        patient_indicators = [
-            "医生", "我", "头疼", "不舒服", "几天了", "有时候", "没有",
-            "好的", "谢谢"
-        ]
+        if self.language == "en":
+            doctor_indicators = [
+                "how can I help", "what brings you", "how long", "do you have",
+                "let me", "examine", "diagnosis", "I think", "prescribe", 
+                "need to", "recommend", "treatment", "please", "have you",
+                "are you", "does it", "where does", "when did"
+            ]
+            
+            patient_indicators = [
+                "doctor", "I have", "I feel", "my", "hurting", "pain",
+                "discomfort", "days", "sometimes", "no", "okay", "thank you",
+                "I've been", "it hurts", "I'm having"
+            ]
+        else:
+            doctor_indicators = [
+                "请问", "哪里不舒服", "持续多长时间", "有没有", "我给你", 
+                "量一下", "检查", "诊断", "考虑是", "开点", "注意", "复查",
+                "需要", "建议", "治疗"
+            ]
+            
+            patient_indicators = [
+                "医生", "我", "头疼", "不舒服", "几天了", "有时候", "没有",
+                "好的", "谢谢"
+            ]
         
         speaker_scores = {}
         
@@ -278,20 +300,23 @@ class EMRGenerationService:
             if speaker not in speaker_scores:
                 speaker_scores[speaker] = {"doctor": 0, "patient": 0}
             
-            text = turn.text
+            text = turn.text.lower() if self.language == "en" else turn.text
             
             for indicator in doctor_indicators:
-                if indicator in text:
+                if indicator.lower() in text if self.language == "en" else indicator in text:
                     speaker_scores[speaker]["doctor"] += 1
             
             for indicator in patient_indicators:
-                if indicator in text:
+                if indicator.lower() in text if self.language == "en" else indicator in text:
                     speaker_scores[speaker]["patient"] += 1
             
             if text.endswith("？") or text.endswith("?"):
                 speaker_scores[speaker]["doctor"] += 2
             
-            if text.startswith("医生"):
+            if self.language == "zh" and text.startswith("医生"):
+                speaker_scores[speaker]["patient"] += 3
+            
+            if self.language == "en" and text.startswith("doctor"):
                 speaker_scores[speaker]["patient"] += 3
         
         role_mapping = {}
