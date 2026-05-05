@@ -84,7 +84,14 @@ class OpenAICompatibleAdapter(LLMAdapter):
                     content = message.get("content")
                     
                     if content is None:
-                        raise RuntimeError(f"{self.provider_name} API returned None content")
+                        reasoning = message.get("reasoning")
+                        if reasoning:
+                            content = self._extract_final_answer(reasoning)
+                            if content:
+                                content = content.strip()
+                        
+                        if not content:
+                            raise RuntimeError(f"{self.provider_name} API returned None content")
                     
                     return LLMResponse(
                         text=content,
@@ -107,6 +114,43 @@ class OpenAICompatibleAdapter(LLMAdapter):
                 time.sleep(wait_time)
         
         raise last_error
+    
+    def _extract_final_answer(self, reasoning: str) -> str:
+        import re
+        
+        if not reasoning:
+            return ""
+        
+        json_match = re.search(r'\{[\s\S]*\}', reasoning)
+        if json_match:
+            return json_match.group()
+        
+        json_array_match = re.search(r'\[[\s\S]*\]', reasoning)
+        if json_array_match:
+            return json_array_match.group()
+        
+        lines = reasoning.strip().split('\n')
+        
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            
+            if line.startswith(('*', '-', '•', '1.', '2.', '3.', '4.', '5.')):
+                line = re.sub(r'^[*\-•\d.]\s*', '', line).strip()
+            
+            if line and len(line) < 200 and not line.startswith('Thinking') and not line.startswith('##'):
+                if re.search(r'[a-zA-Z\u4e00-\u9fff]', line):
+                    return line
+        
+        last_non_empty = ""
+        for line in reversed(lines):
+            line = line.strip()
+            if line and not line.startswith('Thinking') and not line.startswith('##'):
+                last_non_empty = line
+                break
+        
+        return last_non_empty
     
     def is_available(self) -> bool:
         try:

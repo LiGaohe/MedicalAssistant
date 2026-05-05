@@ -3,11 +3,12 @@ import re
 import time
 from typing import Dict, Any, Optional, List, Tuple
 from sqlalchemy.orm import Session
-from ..models import TranscriptTurn, EMRRecord, EvidenceSpan
+from ..models import TranscriptTurn, EMRRecord, EvidenceSpan, NormalizedTerm
 from .llm.llm_service import LLMService
 from .llm.prompts import PromptManager
 from .evaluation_service import EMREvaluationService
 from .validation_service import ValidationService
+from .terminology_service import TerminologyService
 from ..config import settings
 from ..utils.logger import logger
 
@@ -27,15 +28,17 @@ class LLMPipelineService:
     
     STAGE_DELAY = 3.0
     
-    def __init__(self, db: Session, llm_service: Optional[LLMService] = None):
+    def __init__(self, db: Session, llm_service: Optional[LLMService] = None, language: str = "zh"):
         self.db = db
         self.llm_service = llm_service
-        self.prompt_manager = PromptManager()
+        self.language = language
+        self.prompt_manager = PromptManager(language=language)
         self.debug_mode = settings.LLM_DEBUG_MODE
         self.segment_turns = settings.LLM_SEGMENT_TURNS
         self.evaluation_service = EMREvaluationService()
         self.validation_service = ValidationService()
-        logger.info(f"LLMPipelineService initialized, debug_mode={self.debug_mode}")
+        self.terminology_service = TerminologyService(db, llm_service, language=language)
+        logger.info(f"LLMPipelineService initialized, debug_mode={self.debug_mode}, language={language}, UMLS={'enabled' if self.terminology_service.umls_client else 'disabled'}")
     
     def _extract_json_from_response(self, response_text: str, stage_name: str = "") -> Optional[Dict[str, Any]]:
         """
@@ -141,7 +144,7 @@ class LLMPipelineService:
         
         time.sleep(self.STAGE_DELAY)
         
-        normalized_result = self._normalize_terms_stage(combined_text, all_role_mappings)
+        normalized_result = self._normalize_terms_stage(combined_text, all_role_mappings, visit_id, save_evidence)
         
         time.sleep(self.STAGE_DELAY)
         
@@ -259,9 +262,11 @@ class LLMPipelineService:
         """
         格式化对话轮次为文本。
         
-        根据对话是否有有效的说话人标签，采用不同的格式：
-        - 有标签：[spk0]: 对话内容
-        - 无标签：直接输出对话内容（让LLM判断说话人）
+        输出格式包含turn_index，便于后续证据溯源时精确定位：
+        - 有标签：[#0] [spk0]: 对话内容
+        - 无标签：[#0] 对话内容
+        
+        turn_index是全局唯一的轮次索引，用于证据溯源时精确匹配原始转写。
         """
         has_valid_speakers = False
         for turn in segment:
@@ -272,9 +277,9 @@ class LLMPipelineService:
         lines = []
         for turn in segment:
             if has_valid_speakers:
-                lines.append(f"[{turn.speaker}]: {turn.text}")
+                lines.append(f"[#{turn.turn_index}] [{turn.speaker}]: {turn.text}")
             else:
-                lines.append(turn.text)
+                lines.append(f"[#{turn.turn_index}] {turn.text}")
         
         return "\n".join(lines)
     
@@ -284,8 +289,10 @@ class LLMPipelineService:
 ## 任务1：说话人识别与纠错
 
 首先判断对话格式：
-- **有说话人标签**：如 [spk0]、[speaker_1]、[A] 等格式
-- **无说话人标签**：纯文本对话，没有方括号标记
+- **有说话人标签**：如 [#0] [spk0]: 对话内容 格式，其中[#0]是轮次索引
+- **无说话人标签**：如 [#0] 对话内容 格式，没有说话人标签
+
+**重要：轮次索引[#N]是全局唯一标识，必须在输出中完整保留，不能修改或删除。**
 
 ### 情况A：有说话人标签
 语音识别的说话人分离可能存在错误。请检查每句话的内容，判断说话人标签是否正确。
@@ -316,6 +323,13 @@ class LLMPipelineService:
 - <医嘱>...</医嘱>：医生的建议和嘱咐
 - <其他>...</其他>：其他相关信息
 
+## 重要约束
+1. **严禁幻觉**：只能标注原文中明确存在的内容，绝对不能添加、编造或推测任何原文中没有的信息
+2. **完整性**：必须保留原始对话的所有内容，不能删除或省略任何对话
+3. **准确性**：证据标注必须准确对应原文内容，不能歪曲原意
+4. **忠实原文**：标注内容必须与原文完全一致，不能修改、添加或删除任何词语
+5. **保留轮次索引**：轮次索引[#N]必须完整保留，这是证据溯源的关键标识
+
 ## 原始对话内容
 {transcript}
 
@@ -331,7 +345,7 @@ class LLMPipelineService:
     "说话人标签1": "doctor或patient",
     "说话人标签2": "doctor或patient"
   }},
-  "annotated_text": "处理后的对话文本（纠正说话人或添加标签后），保留原始格式，在证据周围添加XML标签"
+  "annotated_text": "处理后的对话文本，保留轮次索引[#N]，在证据周围添加XML标签"
 }}
 
 注意：
@@ -339,10 +353,13 @@ class LLMPipelineService:
 2. corrections: 仅在有说话人标签且发现错误时填写，否则为空列表
 3. role_mapping: 列出所有说话人标签及其角色，不要遗漏
 4. annotated_text: 
-   - 有标签时：使用纠正后的说话人标签
-   - 无标签时：为每句话添加[医生]或[患者]标签
+   - 必须保留轮次索引[#N]格式
+   - 有标签时：[#N] [说话人]: 对话内容
+   - 无标签时：[#N] [医生/患者]: 对话内容
 5. 证据标注要准确，不要遗漏重要信息
-6. 一段话可能包含多个证据字段"""
+6. 一段话可能包含多个证据字段
+7. **必须保留所有原始对话内容，不能删除任何对话**
+8. **轮次索引[#N]是证据溯源的关键，必须完整保留**"""
     
     def _parse_role_annotation_response(
         self,
@@ -466,6 +483,9 @@ class LLMPipelineService:
             if turn_index is None or corrected_speaker is None:
                 continue
             
+            if original_speaker:
+                original_speaker = re.sub(r'^\[|\]$', '', original_speaker)
+            
             turn = turn_by_index.get(turn_index)
             if turn:
                 if turn.speaker == original_speaker:
@@ -514,10 +534,12 @@ class LLMPipelineService:
         """
         从标注文本中提取证据溯源信息。
         
+        优先从标注文本中解析turn_index（格式：[#N]），确保证据与原始转写精确对应。
+        
         Args:
-            annotated_text: LLM标注后的文本
+            annotated_text: LLM标注后的文本，格式如：[#0] [spk0]: 你好，<主诉>...</主诉>
             segment: 对话轮次列表
-            role_mapping: 角色映射字典（如 {"spk0": "doctor", "spk1": "patient"} 或 {"医生": "doctor", "患者": "patient"}）
+            role_mapping: 角色映射字典
             correction_map: 说话人纠正映射 {turn_index: corrected_speaker}
         
         Returns:
@@ -528,36 +550,11 @@ class LLMPipelineService:
         role_mapping = role_mapping or {}
         
         tag_pattern = r'<(主诉|现病史|既往史|体格检查|辅助检查|诊断|治疗|医嘱|其他)>(.*?)</\1>'
+        turn_index_pattern = r'\[#(\d+)\]'
         
-        turn_by_speaker = {}
         turn_by_index = {}
         for turn in segment:
-            effective_speaker = correction_map.get(turn.turn_index, turn.speaker)
-            if effective_speaker not in turn_by_speaker:
-                turn_by_speaker[effective_speaker] = []
-            turn_by_speaker[effective_speaker].append(turn)
             turn_by_index[turn.turn_index] = turn
-        
-        role_to_speaker = {}
-        for spk, role in role_mapping.items():
-            if role not in role_to_speaker:
-                role_to_speaker[role] = []
-            role_to_speaker[role].append(spk)
-        
-        def find_turns_by_role_label(label: str) -> List[TranscriptTurn]:
-            if label in turn_by_speaker:
-                return turn_by_speaker[label]
-            
-            if label in ["医生", "doctor"]:
-                for spk in role_to_speaker.get("doctor", []):
-                    if spk in turn_by_speaker:
-                        return turn_by_speaker[spk]
-            elif label in ["患者", "patient"]:
-                for spk in role_to_speaker.get("patient", []):
-                    if spk in turn_by_speaker:
-                        return turn_by_speaker[spk]
-            
-            return []
         
         for match in re.finditer(tag_pattern, annotated_text, re.DOTALL):
             field_type_cn = match.group(1)
@@ -573,76 +570,67 @@ class LLMPipelineService:
             turn_id = None
             turn_index = None
             turn_text = None
+            matched_turns = []
             
-            speaker_markers = re.findall(r'\[(spk\d+|医生|患者)\]:\s*([^[]+)', content)
+            turn_index_matches = re.findall(turn_index_pattern, content)
             
-            if speaker_markers:
-                matched_turns = []
-                matched_speakers = set()
-                
-                first_marker_pos = content.find('[')
-                if first_marker_pos > 0:
-                    prefix_text = content[:first_marker_pos].strip().rstrip('，。,')
-                    if prefix_text:
-                        first_speaker = speaker_markers[0][0] if speaker_markers else None
-                        if first_speaker:
-                            candidate_turns = find_turns_by_role_label(first_speaker)
-                            for turn in candidate_turns:
-                                if prefix_text in turn.text:
-                                    if turn.turn_index not in [t.turn_index for t in matched_turns]:
-                                        matched_turns.append(turn)
-                                        matched_speakers.add(first_speaker)
-                                    break
-                
-                for spk_label, text_part in speaker_markers:
-                    text_part = text_part.strip().rstrip('，。,')
-                    if not text_part:
-                        continue
-                    matched_speakers.add(spk_label)
-                    
-                    candidate_turns = find_turns_by_role_label(spk_label)
-                    for turn in candidate_turns:
-                        if text_part in turn.text or turn.text in text_part:
-                            if turn.turn_index not in [t.turn_index for t in matched_turns]:
-                                matched_turns.append(turn)
-                            break
+            if not turn_index_matches:
+                line_start = annotated_text.rfind('\n', 0, start_char) + 1
+                line_end = annotated_text.find('\n', start_char)
+                if line_end == -1:
+                    line_end = len(annotated_text)
+                line = annotated_text[line_start:line_end]
+                turn_index_matches = re.findall(turn_index_pattern, line)
+            
+            if turn_index_matches:
+                for idx_str in turn_index_matches:
+                    idx = int(idx_str)
+                    if idx in turn_by_index:
+                        turn = turn_by_index[idx]
+                        if turn not in matched_turns:
+                            matched_turns.append(turn)
                 
                 matched_turns.sort(key=lambda t: t.turn_index)
                 
                 if matched_turns:
                     first_turn = matched_turns[0]
-                    speaker = correction_map.get(first_turn.turn_index, first_turn.speaker)
-                    original_speaker = first_turn.speaker
                     turn_id = first_turn.turn_id
                     turn_index = first_turn.turn_index
-                    turn_text = "\n".join([f"[{correction_map.get(t.turn_index, t.speaker)}]: {t.text}" for t in matched_turns])
-            else:
-                line_start = annotated_text.rfind('\n', 0, start_char) + 1
-                line_end = annotated_text.find('\n', start_char)
-                if line_end == -1:
-                    line_end = len(annotated_text)
-                
-                line = annotated_text[line_start:line_end]
-                
-                speaker_match = re.match(r'\[(spk\d+|医生|患者)\]', line)
-                if speaker_match:
-                    speaker = speaker_match.group(1)
+                    original_speaker = first_turn.speaker
+                    speaker = correction_map.get(first_turn.turn_index, first_turn.speaker)
                     
-                    candidate_turns = find_turns_by_role_label(speaker)
-                    for turn in candidate_turns:
-                        if content in turn.text or turn.text in content:
-                            original_speaker = turn.speaker
-                            turn_id = turn.turn_id
-                            turn_index = turn.turn_index
-                            turn_text = turn.text
-                            break
+                    if len(matched_turns) == 1:
+                        turn_text = first_turn.text
+                    else:
+                        turn_text = "\n".join([
+                            f"[{correction_map.get(t.turn_index, t.speaker)}]: {t.text}" 
+                            for t in matched_turns
+                        ])
                     
-                    if turn_id is None and candidate_turns:
-                        turn = candidate_turns[0]
-                        original_speaker = turn.speaker
-                        turn_id = turn.turn_id
-                        turn_index = turn.turn_index
-                        turn_text = turn.text
+                    logger.debug(f"通过turn_index精确匹配: turn_index={turn_index}, content={content[:30]}...")
+            
+            if turn_id is None:
+                logger.warning(f"无法从标注文本中解析turn_index，使用后备匹配: {content[:50]}...")
+                matched_turns = self._fallback_match_turns(
+                    content, segment, role_mapping, correction_map, field_type
+                )
+                
+                if matched_turns:
+                    first_turn = matched_turns[0]
+                    turn_id = first_turn.turn_id
+                    turn_index = first_turn.turn_index
+                    original_speaker = first_turn.speaker
+                    speaker = correction_map.get(first_turn.turn_index, first_turn.speaker)
+                    
+                    if len(matched_turns) == 1:
+                        turn_text = first_turn.text
+                    else:
+                        turn_text = "\n".join([
+                            f"[{correction_map.get(t.turn_index, t.speaker)}]: {t.text}" 
+                            for t in matched_turns
+                        ])
+                    
+                    logger.debug(f"后备匹配成功: turn_index={turn_index}, content={content[:30]}...")
             
             evidence_trace = {
                 "field_type": field_type,
@@ -659,16 +647,105 @@ class LLMPipelineService:
             }
             
             evidence_traces.append(evidence_trace)
-            logger.debug(f"提取证据: {field_type_cn} - {content[:30]}... (turn_id={turn_id})")
+            logger.debug(f"提取证据: {field_type_cn} - {content[:30]}... (turn_id={turn_id}, turn_index={turn_index})")
         
         return evidence_traces
+    
+    def _fallback_match_turns(
+        self,
+        content: str,
+        segment: List[TranscriptTurn],
+        role_mapping: Dict[str, str],
+        correction_map: Dict[int, str],
+        field_type: str
+    ) -> List[TranscriptTurn]:
+        """
+        后备匹配方法：当无法从标注文本中解析turn_index时，通过内容匹配找到对应的turn。
+        """
+        turn_by_speaker = {}
+        for turn in segment:
+            effective_speaker = correction_map.get(turn.turn_index, turn.speaker)
+            if effective_speaker not in turn_by_speaker:
+                turn_by_speaker[effective_speaker] = []
+            turn_by_speaker[effective_speaker].append(turn)
+        
+        role_to_speaker = {}
+        for spk, role in role_mapping.items():
+            if role not in role_to_speaker:
+                role_to_speaker[role] = []
+            role_to_speaker[role].append(spk)
+        
+        def find_turns_by_role_label(label: str) -> List[TranscriptTurn]:
+            if label in turn_by_speaker:
+                return turn_by_speaker[label]
+            if label in ["医生", "doctor"]:
+                for spk in role_to_speaker.get("doctor", []):
+                    if spk in turn_by_speaker:
+                        return turn_by_speaker[spk]
+            elif label in ["患者", "patient"]:
+                for spk in role_to_speaker.get("patient", []):
+                    if spk in turn_by_speaker:
+                        return turn_by_speaker[spk]
+            return []
+        
+        matched_turns = []
+        
+        speaker_markers = re.findall(r'\[(spk\d+|医生|患者)\]:\s*([^[]+)', content)
+        
+        if speaker_markers:
+            for spk_label, text_part in speaker_markers:
+                text_part = text_part.strip().rstrip('，。,')
+                if not text_part:
+                    continue
+                
+                candidate_turns = find_turns_by_role_label(spk_label)
+                for turn in candidate_turns:
+                    if text_part in turn.text or turn.text in text_part:
+                        if turn not in matched_turns:
+                            matched_turns.append(turn)
+                        break
+        
+        if not matched_turns:
+            clean_content = re.sub(r'<[^>]+>', '', content)
+            clean_content = re.sub(r'\[#\d+\]\s*', '', clean_content)
+            clean_content = re.sub(r'\[(spk\d+|医生|患者)\]:\s*', '', clean_content)
+            clean_content = clean_content.strip()
+            
+            expected_role = self.FIELD_EXPECTED_ROLE.get(field_type)
+            candidate_turns_for_fallback = []
+            
+            if expected_role:
+                for spk, role in role_mapping.items():
+                    if role == expected_role:
+                        if spk in turn_by_speaker:
+                            candidate_turns_for_fallback.extend(turn_by_speaker[spk])
+            
+            if not candidate_turns_for_fallback:
+                candidate_turns_for_fallback = segment
+            
+            best_match_turn = None
+            best_match_score = 0
+            
+            for turn in candidate_turns_for_fallback:
+                if clean_content:
+                    turn_text_clean = turn.text.strip()
+                    if clean_content in turn_text_clean:
+                        match_score = len(clean_content) / len(turn_text_clean) if turn_text_clean else 0
+                        if match_score > best_match_score:
+                            best_match_score = match_score
+                            best_match_turn = turn
+            
+            if best_match_turn:
+                matched_turns.append(best_match_turn)
+        
+        return matched_turns
     
     def _fallback_role_annotation(self, segment: List[TranscriptTurn]) -> Dict[str, Any]:
         role_mapping = self._infer_roles_by_rules(segment)
         
         annotated_lines = []
         for turn in segment:
-            annotated_lines.append(f"[{turn.speaker}]: {turn.text}")
+            annotated_lines.append(f"[#{turn.turn_index}] [{turn.speaker}]: {turn.text}")
         
         return {
             "role_mapping": role_mapping,
@@ -724,31 +801,68 @@ class LLMPipelineService:
     def _normalize_terms_stage(
         self,
         annotated_text: str,
-        role_mapping: Dict[str, str]
+        role_mapping: Dict[str, str],
+        visit_id: str = None,
+        save_to_db: bool = True
     ) -> Dict[str, Any]:
         logger.info(">>> 阶段2: 术语规范化")
         
-        prompt = self._build_normalization_prompt(annotated_text)
+        identified_terms = self.terminology_service.identify_colloquial_terms(annotated_text)
         
-        if self.debug_mode:
-            response_text = self._debug_interact(
-                stage="term_normalization",
-                prompt=prompt,
-                annotated_text=annotated_text
-            )
-        else:
-            if not self.llm_service:
-                logger.warning("LLM服务不可用，跳过术语规范化")
-                return {"normalized_text": annotated_text, "terms": []}
+        if not identified_terms:
+            logger.info("未识别到任何医学术语")
+            return {"normalized_text": annotated_text, "terms": []}
+        
+        logger.info(f"识别到 {len(identified_terms)} 个医学术语")
+        
+        normalized_terms = []
+        terms_for_result = []
+        
+        for term_info in identified_terms:
+            term = term_info.get("term", "")
+            term_type = term_info.get("term_type", "unknown")
+            context = term_info.get("context", "")
+            is_colloquial = term_info.get("is_colloquial", True)
             
-            try:
-                response = self.llm_service.generate(prompt)
-                response_text = response.text
-            except Exception as e:
-                logger.error(f"术语规范化LLM调用失败: {e}")
-                return {"normalized_text": annotated_text, "terms": []}
+            normalized = self.terminology_service.normalize_term(term, context, term_type)
+            normalized_terms.append(normalized)
+            
+            terms_for_result.append({
+                "original": term,
+                "normalized": normalized.normalized_term,
+                "category": term_type,
+                "source": normalized.source,
+                "confidence": normalized.confidence,
+                "cui": normalized.cui,
+                "code": normalized.code,
+                "code_system": normalized.code_system,
+                "is_colloquial": is_colloquial
+            })
+            
+            logger.info(f"  术语规范化: '{term}' -> '{normalized.normalized_term}' (source: {normalized.source}, confidence: {normalized.confidence:.2f})")
         
-        return self._parse_normalization_response(response_text, annotated_text)
+        normalized_text = annotated_text
+        for term_info in identified_terms:
+            original = term_info.get("term", "")
+            if original:
+                for term_result in terms_for_result:
+                    if term_result["original"] == original and term_result["normalized"] != original:
+                        normalized_text = normalized_text.replace(original, term_result["normalized"])
+                        break
+        
+        if save_to_db and visit_id and normalized_terms:
+            try:
+                self.terminology_service.save_normalized_terms(normalized_terms, visit_id)
+                logger.info(f"保存了 {len(normalized_terms)} 个规范化术语到数据库")
+            except Exception as e:
+                logger.error(f"保存规范化术语失败: {e}")
+        
+        logger.info(f"术语规范化完成，共规范化 {len(normalized_terms)} 个术语")
+        
+        return {
+            "normalized_text": normalized_text,
+            "terms": terms_for_result
+        }
     
     def _build_normalization_prompt(self, annotated_text: str) -> str:
         return f"""你是一个医学术语规范化专家。请将以下标注文本中的口语化医学术语规范化为标准医学术语。
@@ -1035,6 +1149,12 @@ class LLMPipelineService:
 3. 使用规范的医学术语
 4. 保持内容的准确性和完整性
 
+## 重要约束
+1. **严禁幻觉**：只能使用上述结构化数据中明确存在的内容，绝对不能添加、编造或推测任何原文中没有的信息
+2. **内容一致性**：生成的病历内容必须完全来自结构化数据，不能添加任何额外的描述、推断或假设
+3. **空字段处理**：如果某个字段在结构化数据中为空或不存在，则该字段保持为空，不要编造内容
+4. **忠实原文**：病历内容必须忠实于原始对话，不能添加患者未提及的症状、医生未做出的诊断等
+
 ## 输出格式
 请按以下JSON格式输出：
 {{
@@ -1063,7 +1183,7 @@ class LLMPipelineService:
 注意：
 1. text字段应该是完整的病历段落，适合直接展示
 2. 各子字段是结构化的数据
-3. 如果某个字段为空，可以省略或写"未见异常"等"""
+3. 如果某个字段为空，可以省略或写"未见异常"等，但不要编造任何内容"""
     
     def _parse_emr_response(
         self,
@@ -1139,7 +1259,19 @@ class LLMPipelineService:
                 
                 for trace in evidence_traces:
                     turn_id = trace.get("turn_id")
+                    turn_index = trace.get("turn_index")
+                    
+                    if turn_id is None and turn_index is not None:
+                        turn = self.db.query(TranscriptTurn).filter(
+                            TranscriptTurn.visit_id == visit_id,
+                            TranscriptTurn.turn_index == turn_index
+                        ).first()
+                        if turn:
+                            turn_id = turn.turn_id
+                            logger.debug(f"通过turn_index找到turn_id: turn_index={turn_index}, turn_id={turn_id}")
+                    
                     if turn_id is None:
+                        logger.warning(f"证据溯源跳过: 无法找到对应的turn_id, field={field_name}, content={trace.get('content', '')[:30]}...")
                         continue
                     
                     evidence = EvidenceSpan(
@@ -1174,7 +1306,11 @@ class LLMPipelineService:
         visit_id: str
     ) -> Optional[EMRRecord]:
         try:
-            validation_result = self.validation_service.validate(emr_result)
+            from ..models import Visit
+            visit = self.db.query(Visit).filter(Visit.visit_id == visit_id).first()
+            language = visit.language if visit and visit.language else "zh"
+            
+            validation_result = self.validation_service.validate(emr_result, language=language)
             validation_errors = self.validation_service.to_dict(validation_result)
             
             max_version = self.db.query(EMRRecord).filter(

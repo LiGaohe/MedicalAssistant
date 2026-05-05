@@ -1359,3 +1359,35 @@ h1 {
     background: #ffe0b2;
     color: #e65100;
 }
+
+.expand-btn {
+    margin-left: 8px;
+    padding: 2px 8px;
+    background: #e3f2fd;
+    color: #1976D2;
+    border: 1px solid #90caf9;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.expand-btn:hover {
+    background: #bbdefb;
+    border-color: #64b5f6;
+}
+
+.truncated-text,
+.full-text {
+    line-height: 1.5;
+}
+
+.evidence-table td {
+    vertical-align: top;
+}
+
+.evidence-value-cell,
+.evidence-content-cell,
+.evidence-turn-cell {
+    max-width: 250px;
+}

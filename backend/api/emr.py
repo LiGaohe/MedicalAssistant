@@ -4,10 +4,11 @@ from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 
 from ..database import get_db
-from ..models import EMRRecord
+from ..models import EMRRecord, Visit
 from ..services.medical_record_pipeline import MedicalRecordPipeline
 from ..services.emr_generation_service import EMRGenerationService
 from ..services.llm_pipeline_service import LLMPipelineService
+from ..services.llm_pipeline_service_en import LLMPipelineServiceEnglish
 from ..services.llm.llm_service import LLMService
 from ..utils.logger import logger
 from ..config import settings
@@ -54,15 +55,28 @@ async def process_visit(
     try:
         llm_service = LLMService(db)
         
+        visit = db.query(Visit).filter(Visit.visit_id == request.visit_id).first()
+        language = visit.language if visit and visit.language else "zh"
+        
         if request.use_llm:
-            pipeline = LLMPipelineService(db, llm_service)
+            if language == "en":
+                pipeline = LLMPipelineServiceEnglish(db, llm_service)
+            else:
+                pipeline = LLMPipelineService(db, llm_service)
             result = pipeline.process_transcript(request.visit_id)
             
             evidence_count = len(result.get("evidence_traces", []))
             normalized_terms_count = len(result.get("normalized_result", {}).get("terms", []))
             
             emr_result = result.get("emr_result", {})
+            
+            latest_emr = db.query(EMRRecord).filter(
+                EMRRecord.visit_id == request.visit_id
+            ).order_by(EMRRecord.version.desc()).first()
+            
             emr_record = {
+                "record_id": latest_emr.record_id if latest_emr else None,
+                "version": latest_emr.version if latest_emr else None,
                 "emr_json": {
                     "subjective": emr_result.get("subjective", {}),
                     "objective": emr_result.get("objective", {}),
@@ -225,6 +239,10 @@ async def process_with_pipeline(
 ):
     logger.info(f"收到多阶段LLM处理请求: visit_id={request.visit_id}")
     logger.info(f"DEBUG模式: {settings.LLM_DEBUG_MODE}")
+
+    visit = db.query(Visit).filter(Visit.visit_id == request.visit_id).first()
+    language = visit.language if visit and visit.language else "zh"
+    logger.info(f"检测到语言: {language}")
     
     try:
         llm_service = LLMService(db)
@@ -237,7 +255,10 @@ async def process_with_pipeline(
                     error="LLM服务不可用，请先配置LLM或开启DEBUG模式"
                 )
         
-        pipeline = LLMPipelineService(db, llm_service)
+        if language == "en":
+            pipeline = LLMPipelineServiceEnglish(db, llm_service)
+        else:
+            pipeline = LLMPipelineService(db, llm_service)
         
         result = pipeline.process_transcript(request.visit_id)
         
@@ -418,6 +439,9 @@ async def get_debug_prompts(
     
     from ..models import TranscriptTurn
     
+    visit = db.query(Visit).filter(Visit.visit_id == visit_id).first()
+    language = visit.language if visit and visit.language else "zh"
+    
     turns = db.query(TranscriptTurn).filter(
         TranscriptTurn.visit_id == visit_id
     ).order_by(TranscriptTurn.turn_index).all()
@@ -425,7 +449,10 @@ async def get_debug_prompts(
     if not turns:
         raise HTTPException(status_code=404, detail="没有找到对话轮次")
     
-    pipeline = LLMPipelineService(db)
+    if language == "en":
+        pipeline = LLMPipelineServiceEnglish(db)
+    else:
+        pipeline = LLMPipelineService(db)
     stages = pipeline.get_all_prompts(turns)
     
     return DebugPromptsResponse(
@@ -441,8 +468,14 @@ async def debug_process_stage(
 ):
     logger.info(f"调试处理阶段: {request.stage}, visit_id={request.visit_id}")
     
+    visit = db.query(Visit).filter(Visit.visit_id == request.visit_id).first()
+    language = visit.language if visit and visit.language else "zh"
+    
     try:
-        pipeline = LLMPipelineService(db)
+        if language == "en":
+            pipeline = LLMPipelineServiceEnglish(db)
+        else:
+            pipeline = LLMPipelineService(db)
         result = pipeline.process_stage_with_user_input(
             visit_id=request.visit_id,
             stage=request.stage,

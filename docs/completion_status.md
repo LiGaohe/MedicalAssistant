@@ -1,5 +1,156 @@
 # 完成状态记录
 
+## 2026-05-04 术语规范化流程重构
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 移除字典匹配依赖 | ✅ 完成 | 不再依赖静态词表进行术语匹配 |
+| LLM识别口语术语 | ✅ 完成 | 新增 `identify_colloquial_terms` 方法 |
+| UMLS优先规范化 | ✅ 完成 | UMLS成为主要术语规范化手段 |
+| LLM选择UMLS候选 | ✅ 完成 | 从多个UMLS候选中选择最匹配的术语 |
+| 移除LLM自评confidence | ✅ 完成 | LLM不再输出confidence，改用规则计算 |
+| 中英文双语支持 | ✅ 完成 | 所有提示词支持中英文 |
+| 文档更新 | ✅ 完成 | 更新 processing_flow.md 术语规范化流程 |
+
+### 修改文件
+
+1. **backend/services/terminology_service.py**
+   - 移除 `_normalize_by_dict` 方法
+   - 移除 `_find_similar_terms` 和 `_calculate_similarity` 方法
+   - 移除 `_infer_term_type` 方法
+   - 新增 `identify_colloquial_terms` 方法：LLM识别文本中的口语化医学术语
+   - 重写 `normalize_term` 方法：UMLS优先，LLM兜底
+   - 重写 `extract_and_normalize_terms` 方法：使用LLM识别术语而非遍历字典
+   - 重写 `_llm_select_candidate` 方法：支持中英文提示词
+   - 重写 `_normalize_by_llm` 方法：移除LLM输出的confidence，改用规则计算
+
+2. **backend/services/llm/prompts.py**
+   - 删除中文版 `term_normalization` 模板（已废弃）
+   - 删除英文版 `term_normalization` 模板（已废弃）
+
+3. **docs/processing_flow.md**
+   - 更新术语规范化流程图
+   - 更新详细步骤表格
+   - 更新术语规范化优先级
+   - 新增术语识别提示词模板说明
+   - 新增UMLS候选选择提示词模板说明
+
+### 设计决策
+
+**UMLS优先原则**：
+
+- UMLS作为主要术语规范化手段，提供标准医学术语概念编码
+- LLM仅在UMLS无结果时作为兜底方案
+- 移除静态字典匹配，提高泛用性
+
+**置信度计算规则**：
+
+| 来源 | 置信度计算方式 |
+|------|----------------|
+| UMLS | `min(0.95, 0.6 + score * 0.35)`，基于UMLS匹配分数 |
+| LLM规范化成功 | 固定 0.5（兜底方案，置信度较低） |
+| LLM规范化失败 | 固定 0.3（保留原词） |
+
+**流程对比**：
+
+| 项目 | 旧流程 | 新流程 |
+|------|--------|--------|
+| 术语识别 | 遍历字典术语检查文本 | LLM识别文本中的口语术语 |
+| 优先级 | 字典 > UMLS > LLM | UMLS > LLM > 保留原词 |
+| 泛用性 | 仅能识别字典中已有的术语 | 可识别任意医学术语 |
+| confidence | LLM自评（不可靠） | 规则计算（可靠） |
+
+**新流程**：
+
+```
+文本 → LLM识别口语术语 → UMLS检索标准术语 → LLM选择最佳候选 → 返回规范化结果
+```
+
+---
+
+## 2026-05-04 英文LLM提示词支持
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 英文LLM Pipeline服务 | ✅ 完成 | 新增 `LLMPipelineServiceEnglish` 类，继承自中文版本 |
+| 英文提示词 | ✅ 完成 | 全部4个阶段的提示词改为英文（角色标注、术语规范化、字段抽取、病历生成） |
+| 英文字段映射 | ✅ 完成 | XML标签及字段映射改为英文 |
+| 英文说话人标签 | ✅ 完成 | 使用 `[Doctor]`/`[Patient]` 替代 `[医生]`/`[患者]` |
+| 英文模板生成 | ✅ 完成 | 模板兜底方案改为英文标签 |
+| 英文调试模式 | ✅ 完成 | 调试交互提示和阶段描述改为英文 |
+| 英文规则推断 | ✅ 完成 | 规则推断使用英文关键词 |
+| API语言路由 | ✅ 完成 | API端点根据 `visit.language` 自动选择中/英文服务 |
+
+### 新增文件
+
+1. **backend/services/llm_pipeline_service_en.py**
+   - `LLMPipelineServiceEnglish` 类，继承自 `LLMPipelineService`
+   - 重写所有提示词构建方法：`_build_role_annotation_prompt`、`_build_normalization_prompt`、`_build_extraction_prompt`、`_build_emr_generation_prompt`
+   - 重写 `_template_emr_generation`：使用英文字段标签
+   - 重写 `_assign_speakers_from_unlabeled`：支持 `[Doctor]`/`[Patient]` 标签
+   - 重写 `_extract_evidence_traces`：使用英文XML标签和说话人标签匹配
+   - 重写 `_infer_roles_by_rules`：使用英文关键词进行规则推断
+   - 重写 `_debug_interact`：英文调试交互界面
+   - 重写 `get_all_prompts`：英文阶段描述和指引
+   - 重写 `process_stage_with_user_input`：英文阶段描述
+
+### 修改文件
+
+1. **backend/api/emr.py**
+   - 导入 `LLMPipelineServiceEnglish`
+   - 导入 `Visit` 模型用于语言检测
+   - `/process` 端点：根据 `visit.language` 选择服务
+   - `/pipeline/process` 端点：根据 `visit.language` 选择服务
+   - `/debug/prompts/{visit_id}` 端点：根据 `visit.language` 选择服务
+   - `/debug/process-stage` 端点：根据 `visit.language` 选择服务
+
+2. **backend/services/__init__.py**
+   - 导出 `LLMPipelineServiceEnglish`
+
+### 设计决策
+
+**继承而非修改**：
+
+- `LLMPipelineServiceEnglish` 继承自 `LLMPipelineService`，遵循开闭原则
+- 仅重写包含中文特定逻辑的方法，共享所有公共业务逻辑
+- 遵循单一职责原则：中文和英文版本的提示词逻辑分离
+
+**语言切换机制**：
+
+- 通过 `Visit.language` 字段判断语言（`"en"` / `"zh"`）
+- API端点在每次请求时检查语言并实例化对应的服务类
+- 与前端 `debugLanguageSelect` 下拉框和 `CreateFromTextRequest.language` 对接
+
+**英文提示词设计**：
+
+- XML标签使用英文：`<chief_complaint>`、`<diagnosis>` 等
+- 说话人标签使用英文：`[Doctor]`、`[Patient]`
+- 生成的病历字段使用英文标签：`Chief Complaint`、`Diagnosis` 等
+- 符合国际医疗病历书写规范（SOAP格式）
+
+### 架构影响
+
+```
+LLMPipelineService (中文)
+    ├── 继承
+    └── LLMPipelineServiceEnglish (英文)
+            ├── 重写: _build_role_annotation_prompt
+            ├── 重写: _build_normalization_prompt
+            ├── 重写: _build_extraction_prompt
+            ├── 重写: _build_emr_generation_prompt
+            ├── 重写: _template_emr_generation
+            ├── 重写: _assign_speakers_from_unlabeled
+            ├── 重写: _extract_evidence_traces
+            ├── 重写: _infer_roles_by_rules
+            ├── 重写: _debug_interact
+            ├── 重写: get_all_prompts
+            └── 重写: process_stage_with_user_input
+```
+
 ## 2026-04-21 病历验证模块
 
 ### 已完成
@@ -360,16 +511,11 @@ ALTER TABLE evidence_spans ADD COLUMN turn_text TEXT;
 
 ### 置信度计算逻辑
 
-置信度由以下因素加权计算：
+当前实现中，证据置信度使用固定默认值0.8。未来可扩展为LLM输出或基于规则计算。
 
-| 因素 | 权重范围 | 说明 |
-|------|----------|------|
-| 基础置信度 | 0.5 | 起始值 |
-| 内容匹配度 | +0.0~+0.3 | 证据内容与原始转写的相似程度 |
-| 角色匹配度 | +0.2/-0.1 | 说话人角色与字段期望角色是否匹配 |
-| ASR置信度 | +0.0~+0.1 | 转写置信度（如有） |
+**ASR置信度的作用**：
 
-**最终置信度范围**：0.1 ~ 1.0
+ASR输出的置信度存储在`TranscriptTurn.confidence`字段中，用于过滤低置信度的对话轮次（阈值< 0.5），以及在规则匹配评分中作为权重因子。
 
 ### 证据显示格式
 

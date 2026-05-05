@@ -48,24 +48,6 @@ $transcript
             required_vars=["transcript"]
         )
         
-        self.templates["term_normalization"] = PromptTemplate(
-            template="""你是一个医学术语规范化专家。请将以下口语化医疗术语映射到标准医学术语。
-
-口语化术语：$term
-上下文：$context
-
-请按以下格式输出JSON：
-{
-  "original_term": "原始术语",
-  "normalized_term": "标准术语",
-  "term_type": "symptom|drug|diagnosis|examination",
-  "confidence": 0.0-1.0,
-  "is_risky": true/false,
-  "reasoning": "映射理由"
-}""",
-            required_vars=["term", "context"]
-        )
-        
         self.templates["item_extraction"] = PromptTemplate(
             template="""你是一个医疗病历生成专家。请从以下规范化文本中抽取SOAP格式的病历要素。
 
@@ -168,7 +150,16 @@ $template_requirements
    - 主诉、现病史、既往史：应该是患者说的话
    - 体格检查、辅助检查、诊断、治疗方案、医嘱：应该是医生说的话
 3. 如果发现角色错误，请从正确的说话人对话中提取正确内容
-4. 生成自然流畅的病历文本
+4. **纠正转写错误**：原始对话可能包含语音识别错误，请根据上下文和医学常识纠正：
+   - 拼音相似错误：如"搞血压"→"高血压"、"堂尿病"→"糖尿病"
+   - 医学术语错误：如"阿莫希林"→"阿莫西林"、"青梅素"→"青霉素"
+   - 同音字错误：如"头疼"→"头痛"、"发骚"→"发烧"
+   - 注意：只在病历文本中使用纠正后的正确术语，不要在输出中标注纠正过程
+5. 生成自然流畅的病历文本，确保使用规范的医学术语
+6. **标注证据来源**：为每个字段标注evidence_ids（对话轮次索引turn_index）：
+   - evidence_ids是对话中的turn_index（从0开始）
+   - 一个字段可能对应多个turn，需要标注所有相关的turn_index
+   - 例如：医嘱包含"每天早上吃一片"（turn 17）、"注意休息"（turn 21）、"一周后复查"（turn 23），则evidence_ids为[17, 21, 23]
 
 请输出JSON格式：
 {
@@ -178,21 +169,21 @@ $template_requirements
   },
   "subjective": {
     "text": "患者主诉...",
-    "chief_complaint": {"value": "...", "evidence_ids": []},
-    "history_present_illness": {"value": "...", "evidence_ids": []}
+    "chief_complaint": {"value": "...", "evidence_ids": [0, 1, 2]},
+    "history_present_illness": {"value": "...", "evidence_ids": [3, 4]}
   },
   "objective": {
     "text": "体格检查：...",
-    "physical_examination": {"value": "...", "evidence_ids": []}
+    "physical_examination": {"value": "...", "evidence_ids": [10, 11]}
   },
   "assessment": {
     "text": "诊断：...",
-    "diagnosis": {"value": "...", "evidence_ids": []}
+    "diagnosis": {"value": "...", "evidence_ids": [15]}
   },
   "plan": {
     "text": "治疗方案：...",
-    "treatment": {"value": "...", "evidence_ids": []},
-    "advice": {"value": "...", "evidence_ids": []}
+    "treatment": {"value": "...", "evidence_ids": [16, 17]},
+    "advice": {"value": "...", "evidence_ids": [17, 21, 22, 23]}
   }
 }""",
             required_vars=["extracted_data", "transcript", "template_requirements"]
@@ -223,6 +214,17 @@ $emr_content
 7. 诊断结论
 8. 治疗药物
 9. 医嘱建议
+
+## 重要评估原则
+**仅评估原始对话中实际涉及的内容**：
+- 如果原始对话中**未提及**既往史，则不将"未提及既往史"作为评估项，跳过此项评估
+- 如果原始对话中**未提及**过敏史，则不将"未提及过敏史"作为评估项，跳过此项评估
+- 如果原始对话中**未提及**辅助检查，则不将"未行辅助检查"作为评估项，跳过此项评估
+- 只有当原始对话中明确涉及某类信息，而病历中缺失或矛盾时，才将其标记为不支持
+
+**证据为"无"的情况不作为扣分依据**：
+- 当某类信息在原始对话中完全未出现时，病历中是否记录该信息不纳入一致性评估
+- 仅评估原始对话中存在明确信息的事实项
 
 ## 输出格式（JSON）
 请严格按照以下格式输出，不要添加任何额外内容：
@@ -445,10 +447,14 @@ $emr_content
    - severity: high
 
 2. **重大遗漏**（major_omission）
-   - 漏掉关键阳性症状
-   - 漏掉药物过敏史
-   - 漏掉明确的处置建议
+   - 漏掉对话中明确提及的关键阳性症状
+   - 漏掉对话中明确提及的药物过敏史
+   - 漏掉对话中医生明确给出的处置建议
    - severity: high
+   
+   **重要**：只有当对话中明确存在该信息，但病历中未记录时，才构成"遗漏"。
+   如果对话中本身未涉及该内容（如医生未问过敏史），则不属于病历遗漏问题，
+   不应标记为风险。
 
 3. **否定反转**（negation_reversal）
    - 把"无发热"写成"有发热"
@@ -514,24 +520,6 @@ Please output JSON in the following format:
   ]
 }""",
             required_vars=["transcript"]
-        )
-        
-        self.templates["term_normalization"] = PromptTemplate(
-            template="""You are a medical terminology normalization expert. Please map the following colloquial medical term to a standard medical term.
-
-Colloquial term: $term
-Context: $context
-
-Please output JSON in the following format:
-{
-  "original_term": "original term",
-  "normalized_term": "standard term",
-  "term_type": "symptom|drug|diagnosis|examination",
-  "confidence": 0.0-1.0,
-  "is_risky": true/false,
-  "reasoning": "mapping rationale"
-}""",
-            required_vars=["term", "context"]
         )
         
         self.templates["item_extraction"] = PromptTemplate(
@@ -636,7 +624,16 @@ $template_requirements
    - Chief complaint, history of present illness, past medical history: should be what the patient said
    - Physical examination, auxiliary examination, diagnosis, treatment plan, medical advice: should be what the doctor said
 3. If role errors are found, extract correct content from the correct speaker's conversation
-4. Generate natural and fluent medical record text
+4. **Correct transcription errors**: The original conversation may contain speech recognition errors, please correct based on context and medical knowledge:
+   - Phonetically similar errors: e.g., "hi blood pressure" → "high blood pressure"
+   - Medical terminology errors: e.g., "amoxicillin" misspelled → correct to "amoxicillin"
+   - Homophone errors: e.g., "head ache" → "headache"
+   - Note: Only use corrected terms in the medical record text, do not annotate the correction process in output
+5. Generate natural and fluent medical record text, ensure using standard medical terminology
+6. **Annotate evidence sources**: For each field, annotate evidence_ids (turn_index in conversation):
+   - evidence_ids are turn_index in the conversation (starting from 0)
+   - One field may correspond to multiple turns, annotate all relevant turn_index
+   - Example: Advice contains "take one pill every morning" (turn 17), "rest well" (turn 21), "follow up in one week" (turn 23), then evidence_ids is [17, 21, 23]
 
 Please output JSON format:
 {
@@ -646,21 +643,21 @@ Please output JSON format:
   },
   "subjective": {
     "text": "Patient presents with...",
-    "chief_complaint": {"value": "...", "evidence_ids": []},
-    "history_present_illness": {"value": "...", "evidence_ids": []}
+    "chief_complaint": {"value": "...", "evidence_ids": [0, 1, 2]},
+    "history_present_illness": {"value": "...", "evidence_ids": [3, 4]}
   },
   "objective": {
     "text": "Physical examination: ...",
-    "physical_examination": {"value": "...", "evidence_ids": []}
+    "physical_examination": {"value": "...", "evidence_ids": [10, 11]}
   },
   "assessment": {
     "text": "Diagnosis: ...",
-    "diagnosis": {"value": "...", "evidence_ids": []}
+    "diagnosis": {"value": "...", "evidence_ids": [15]}
   },
   "plan": {
     "text": "Treatment plan: ...",
-    "treatment": {"value": "...", "evidence_ids": []},
-    "advice": {"value": "...", "evidence_ids": []}
+    "treatment": {"value": "...", "evidence_ids": [16, 17]},
+    "advice": {"value": "...", "evidence_ids": [17, 21, 22, 23]}
   }
 }""",
             required_vars=["extracted_data", "transcript", "template_requirements"]
@@ -691,6 +688,17 @@ Key facts include:
 7. Diagnosis conclusions
 8. Treatment medications
 9. Medical advice
+
+## Important Assessment Principles
+**Only evaluate content actually mentioned in the original conversation**:
+- If past medical history is **not mentioned** in the original conversation, do not include "past medical history not mentioned" as an evaluation item, skip this assessment
+- If allergy history is **not mentioned** in the original conversation, do not include "allergy history not mentioned" as an evaluation item, skip this assessment
+- If auxiliary examination is **not mentioned** in the original conversation, do not include "auxiliary examination not performed" as an evaluation item, skip this assessment
+- Only mark as unsupported when the original conversation clearly involves certain information but the medical record is missing or contradictory
+
+**Evidence being "none" is not a basis for deduction**:
+- When certain information does not appear at all in the original conversation, whether the medical record records it is not included in consistency evaluation
+- Only evaluate facts where explicit information exists in the original conversation
 
 ## Output format (JSON)
 Please strictly follow this format, do not add any extra content:
@@ -913,10 +921,15 @@ Please check for the following types of high-risk errors:
    - severity: high
 
 2. **Major Omission** (major_omission)
-   - Missing key positive symptoms
-   - Missing drug allergy history
-   - Missing clear treatment recommendations
+   - Missing key positive symptoms explicitly mentioned in conversation
+   - Missing drug allergy history explicitly mentioned in conversation
+   - Missing clear treatment recommendations explicitly given by doctor in conversation
    - severity: high
+   
+   **IMPORTANT**: An "omission" only occurs when the information clearly exists in the 
+   conversation but is not recorded in the medical record. If the conversation itself 
+   does not involve that content (e.g., doctor did not ask about allergy history), 
+   it is NOT a medical record omission and should NOT be flagged as a risk.
 
 3. **Negation Reversal** (negation_reversal)
    - Writing "no fever" as "has fever"
@@ -1010,7 +1023,16 @@ $template_requirements
    - 主诉、现病史、既往史：应该是患者说的话
    - 体格检查、辅助检查、诊断、治疗方案、医嘱：应该是医生说的话
 3. 如果发现角色错误，请从正确的说话人对话中提取正确内容
-4. 生成自然流畅的病历文本
+4. **纠正转写错误**：原始对话可能包含语音识别错误，请根据上下文和医学常识纠正：
+   - 拼音相似错误：如"搞血压"→"高血压"、"堂尿病"→"糖尿病"
+   - 医学术语错误：如"阿莫希林"→"阿莫西林"、"青梅素"→"青霉素"
+   - 同音字错误：如"头疼"→"头痛"、"发骚"→"发烧"
+   - 注意：只在病历文本中使用纠正后的正确术语，不要在输出中标注纠正过程
+5. 生成自然流畅的病历文本，确保使用规范的医学术语
+6. **标注证据来源**：为每个字段标注evidence_ids（对话轮次索引turn_index）：
+   - evidence_ids是对话中的turn_index（从0开始）
+   - 一个字段可能对应多个turn，需要标注所有相关的turn_index
+   - 例如：医嘱包含"每天早上吃一片"（turn 17）、"注意休息"（turn 21）、"一周后复查"（turn 23），则evidence_ids为[17, 21, 23]
 
 请输出JSON格式：
 {
@@ -1020,21 +1042,21 @@ $template_requirements
   },
   "subjective": {
     "text": "患者主诉...",
-    "chief_complaint": {"value": "...", "evidence_ids": []},
-    "history_present_illness": {"value": "...", "evidence_ids": []}
+    "chief_complaint": {"value": "...", "evidence_ids": [0, 1, 2]},
+    "history_present_illness": {"value": "...", "evidence_ids": [3, 4]}
   },
   "objective": {
     "text": "体格检查：...",
-    "physical_examination": {"value": "...", "evidence_ids": []}
+    "physical_examination": {"value": "...", "evidence_ids": [10, 11]}
   },
   "assessment": {
     "text": "诊断：...",
-    "diagnosis": {"value": "...", "evidence_ids": []}
+    "diagnosis": {"value": "...", "evidence_ids": [15]}
   },
   "plan": {
     "text": "治疗方案：...",
-    "treatment": {"value": "...", "evidence_ids": []},
-    "advice": {"value": "...", "evidence_ids": []}
+    "treatment": {"value": "...", "evidence_ids": [16, 17]},
+    "advice": {"value": "...", "evidence_ids": [17, 21, 22, 23]}
   }
 }""",
             required_vars=["extracted_data", "transcript", "template_requirements"]
@@ -1062,6 +1084,17 @@ $emr_content
 7. 诊断结论
 8. 治疗药物
 9. 医嘱建议
+
+## 重要评估原则
+**仅评估原始对话中实际涉及的内容**：
+- 如果原始对话中**未提及**既往史，则不将"未提及既往史"作为评估项，跳过此项评估
+- 如果原始对话中**未提及**过敏史，则不将"未提及过敏史"作为评估项，跳过此项评估
+- 如果原始对话中**未提及**辅助检查，则不将"未行辅助检查"作为评估项，跳过此项评估
+- 只有当原始对话中明确涉及某类信息，而病历中缺失或矛盾时，才将其标记为不支持
+
+**证据为"无"的情况不作为扣分依据**：
+- 当某类信息在原始对话中完全未出现时，病历中是否记录该信息不纳入一致性评估
+- 仅评估原始对话中存在明确信息的事实项
 
 ## 输出格式（JSON）
 请严格按照以下格式输出，不要添加任何额外内容：

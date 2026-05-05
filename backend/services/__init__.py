@@ -5,6 +5,7 @@ from .asr_service import ASRService
 from .postprocessor import ASRPostprocessor
 from .normalizer import TranscriptNormalizer
 from .llm_pipeline_service import LLMPipelineService
+from .llm_pipeline_service_en import LLMPipelineServiceEnglish
 
 warnings.warn(
     "SpeakerRoleClassifier 已废弃，不再推荐使用。"
@@ -24,4 +25,5 @@ __all__ = [
     "SpeakerRole",
     "SpeakerSegment",
     "LLMPipelineService",
+    "LLMPipelineServiceEnglish",
 ]

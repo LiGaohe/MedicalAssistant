@@ -96,11 +96,12 @@ class ValidationService:
     def validate(
         self,
         emr_result: Dict[str, Any],
-        check_terms: bool = True
+        check_terms: bool = True,
+        language: str = "zh"
     ) -> ValidationResult:
         logger.info("开始病历验证...")
         
-        field_validations = self._validate_fields(emr_result)
+        field_validations = self._validate_fields(emr_result, language)
         
         term_validations = []
         if check_terms:
@@ -137,7 +138,7 @@ class ValidationService:
         
         return result
     
-    def _validate_fields(self, emr_result: Dict[str, Any]) -> Dict[str, FieldValidation]:
+    def _validate_fields(self, emr_result: Dict[str, Any], language: str = "zh") -> Dict[str, FieldValidation]:
         validations = {}
         
         for section, fields in SOAP_REQUIRED_FIELDS.items():
@@ -162,7 +163,8 @@ class ValidationService:
                     field_name_cn=field_config["name_cn"],
                     value=value,
                     is_required=field_config["required"],
-                    min_length=field_config["min_length"]
+                    min_length=field_config["min_length"],
+                    language=language
                 )
                 validations[field_key] = validation
         
@@ -175,7 +177,8 @@ class ValidationService:
         field_name_cn: str,
         value: str,
         is_required: bool,
-        min_length: int
+        min_length: int,
+        language: str = "zh"
     ) -> FieldValidation:
         errors = []
         warnings = []
@@ -198,16 +201,28 @@ class ValidationService:
                 warnings.append(f"内容较短，建议至少{min_length}个字符")
         
         if field_name == "chief_complaint" and value:
-            if not re.search(r'[\u4e00-\u9fa5]', value):
-                errors.append("主诉应包含中文描述")
-                is_valid = False
-            elif len(value) > 100:
-                warnings.append("主诉过长，建议精简")
+            if language == "zh":
+                if not re.search(r'[\u4e00-\u9fa5]', value):
+                    errors.append("主诉应包含中文描述")
+                    is_valid = False
+                elif len(value) > 100:
+                    warnings.append("主诉过长，建议精简")
+            else:
+                if len(value) < 2:
+                    errors.append("Chief complaint is too short")
+                    is_valid = False
+                elif len(value) > 200:
+                    warnings.append("Chief complaint is too long")
         
         if field_name == "diagnosis" and value:
-            if not re.search(r'[\u4e00-\u9fa5]', value):
-                errors.append("诊断应包含中文描述")
-                is_valid = False
+            if language == "zh":
+                if not re.search(r'[\u4e00-\u9fa5]', value):
+                    errors.append("诊断应包含中文描述")
+                    is_valid = False
+            else:
+                if len(value) < 2:
+                    errors.append("Diagnosis is too short")
+                    is_valid = False
         
         return FieldValidation(
             field_name=field_name,

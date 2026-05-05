@@ -248,6 +248,8 @@ document.addEventListener('DOMContentLoaded', async function() {
         }
         
         element.innerHTML = html || '<p class="empty">暂无数据</p>';
+        
+        setTimeout(() => addExpandListeners(), 0);
     }
     
     function buildEvidenceHtml(sectionName, field, fieldData) {
@@ -271,9 +273,6 @@ document.addEventListener('DOMContentLoaded', async function() {
             const turnText = trace.turn_text || '';
             const turnIndex = trace.turn_index !== undefined ? trace.turn_index : '-';
             
-            const displayContent = content.length > 80 ? content.substring(0, 80) + '...' : content;
-            const displayTurnText = turnText.length > 100 ? turnText.substring(0, 100) + '...' : turnText;
-            
             let speakerHtml = `<span class="evidence-speaker">${speaker}</span>`;
             if (speakerCorrected) {
                 speakerHtml = `<span class="evidence-speaker corrected">${speaker}</span>
@@ -290,10 +289,10 @@ document.addEventListener('DOMContentLoaded', async function() {
                     </div>
                     <div class="evidence-detail">
                         <div class="evidence-label">LLM标注片段：</div>
-                        <div class="evidence-content">${displayContent}</div>
+                        <div class="evidence-content">${createExpandableText(content, 150)}</div>
                         ${turnText ? `
                         <div class="evidence-label">完整转写文本：</div>
-                        <div class="evidence-turn-text">${displayTurnText}</div>
+                        <div class="evidence-turn-text">${createExpandableText(turnText, 150)}</div>
                         ` : ''}
                     </div>
                 </li>
@@ -493,18 +492,16 @@ document.addEventListener('DOMContentLoaded', async function() {
             html += '<th>字段类型</th><th>最终病历</th><th>标注片段</th><th>原始转写</th><th>说话人</th><th>轮次</th>';
             html += '</tr></thead><tbody>';
             
-            evidenceData.forEach(ev => {
+            evidenceData.forEach((ev, idx) => {
                 const turnText = ev.turn_text || '-';
-                const displayTurnText = turnText.length > 50 ? turnText.substring(0, 50) + '...' : turnText;
                 const fieldValue = ev.field_value || '-';
-                const displayFieldValue = fieldValue.length > 50 ? fieldValue.substring(0, 50) + '...' : fieldValue;
                 const content = ev.content || '-';
-                const displayContent = content.length > 50 ? content.substring(0, 50) + '...' : content;
+                
                 html += `<tr>
                     <td>${getFieldName(ev.field_type)}</td>
-                    <td class="evidence-value-cell">${displayFieldValue}</td>
-                    <td class="evidence-content-cell">${displayContent}</td>
-                    <td class="evidence-turn-cell">${displayTurnText}</td>
+                    <td class="evidence-value-cell" title="${escapeHtml(fieldValue)}">${createExpandableText(fieldValue, 100)}</td>
+                    <td class="evidence-content-cell" title="${escapeHtml(content)}">${createExpandableText(content, 100)}</td>
+                    <td class="evidence-turn-cell" title="${escapeHtml(turnText)}">${createExpandableText(turnText, 100)}</td>
                     <td>${ev.speaker || '-'}</td>
                     <td>${ev.turn_index !== null ? ev.turn_index : '-'}</td>
                 </tr>`;
@@ -512,11 +509,51 @@ document.addEventListener('DOMContentLoaded', async function() {
             
             html += '</tbody></table>';
             list.innerHTML = html;
+            
+            addExpandListeners();
         }
         
         panel.style.display = 'block';
         toggleEvidenceBtn.textContent = '隐藏证据溯源';
         evidenceVisible = true;
+    }
+    
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+    
+    function createExpandableText(text, maxLength) {
+        if (!text || text.length <= maxLength) {
+            return `<span class="full-text">${escapeHtml(text)}</span>`;
+        }
+        const truncated = text.substring(0, maxLength);
+        return `<span class="truncated-text">${escapeHtml(truncated)}...</span>
+                <span class="full-text" style="display:none;">${escapeHtml(text)}</span>
+                <button class="expand-btn" data-expanded="false">展开</button>`;
+    }
+    
+    function addExpandListeners() {
+        document.querySelectorAll('.expand-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const parent = this.parentElement;
+                const truncated = parent.querySelector('.truncated-text');
+                const full = parent.querySelector('.full-text');
+                
+                if (this.dataset.expanded === 'false') {
+                    if (truncated) truncated.style.display = 'none';
+                    if (full) full.style.display = 'inline';
+                    this.textContent = '收起';
+                    this.dataset.expanded = 'true';
+                } else {
+                    if (truncated) truncated.style.display = 'inline';
+                    if (full) full.style.display = 'none';
+                    this.textContent = '展开';
+                    this.dataset.expanded = 'false';
+                }
+            });
+        });
     }
     
     function hideEvidence() {
