@@ -92,6 +92,7 @@ MedicalAssisstant/
 │   │   ├── llm_pipeline_service_en.py # LLM多阶段处理（英文提示词）
 │   │   ├── evidence_service.py # 证据选择服务
 │   │   ├── terminology_service.py # 术语规范化服务（集成UMLS）
+│   │   ├── translation_service.py # 中英文翻译服务（专门翻译小模型）
 │   │   ├── extraction_service.py # 病历要素抽取服务
 │   │   ├── emr_generation_service.py # 病历生成服务
 │   │   ├── medical_record_pipeline.py # 病历生成流水线
@@ -981,6 +982,7 @@ graph TB
 | SpeakerRoleClassifier | 说话人角色识别，基于语义分析识别医生/患者 | backend/services/speaker_role_classifier.py |
 | EvidenceService | 证据选择，基于触发词、置信度和LLM筛选相关片段 | backend/services/evidence_service.py |
 | TerminologyService | 术语规范化，LLM识别术语+UMLS检索+LLM候选选择 | backend/services/terminology_service.py |
+| TranslationService | 中英文翻译，使用专门翻译小模型提升翻译速度 | backend/services/translation_service.py |
 | ExtractionService | 病历要素抽取，从证据中抽取SOAP要素 | backend/services/extraction_service.py |
 | EMRGenerationService | 病历生成，基于模板和LLM生成结构化病历 | backend/services/emr_generation_service.py |
 | MedicalRecordPipeline | 整合服务，串联所有处理步骤 | backend/services/medical_record_pipeline.py |
@@ -1001,6 +1003,9 @@ graph TB
 | HOTWORD_PATH | config/hotwords_medical.txt | 热词表路径 |
 | LLM_DEBUG_MODE | false | LLM调试模式开关 |
 | LLM_SEGMENT_TURNS | 10 | LLM分段轮次数 |
+| TRANSLATION_ENABLED | true | 启用翻译服务 |
+| TRANSLATION_MODEL | Helsinki-NLP/opus-mt-zh-en | 翻译模型名称 |
+| TRANSLATION_DEVICE | cpu | 翻译模型运行设备 |
 
 ## 前端界面
 

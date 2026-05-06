@@ -1,7 +1,7 @@
 import json
 import hashlib
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 from dataclasses import asdict
 import threading
@@ -32,6 +32,77 @@ class TermCache:
     
     def _get_cache_file_path(self, cache_key: str) -> Path:
         return self.cache_dir / f"{cache_key}.json"
+    
+    def get_atoms(self, cui: str) -> Optional[List[Dict]]:
+        cache_key = self._get_atoms_cache_key(cui)
+        
+        with self._lock:
+            if cache_key in self._memory_cache:
+                cached_entry = self._memory_cache[cache_key]
+                if self._is_entry_valid(cached_entry):
+                    logger.debug(f"Memory cache hit for atoms: CUI '{cui}'")
+                    return cached_entry["data"]
+                else:
+                    del self._memory_cache[cache_key]
+        
+        cache_file = self._get_cache_file_path(cache_key)
+        if cache_file.exists():
+            try:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    cached_entry = json.load(f)
+                
+                if self._is_entry_valid(cached_entry):
+                    atoms = cached_entry["data"]
+                    
+                    with self._lock:
+                        self._add_to_memory_cache(cache_key, cached_entry)
+                    
+                    logger.debug(f"File cache hit for atoms: CUI '{cui}'")
+                    return atoms
+                else:
+                    cache_file.unlink()
+                    logger.debug(f"Expired atoms cache entry removed for CUI: '{cui}'")
+                    
+            except (json.JSONDecodeError, KeyError) as e:
+                logger.warning(f"Failed to read atoms cache file for CUI '{cui}': {e}")
+                cache_file.unlink()
+        
+        return None
+    
+    def set_atoms(
+        self,
+        cui: str,
+        atoms: List[Dict],
+        ttl_hours: Optional[int] = None
+    ) -> None:
+        if not atoms:
+            logger.debug(f"Skipping cache for atoms CUI '{cui}' - empty atoms")
+            return
+        
+        cache_key = self._get_atoms_cache_key(cui)
+        ttl = ttl_hours or self.default_ttl_hours
+        
+        cached_entry = {
+            "cui": cui,
+            "data": atoms,
+            "created_at": datetime.now().isoformat(),
+            "expires_at": (datetime.now() + timedelta(hours=ttl)).isoformat(),
+            "ttl_hours": ttl
+        }
+        
+        with self._lock:
+            self._add_to_memory_cache(cache_key, cached_entry)
+        
+        cache_file = self._get_cache_file_path(cache_key)
+        try:
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(cached_entry, f, ensure_ascii=False, indent=2)
+            logger.debug(f"Cached atoms for CUI: '{cui}'")
+        except Exception as e:
+            logger.warning(f"Failed to write atoms cache file for CUI '{cui}': {e}")
+    
+    def _get_atoms_cache_key(self, cui: str) -> str:
+        return hashlib.md5(f"atoms:{cui}".encode()).hexdigest()
     
     def get(
         self,

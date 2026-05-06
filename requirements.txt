@@ -12,3 +12,6 @@ pypinyin>=0.49.0
 python-Levenshtein>=0.21.0
 httpx>=0.25.0
 qwen-asr>=0.0.6
+transformers>=4.30.0
+torch>=2.0.0
+sentencepiece>=0.1.99

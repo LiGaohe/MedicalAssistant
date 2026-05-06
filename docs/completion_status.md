@@ -1,5 +1,175 @@
 # 完成状态记录
 
+## 2026-05-07 ASR转写文本纠错增强
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 扩展LLM提示词纠错范围 | ✅ 完成 | 修改 `emr_generation_with_role` 模板，支持所有拼音相似错误 |
+| 添加纠错示例 | ✅ 完成 | 增加日常用语、同音字混淆、声调错误等示例 |
+| 更新中英文提示词 | ✅ 完成 | 同时更新中文和英文版本的提示词模板 |
+
+### 修改文件
+
+1. **backend/services/llm/prompts.py**
+   - 修改中文版 `emr_generation_with_role` 模板
+   - 修改英文版 `emr_generation_with_role` 模板
+   - 扩展ASR纠错指令，从医学术语扩展到所有拼音相似错误
+
+### 设计决策
+
+**纠错范围扩展**：
+
+原有提示词主要针对医学术语纠错，现在扩展到所有拼音相似错误：
+
+| 错误类型 | 示例 | 说明 |
+|---------|------|------|
+| 医学术语错误 | "阿莫希林"→"阿莫西林" | 药物名称、疾病名称等 |
+| 日常用语错误 | "少吃闲的食物"→"少吃咸的食物" | 日常用语中的同音字错误 |
+| 同音字混淆 | "堂尿病"→"糖尿病" | 拼音相同但汉字错误 |
+| 声调错误 | "夫泻"→"腹泻" | 拼音相同但声调不同 |
+
+**纠错原则**：
+
+1. **识别所有拼音相似或同音字错误**：不限于医学术语
+2. **结合上下文语境判断**：根据对话内容确定正确词汇
+3. **静默纠错**：只在病历文本中使用纠正后的正确术语，不标注纠正过程
+
+**实现方式**：
+
+- 在病历生成阶段（`emr_generation_with_role` 阶段）由LLM自动识别和修正
+- 不依赖静态词表，符合项目架构原则
+- 利用LLM的上下文理解能力，提高纠错准确率
+
+### 预期效果
+
+**修改前**：
+- ASR输出："少吃闲的食物"
+- 病历生成："少吃闲的食物"（未纠正）
+
+**修改后**：
+- ASR输出："少吃闲的食物"
+- 病历生成："少吃咸的食物"（自动纠正）
+
+### 后续优化
+
+1. **纠错效果评估**：收集实际纠错案例，评估准确率
+2. **提示词优化**：根据实际效果调整纠错示例和指令
+3. **多阶段纠错**：考虑在术语规范化阶段也加入纠错逻辑
+
+---
+
+## 2026-05-06 添加专门翻译小模型
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 创建翻译服务类 | ✅ 完成 | 新增 `TranslationService` 类，使用 Helsinki-NLP/opus-mt-zh-en 模型 |
+| 添加配置项 | ✅ 完成 | 在 `backend/config.py` 添加翻译相关配置 |
+| 更新依赖 | ✅ 完成 | 在 `requirements.txt` 添加 transformers、torch、sentencepiece |
+| 集成到TerminologyService | ✅ 完成 | 修改 `_translate_term_to_english()` 优先使用翻译服务 |
+| 创建测试脚本 | ✅ 完成 | 新增 `scripts/test_translation_service.py` 测试翻译功能 |
+| 更新架构文档 | ✅ 完成 | 在 `docs/architecture.md` 添加翻译服务说明 |
+
+### 新增文件
+
+1. **backend/services/translation_service.py**
+   - `TranslationService` 翻译服务类
+   - 支持中英文翻译，使用专门翻译小模型
+   - 自动降级机制，模型加载失败时返回 None
+
+2. **scripts/test_translation_service.py**
+   - 翻译服务测试脚本
+   - 测试翻译功能和性能
+   - 支持与LLM翻译对比测试
+
+### 修改文件
+
+1. **backend/config.py**
+   - 新增 `TRANSLATION_ENABLED` 配置项（默认 True）
+   - 新增 `TRANSLATION_MODEL` 配置项（默认 Helsinki-NLP/opus-mt-zh-en）
+   - 新增 `TRANSLATION_DEVICE` 配置项（默认 cpu）
+
+2. **backend/services/terminology_service.py**
+   - 导入 `TranslationService`
+   - 修改 `__init__()` 添加 `translation_service` 参数
+   - 新增 `_init_translation()` 方法初始化翻译服务
+   - 修改 `_translate_term_to_english()` 优先使用翻译服务
+
+3. **requirements.txt**
+   - 新增 `transformers>=4.30.0`
+   - 新增 `torch>=2.0.0`
+   - 新增 `sentencepiece>=0.1.99`
+
+4. **docs/architecture.md**
+   - 在目录结构中添加 `translation_service.py`
+   - 在服务层表格中添加 TranslationService 说明
+   - 在配置项表格中添加翻译相关配置
+
+### 设计决策
+
+**翻译模型选择**：
+
+- 选择 Helsinki-NLP/opus-mt-zh-en 模型
+- 模型大小约300MB，轻量级
+- 专门针对中英文翻译优化
+- CPU上也能快速推理
+
+**降级策略**：
+
+```
+翻译服务可用 → 使用翻译小模型 → 快速翻译
+翻译服务不可用 → 降级到LLM推理模型 → 兜底方案
+```
+
+**性能预期**：
+
+| 方案 | 响应时间 | 备注 |
+|------|---------|------|
+| LLM推理模型 | 2-5秒 | 需要完整推理过程 |
+| 翻译小模型 | 0.1-0.5秒 | 专门优化的翻译模型 |
+
+**预期提升**：翻译速度提升 **5-50倍**
+
+### 使用方法
+
+**自动使用**：
+
+翻译服务会自动初始化并集成到术语规范化流程中，无需手动调用。
+
+**测试翻译服务**：
+
+```bash
+# 激活环境
+source med_env/Scripts/activate
+
+# 安装依赖
+pip install transformers torch sentencepiece
+
+# 测试翻译服务
+python scripts/test_translation_service.py
+```
+
+**配置选项**：
+
+```python
+# backend/config.py 或 .env 文件
+TRANSLATION_ENABLED = True  # 启用/禁用翻译服务
+TRANSLATION_MODEL = "Helsinki-NLP/opus-mt-zh-en"  # 翻译模型
+TRANSLATION_DEVICE = "cpu"  # 运行设备（cpu/cuda）
+```
+
+### 后续优化
+
+1. **模型优化**：尝试量化模型减少内存占用
+2. **缓存机制**：添加翻译结果缓存，避免重复翻译
+3. **批量翻译**：支持批量翻译提升效率
+4. **模型切换**：支持运行时切换翻译模型
+
+---
+
 ## 2026-05-04 术语规范化流程重构
 
 ### 已完成

@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     UMLS_REQUEST_TIMEOUT: int = 30
     UMLS_MAX_RETRIES: int = 3
     UMLS_RATE_LIMIT_DELAY: float = 0.1
+    UMLS_MAX_CONCURRENT: int = 5
+
+    TERMINOLOGY_PARALLEL_ENABLED: bool = True
+    
+    TRANSLATION_ENABLED: bool = True
+    TRANSLATION_MODEL: str = "Helsinki-NLP/opus-mt-zh-en"
+    TRANSLATION_DEVICE: str = "cpu"
     
     class Config:
         env_file = ".env"

@@ -10,6 +10,7 @@ from ...utils.logger import logger
 class UMLSClient:
     UMLS_API_BASE = "https://uts-ws.nlm.nih.gov/rest"
     UMLS_SERVICE = "http://umlsks.nlm.nih.gov"
+    TGT_LIFETIME_HOURS = 7
     
     def __init__(
         self,
@@ -26,9 +27,21 @@ class UMLSClient:
         self.rate_limit_delay = rate_limit_delay
         self._last_request_time = 0
         
+        self._tgt_url: Optional[str] = None
+        self._tgt_expires_at: Optional[datetime] = None
+        
         logger.info(f"UMLSClient initialized with API key prefix: {api_key[:8]}...")
         
     def _get_service_ticket(self) -> str:
+        if self._tgt_url and self._tgt_expires_at and datetime.now() < self._tgt_expires_at:
+            logger.debug("Reusing cached TGT")
+            try:
+                return self._get_st_from_tgt(self._tgt_url)
+            except Exception as e:
+                logger.warning(f"Failed to get ST from cached TGT: {e}, will obtain new TGT")
+                self._tgt_url = None
+                self._tgt_expires_at = None
+        
         logger.debug("Obtaining new service ticket from UMLS")
         
         auth_url = "https://utslogin.nlm.nih.gov/cas/v1/api-key"
@@ -57,20 +70,11 @@ class UMLSClient:
                     
                     logger.debug(f"Got TGT URL: {tgt_url}")
                     
-                    st_response = session.post(
-                        tgt_url,
-                        data={"service": self.UMLS_SERVICE},
-                        headers=headers,
-                        timeout=self.request_timeout
-                    )
+                    self._tgt_url = tgt_url
+                    self._tgt_expires_at = datetime.now() + timedelta(hours=self.TGT_LIFETIME_HOURS)
+                    logger.debug(f"TGT cached, expires at: {self._tgt_expires_at}")
                     
-                    logger.debug(f"ST request status: {st_response.status_code}, body: {st_response.text[:100]}")
-                    
-                    if st_response.status_code == 200 and st_response.text:
-                        logger.debug("Successfully obtained service ticket")
-                        return st_response.text.strip()
-                    else:
-                        logger.warning(f"Service ticket request failed: {st_response.status_code}, body: {st_response.text[:100]}")
+                    return self._get_st_from_tgt(tgt_url)
                 else:
                     logger.warning(f"TGT request failed with status {response.status_code}: {response.text[:100]}")
                     
@@ -80,6 +84,24 @@ class UMLSClient:
                     time.sleep(1)
         
         raise RuntimeError("Failed to obtain service ticket from UMLS after max retries")
+    
+    def _get_st_from_tgt(self, tgt_url: str) -> str:
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        
+        st_response = requests.post(
+            tgt_url,
+            data={"service": self.UMLS_SERVICE},
+            headers=headers,
+            timeout=self.request_timeout
+        )
+        
+        logger.debug(f"ST request status: {st_response.status_code}, body: {st_response.text[:100]}")
+        
+        if st_response.status_code == 200 and st_response.text:
+            logger.debug("Successfully obtained service ticket")
+            return st_response.text.strip()
+        else:
+            raise RuntimeError(f"Service ticket request failed: {st_response.status_code}")
     
     def _rate_limit(self):
         elapsed = time.time() - self._last_request_time
@@ -226,6 +248,12 @@ class UMLSClient:
     def get_atoms(self, cui: str, language: Optional[str] = None) -> List[Dict]:
         logger.debug(f"Fetching atoms for CUI: {cui}, language: {language}")
         
+        if self.cache_service:
+            cached_atoms = self.cache_service.get_atoms(cui)
+            if cached_atoms:
+                logger.debug(f"Cache hit for atoms: CUI {cui}")
+                return cached_atoms
+        
         params = {}
         if language:
             params["language"] = language
@@ -235,7 +263,12 @@ class UMLSClient:
         if not result:
             return []
         
-        return result.get("result", [])
+        atoms = result.get("result", [])
+        
+        if self.cache_service and atoms:
+            self.cache_service.set_atoms(cui, atoms)
+        
+        return atoms
     
     def get_definitions(self, cui: str) -> List[Dict]:
         logger.debug(f"Fetching definitions for CUI: {cui}")
