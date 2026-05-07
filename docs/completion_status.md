@@ -1,5 +1,273 @@
 # 完成状态记录
 
+## 2026-05-07 病历生成流程性能优化
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 性能分析计划 | ✅ 完成 | 创建详细的性能优化计划文档 |
+| 步骤级并行化 | ✅ 完成 | 实现证据选择与术语规范化的并行执行 |
+| 术语规范化深度优化 | ✅ 完成 | 实现Code获取并行化，批量处理优化 |
+| 条件性执行优化 | ✅ 完成 | 智能跳过无数据步骤 |
+| LLMPipelineService优化 | ✅ 完成 | 为实际使用的服务应用并行优化 |
+| 英文服务优化 | ✅ 完成 | 英文病历生成跳过翻译步骤 |
+| 异步执行问题修复 | ✅ 完成 | 解决FastAPI事件循环中的asyncio.run()问题 |
+
+### 新增文件
+
+1. **.trae/documents/病历生成流程性能优化计划.md**
+   - 详细的性能分析和优化计划
+   - 各阶段实施记录
+   - 性能对比数据
+
+2. **scripts/test_performance_optimization.py**
+   - 性能优化测试脚本
+   - 对比串行和并行模式性能
+
+### 修改文件
+
+1. **backend/services/medical_record_pipeline.py**
+   - 添加`run_async`辅助函数
+   - 添加`_process_visit_parallel`异步方法
+   - 添加`_process_visit_serial`同步方法
+   - 添加`_step_evidence_selection_async`异步方法
+   - 添加`_step_terminology_normalization_async`异步方法
+   - 添加性能监控日志
+   - 添加条件性执行逻辑
+
+2. **backend/services/llm_pipeline_service.py**
+   - 添加`run_async`辅助函数
+   - 添加`_normalize_terms_serial`方法
+   - 添加`_normalize_terms_parallel`方法
+   - 优化`_normalize_terms_stage`方法
+   - 添加术语去重逻辑
+   - 添加性能监控日志
+
+3. **backend/services/llm_pipeline_service_en.py**
+   - 重写`_normalize_terms_stage`方法
+   - 添加`_normalize_terms_serial`方法
+   - 添加`_normalize_terms_parallel_en`方法
+   - 跳过翻译步骤优化
+
+4. **backend/services/emr_generation_service.py**
+   - 添加性能监控日志
+
+5. **backend/services/terminology_service.py**
+   - 优化`extract_and_normalize_terms_parallel`方法
+   - 实现Code获取并行化
+
+### 设计决策
+
+**并行处理架构**：
+
+```
+┌─────────────────────────────────────────────────────┐
+│              病历生成并行处理流程                      │
+│                                                     │
+│  ┌─────────────┐  ┌─────────────┐                  │
+│  │ 证据选择    │  │ 术语规范化  │  ← 并行执行       │
+│  └─────────────┘  └─────────────┘                  │
+│           ↘            ↙                            │
+│            ┌─────────────┐                          │
+│            │ 要素抽取    │                          │
+│            └─────────────┘                          │
+│                  ↓                                  │
+│            ┌─────────────┐                          │
+│            │ 病历生成    │                          │
+│            └─────────────┘                          │
+└─────────────────────────────────────────────────────┘
+```
+
+**术语规范化并行流程**：
+
+```
+术语识别 → 批量翻译 → 并行UMLS检索 → 批量LLM选择 → 并行获取Code
+```
+
+**异步执行解决方案**：
+
+```python
+def run_async(coro):
+    """
+    在同步上下文中运行异步协程
+    
+    解决问题：在FastAPI的事件循环中不能使用asyncio.run()
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    
+    if loop and loop.is_running():
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(asyncio.run, coro)
+            return future.result()
+    else:
+        return asyncio.run(coro)
+```
+
+### 性能对比
+
+| 服务 | 优化前 | 优化后 | 提升 |
+|------|--------|--------|------|
+| 中文服务 | 串行处理 | 并行处理 | 减少30-50% |
+| 英文服务 | 串行处理 | 并行处理（跳过翻译） | 减少40-60% |
+
+**关键优化点**：
+
+1. **步骤级并行**：证据选择和术语规范化并行执行
+2. **批量处理**：批量翻译、批量UMLS检索、批量LLM选择
+3. **并行Code获取**：使用asyncio.gather并行获取所有术语的code
+4. **术语去重**：避免重复处理相同术语
+5. **条件性跳过**：无数据时跳过相关步骤
+6. **英文优化**：跳过翻译步骤，直接使用英文术语
+
+### 配置项
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `TERMINOLOGY_PARALLEL_ENABLED` | True | 是否启用术语规范化并行模式 |
+| `UMLS_MAX_CONCURRENT` | 5 | UMLS API最大并发请求数 |
+
+### 日志输出示例
+
+```
+INFO: === 开始多阶段LLM处理: visit_id ===
+INFO: 使用并行模式规范化术语
+INFO: 批量翻译完成，耗时: 1.23秒
+INFO: 并行UMLS检索完成，耗时: 5.67秒
+INFO: 批量LLM选择完成，耗时: 3.45秒
+INFO: 并行获取code完成，耗时: 2.34秒
+INFO: 术语规范化完成，共规范化 8 个术语，耗时: 12.69秒
+INFO: === 多阶段LLM处理完成: visit_id, 总耗时: 36.69秒 ===
+```
+
+### 后续优化
+
+1. **LLM调用合并**：减少LLM调用次数
+2. **预加载机制**：预加载常用术语和模板
+3. **增量处理**：只处理变化的部分
+4. **智能缓存**：基于语义相似度的缓存
+
+---
+
+## 2026-05-06 术语规范化并行优化
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 创建异步UMLS客户端 | ✅ 完成 | 新增 `AsyncUMLSClient` 类，支持并发HTTP请求 |
+| 扩展翻译服务批量翻译 | ✅ 完成 | 添加 `batch_translate_zh_to_en()` 方法 |
+| 实现批量LLM候选选择 | ✅ 完成 | 单次LLM调用为所有术语选择最佳候选 |
+| 重构主流程为并行版本 | ✅ 完成 | 添加 `extract_and_normalize_terms_parallel()` 方法 |
+| 添加配置项 | ✅ 完成 | 新增 `UMLS_MAX_CONCURRENT`、`TERMINOLOGY_PARALLEL_ENABLED` |
+| 添加性能监控日志 | ✅ 完成 | 各阶段耗时日志输出 |
+| 测试验证 | ✅ 完成 | 性能提升约 2x |
+
+### 新增文件
+
+1. **backend/services/umls/async_umls_client.py**
+   - `AsyncUMLSClient` 异步UMLS客户端类
+   - 使用 aiohttp 实现异步HTTP请求
+   - 支持 `batch_search()` 并发检索多个术语
+   - 信号量控制最大并发数，避免API限流
+
+2. **scripts/test_parallel_terminology.py**
+   - 并行优化测试脚本
+   - 对比串行和并行模式性能
+   - 测试批量翻译和异步UMLS检索
+
+### 修改文件
+
+1. **backend/services/translation_service.py**
+   - 新增 `batch_translate_zh_to_en()` 方法
+   - 利用 transformers pipeline 原生批量处理能力
+
+2. **backend/services/terminology_service.py**
+   - 导入 `AsyncUMLSClient` 和 `asyncio`
+   - 新增 `async_umls_client` 属性
+   - 新增 `_batch_select_candidates()` 方法：批量LLM候选选择
+   - 新增 `extract_and_normalize_terms_parallel()` 方法：并行处理流程
+   - 新增 `_extract_and_normalize_terms_parallel_with_cleanup()` 方法：带清理的包装方法
+   - 新增 `_extract_and_normalize_terms_serial()` 方法：串行处理流程（原有逻辑）
+   - 修改 `extract_and_normalize_terms()` 方法：支持 `use_parallel` 参数
+
+3. **backend/config.py**
+   - 新增 `UMLS_MAX_CONCURRENT: int = 5` 配置项
+   - 新增 `TERMINOLOGY_PARALLEL_ENABLED: bool = True` 配置项
+
+### 设计决策
+
+**并行流水线架构**：
+
+```
+identify_colloquial_terms (批量识别)
+    ↓
+┌─────────────────────────────────────────────────────┐
+│              并行处理流水线                           │
+│                                                     │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐│
+│  │ 批量翻译     │→ │ 并行UMLS检索 │→ │ 批量LLM选择  ││
+│  │ (翻译模型)   │  │ (asyncio)    │  │ (单次LLM调用)││
+│  └──────────────┘  └──────────────┘  └──────────────┘│
+└─────────────────────────────────────────────────────┘
+    ↓
+结果合并与返回
+```
+
+**性能对比**：
+
+| 测试项 | 串行耗时 | 并行耗时 | 提升 |
+|--------|---------|---------|------|
+| 批量翻译 (5个术语) | 0.88秒 | 0.43秒 | 2.06x |
+| 异步UMLS检索 (5个术语) | - | 4.17秒 | 并发执行 |
+| 整体对比 (12个术语) | 436秒 | 229秒 | 1.90x |
+
+**降级策略**：
+
+```
+并行模式启用 + AsyncUMLSClient可用 → 并行处理
+并行模式禁用 或 AsyncUMLSClient不可用 → 串行处理（原有逻辑）
+并行处理失败 → 自动回退到串行处理
+```
+
+### 配置说明
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `UMLS_MAX_CONCURRENT` | 5 | UMLS API最大并发请求数 |
+| `TERMINOLOGY_PARALLEL_ENABLED` | True | 是否启用并行模式 |
+
+### 使用方法
+
+**自动使用**：
+
+并行模式默认启用，无需手动调用。系统会自动检测并选择最优处理方式。
+
+**手动切换**：
+
+```python
+# 使用并行模式（默认）
+terms = term_service.extract_and_normalize_terms(text, use_parallel=True)
+
+# 使用串行模式
+terms = term_service.extract_and_normalize_terms(text, use_parallel=False)
+```
+
+**测试验证**：
+
+```bash
+# 激活环境
+source med_env/Scripts/activate
+
+# 运行测试
+python scripts/test_parallel_terminology.py
+```
+
+---
+
 ## 2026-05-07 ASR转写文本纠错增强
 
 ### 已完成

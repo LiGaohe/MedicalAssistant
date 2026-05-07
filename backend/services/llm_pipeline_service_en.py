@@ -1,12 +1,15 @@
 import json
 import re
+import time
+import asyncio
 from typing import Dict, Any, List
 
 from sqlalchemy.orm import Session
-from ..models import TranscriptTurn, EMRRecord, EvidenceSpan
+from ..models import TranscriptTurn, EMRRecord, EvidenceSpan, NormalizedTerm
 from .llm.llm_service import LLMService
-from .llm_pipeline_service import LLMPipelineService
+from .llm_pipeline_service import LLMPipelineService, run_async
 from ..utils.logger import logger
+from ..config import settings
 
 
 class LLMPipelineServiceEnglish(LLMPipelineService):
@@ -997,3 +1000,225 @@ Notes:
             }
 
         return {"error": f"Unknown stage: {stage}"}
+
+    def _normalize_terms_stage(
+        self,
+        annotated_text: str,
+        role_mapping: Dict[str, str],
+        visit_id: str = None,
+        save_to_db: bool = True
+    ) -> Dict[str, Any]:
+        """
+        英文术语规范化阶段（不需要翻译步骤）
+        
+        优化点：
+        1. 跳过翻译步骤（英文已经是目标语言）
+        2. 并行UMLS检索
+        3. 批量LLM选择
+        4. 并行获取Code
+        """
+        logger.info(">>> 阶段2: 术语规范化 (英文模式)")
+        stage_start = time.time()
+        
+        identified_terms = self.terminology_service.identify_colloquial_terms(annotated_text)
+        
+        if not identified_terms:
+            logger.info("未识别到任何医学术语")
+            return {"normalized_text": annotated_text, "terms": []}
+        
+        logger.info(f"识别到 {len(identified_terms)} 个医学术语")
+        
+        seen_terms = set()
+        unique_terms = []
+        for term_info in identified_terms:
+            term = term_info.get("term", "")
+            if term not in seen_terms:
+                seen_terms.add(term)
+                unique_terms.append(term_info)
+        
+        logger.info(f"去重后剩余 {len(unique_terms)} 个术语")
+        
+        normalized_terms = []
+        terms_for_result = []
+        
+        parallel_enabled = getattr(settings, 'TERMINOLOGY_PARALLEL_ENABLED', True)
+        
+        if parallel_enabled and self.terminology_service.async_umls_client and len(unique_terms) > 1:
+            logger.info("使用并行模式规范化术语（英文，跳过翻译）")
+            
+            try:
+                normalized_terms = run_async(
+                    self._normalize_terms_parallel_en(unique_terms, annotated_text)
+                )
+            except Exception as e:
+                logger.warning(f"并行规范化失败，回退到串行模式: {e}")
+                normalized_terms = self._normalize_terms_serial(unique_terms)
+        else:
+            logger.info("使用串行模式规范化术语")
+            normalized_terms = self._normalize_terms_serial(unique_terms)
+        
+        for i, normalized in enumerate(normalized_terms):
+            term_info = unique_terms[i] if i < len(unique_terms) else {}
+            term = term_info.get("term", "")
+            term_type = term_info.get("term_type", "unknown")
+            is_colloquial = term_info.get("is_colloquial", True)
+            
+            terms_for_result.append({
+                "original": term,
+                "normalized": normalized.normalized_term,
+                "category": term_type,
+                "source": normalized.source,
+                "confidence": normalized.confidence,
+                "cui": normalized.cui,
+                "code": normalized.code,
+                "code_system": normalized.code_system,
+                "is_colloquial": is_colloquial
+            })
+            
+            logger.info(f"  术语规范化: '{term}' -> '{normalized.normalized_term}' (source: {normalized.source}, confidence: {normalized.confidence:.2f})")
+        
+        normalized_text = annotated_text
+        for term_result in terms_for_result:
+            original = term_result["original"]
+            normalized = term_result["normalized"]
+            if original and normalized != original:
+                normalized_text = normalized_text.replace(original, normalized)
+        
+        if save_to_db and visit_id and normalized_terms:
+            try:
+                self.terminology_service.save_normalized_terms(normalized_terms, visit_id)
+                logger.info(f"保存了 {len(normalized_terms)} 个规范化术语到数据库")
+            except Exception as e:
+                logger.error(f"保存规范化术语失败: {e}")
+        
+        stage_time = time.time() - stage_start
+        logger.info(f"术语规范化完成，共规范化 {len(normalized_terms)} 个术语，耗时: {stage_time:.2f}秒")
+        
+        return {
+            "normalized_text": normalized_text,
+            "terms": terms_for_result
+        }
+    
+    def _normalize_terms_serial(self, unique_terms: List[Dict[str, Any]]) -> List[Any]:
+        """串行规范化术语"""
+        normalized_terms = []
+        for term_info in unique_terms:
+            term = term_info.get("term", "")
+            term_type = term_info.get("term_type", "unknown")
+            context = term_info.get("context", "")
+            
+            normalized = self.terminology_service.normalize_term(term, context, term_type)
+            normalized_terms.append(normalized)
+        
+        return normalized_terms
+    
+    async def _normalize_terms_parallel_en(self, unique_terms: List[Dict[str, Any]], context: str) -> List[Any]:
+        """
+        并行规范化术语（英文版本，跳过翻译步骤）
+        
+        流程：
+        1. 并行UMLS检索（无需翻译）
+        2. 批量LLM选择
+        3. 并行获取Code
+        """
+        terms = [t.get("term", "") for t in unique_terms]
+        contexts = {t.get("term", ""): t.get("context", context) for t in unique_terms}
+        term_types = {t.get("term", ""): t.get("term_type", "unknown") for t in unique_terms}
+        
+        umls_results = {}
+        if self.terminology_service.async_umls_client:
+            search_start = time.time()
+            umls_results = await self.terminology_service.async_umls_client.batch_search(
+                terms,
+                language="ENG"
+            )
+            logger.info(f"并行UMLS检索完成，耗时: {time.time() - search_start:.2f}秒")
+        
+        term_candidates = {}
+        for term in terms:
+            result = umls_results.get(term)
+            if result and hasattr(result, 'candidates') and result.candidates:
+                term_candidates[term] = result.candidates[:5]
+        
+        selections = {}
+        if term_candidates and self.llm_service:
+            select_start = time.time()
+            selections = self.terminology_service._batch_select_candidates(term_candidates, contexts, {})
+            logger.info(f"批量LLM选择完成，耗时: {time.time() - select_start:.2f}秒")
+        
+        code_tasks = {}
+        for term in terms:
+            if term in selections:
+                code_tasks[term] = self.terminology_service._async_get_code_from_candidate(selections[term])
+        
+        code_results = {}
+        if code_tasks:
+            code_start = time.time()
+            code_results_list = await asyncio.gather(*code_tasks.values(), return_exceptions=True)
+            for term, result in zip(code_tasks.keys(), code_results_list):
+                if isinstance(result, Exception):
+                    logger.warning(f"获取code失败 for {term}: {result}")
+                    code_results[term] = (None, None)
+                else:
+                    code_results[term] = result
+            logger.info(f"并行获取code完成，耗时: {time.time() - code_start:.2f}秒")
+        
+        normalized_terms = []
+        for term_info in unique_terms:
+            term = term_info.get("term", "")
+            term_type = term_types.get(term, "unknown")
+            
+            normalized = term
+            confidence = 0.3
+            reasoning = "无法规范化，保留原术语"
+            code = None
+            code_system = None
+            source = "none"
+            candidates_data = None
+            cui = None
+            
+            if term in selections:
+                best_candidate = selections[term]
+                code, code_system = code_results.get(term, (None, None))
+                
+                candidates = term_candidates.get(term, [])
+                candidates_data = [
+                    {
+                        "term": c.term,
+                        "cui": c.cui,
+                        "score": c.score,
+                        "preferred": c.preferred
+                    }
+                    for c in candidates
+                ]
+                
+                confidence = min(0.95, 0.6 + best_candidate.score * 0.35)
+                reasoning = f"UMLS匹配: {term} -> {best_candidate.term} (CUI: {best_candidate.cui})"
+                source = "UMLS"
+                cui = best_candidate.cui
+                normalized = best_candidate.term
+            
+            elif confidence < 0.5 and self.llm_service:
+                llm_result = self.terminology_service._normalize_by_llm(term, contexts.get(term, ""))
+                if llm_result and llm_result[1] > confidence:
+                    normalized, confidence, reasoning = llm_result
+                    source = "LLM"
+            
+            is_risky = confidence < 0.5
+            
+            normalized_term = NormalizedTerm(
+                original_term=term,
+                normalized_term=normalized,
+                term_type=term_type,
+                confidence=confidence,
+                is_risky=is_risky,
+                reasoning=reasoning,
+                code=code,
+                code_system=code_system,
+                source=source,
+                candidates=candidates_data,
+                cui=cui
+            )
+            normalized_terms.append(normalized_term)
+        
+        return normalized_terms

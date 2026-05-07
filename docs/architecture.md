@@ -2,7 +2,7 @@
 
 ## 系统架构图
 
-![系统架构图](system-architecture.svg)
+![系统架构图](./assets/system-architecture.png)
 
 ### 系统架构说明
 
@@ -86,16 +86,17 @@ MedicalAssisstant/
 │   │   │   └── llm_service.py # LLM服务封装
 │   │   ├── umls/              # UMLS医学术语库模块
 │   │   │   ├── __init__.py    # 数据类定义
-│   │   │   ├── umls_client.py # UMLS API客户端
+│   │   │   ├── umls_client.py # UMLS API客户端（同步）
+│   │   │   ├── async_umls_client.py # UMLS API客户端（异步，支持并发）
 │   │   │   └── term_cache.py  # 术语缓存管理
 │   │   ├── llm_pipeline_service.py    # LLM多阶段处理（中文提示词）
-│   │   ├── llm_pipeline_service_en.py # LLM多阶段处理（英文提示词）
+│   │   ├── llm_pipeline_service_en.py # LLM多阶段处理（英文提示词，跳过翻译优化）
 │   │   ├── evidence_service.py # 证据选择服务
-│   │   ├── terminology_service.py # 术语规范化服务（集成UMLS）
+│   │   ├── terminology_service.py # 术语规范化服务（集成UMLS，支持并行处理）
 │   │   ├── translation_service.py # 中英文翻译服务（专门翻译小模型）
 │   │   ├── extraction_service.py # 病历要素抽取服务
 │   │   ├── emr_generation_service.py # 病历生成服务
-│   │   ├── medical_record_pipeline.py # 病历生成流水线
+│   │   ├── medical_record_pipeline.py # 病历生成流水线（支持并行处理）
 │   │   ├── evaluation/         # 病历质量评估模块
 │   │   │   ├── __init__.py     # 模块入口
 │   │   │   ├── base.py         # 评估器基类
@@ -127,6 +128,9 @@ MedicalAssisstant/
 │   ├── 说话人分离使用说明.md    # 说话人分离功能说明
 │   └── specs/                  # 规格文档
 │       └── 2026-04-12-m1-milestone-design.md
+├── .trae/                      # Trae工具目录
+│   └── documents/              # Trae文档
+│       └── 病历生成流程性能优化计划.md # 性能优化计划文档
 ├── frontend/                   # 前端界面
 │   ├── css/
 │   │   └── style.css          # 样式文件
@@ -149,6 +153,9 @@ MedicalAssisstant/
 │   ├── test_diarization_debug.py # 调试脚本
 │   ├── test_diarization_with_tts.py # TTS测试脚本
 │   ├── test_qwen3_asr.py      # Qwen3-ASR测试脚本
+│   ├── test_translation_service.py # 翻译服务测试脚本
+│   ├── test_parallel_terminology.py # 术语规范化并行测试脚本
+│   ├── test_performance_optimization.py # 性能优化测试脚本
 │   └── set_cache_path.bat     # 设置缓存路径脚本
 ├── src/                        # 核心源代码
 │   ├── asr/                   # ASR 模块
@@ -610,6 +617,8 @@ graph LR
 
 #### 3.3 术语规范化模块
 
+##### 3.3.1 串行处理流程（原有）
+
 ```mermaid
 graph TB
     A[文本输入] --> B[LLM识别口语术语]
@@ -636,7 +645,75 @@ graph TB
     style I fill:#fff3e0
 ```
 
-**术语规范化流程说明：**
+##### 3.3.2 并行处理流程（优化后）
+
+```mermaid
+graph TB
+    A[文本输入] --> B[LLM识别口语术语]
+    B --> C[获取术语列表]
+    C --> D[去重处理]
+    D --> E[批量翻译]
+    E --> F[并行UMLS检索]
+    F --> G[批量LLM候选选择]
+    G --> H[结果合并]
+    H --> I[输出规范化结果]
+    
+    style A fill:#e1f5ff
+    style I fill:#e8f5e9
+    style E fill:#fff3e0
+    style F fill:#fff3e0
+    style G fill:#fff3e0
+```
+
+**并行处理流水线架构**：
+
+```
+identify_colloquial_terms (批量识别)
+    ↓
+┌─────────────────────────────────────────────────────┐
+│              并行处理流水线                           │
+│                                                     │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐│
+│  │ 批量翻译     │→ │ 并行UMLS检索 │→ │ 批量LLM选择  ││
+│  │ (翻译模型)   │  │ (asyncio)    │  │ (单次LLM调用)││
+│  └──────────────┘  └──────────────┘  └──────────────┘│
+└─────────────────────────────────────────────────────┘
+    ↓
+结果合并与返回
+```
+
+**并行优化核心组件**：
+
+| 组件 | 文件 | 功能 |
+|------|------|------|
+| AsyncUMLSClient | `backend/services/umls/async_umls_client.py` | 异步UMLS客户端，支持并发HTTP请求 |
+| TranslationService | `backend/services/translation_service.py` | 翻译服务，支持批量翻译 |
+| TerminologyService | `backend/services/terminology_service.py` | 术语规范化服务，集成并行处理 |
+
+**性能对比**：
+
+| 测试项 | 串行耗时 | 并行耗时 | 提升 |
+|--------|---------|---------|------|
+| 批量翻译 (5个术语) | 0.88秒 | 0.43秒 | 2.06x |
+| 异步UMLS检索 (5个术语) | - | 4.17秒 | 并发执行 |
+| 整体对比 (12个术语) | 436秒 | 229秒 | 1.90x |
+
+**降级策略**：
+
+```
+并行模式启用 + AsyncUMLSClient可用 → 并行处理
+并行模式禁用 或 AsyncUMLSClient不可用 → 串行处理（原有逻辑）
+并行处理失败 → 自动回退到串行处理
+```
+
+**并行配置项**：
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `UMLS_MAX_CONCURRENT` | 5 | UMLS API最大并发请求数 |
+| `TERMINOLOGY_PARALLEL_ENABLED` | True | 是否启用并行模式 |
+
+##### 3.3.3 术语规范化流程说明
 
 | 步骤 | 处理方式 | 置信度范围 | 说明 |
 | --- | --- | --- | --- |
@@ -981,12 +1058,13 @@ graph TB
 | TranscriptNormalizer | 文本标准化，说话人映射 | backend/services/normalizer.py |
 | SpeakerRoleClassifier | 说话人角色识别，基于语义分析识别医生/患者 | backend/services/speaker_role_classifier.py |
 | EvidenceService | 证据选择，基于触发词、置信度和LLM筛选相关片段 | backend/services/evidence_service.py |
-| TerminologyService | 术语规范化，LLM识别术语+UMLS检索+LLM候选选择 | backend/services/terminology_service.py |
+| TerminologyService | 术语规范化，LLM识别术语+UMLS检索+LLM候选选择，支持并行处理 | backend/services/terminology_service.py |
 | TranslationService | 中英文翻译，使用专门翻译小模型提升翻译速度 | backend/services/translation_service.py |
 | ExtractionService | 病历要素抽取，从证据中抽取SOAP要素 | backend/services/extraction_service.py |
 | EMRGenerationService | 病历生成，基于模板和LLM生成结构化病历 | backend/services/emr_generation_service.py |
-| MedicalRecordPipeline | 整合服务，串联所有处理步骤 | backend/services/medical_record_pipeline.py |
-| LLMPipelineService | 多阶段LLM处理，支持调试模式 | backend/services/llm_pipeline_service.py |
+| MedicalRecordPipeline | 整合服务，串联所有处理步骤，支持并行处理 | backend/services/medical_record_pipeline.py |
+| LLMPipelineService | 多阶段LLM处理，支持调试模式和并行优化 | backend/services/llm_pipeline_service.py |
+| LLMPipelineServiceEnglish | 英文多阶段LLM处理，跳过翻译步骤优化 | backend/services/llm_pipeline_service_en.py |
 | LLMService | LLM服务，支持多适配器和模板渲染 | backend/services/llm/llm_service.py |
 
 ### 配置项
@@ -1006,6 +1084,93 @@ graph TB
 | TRANSLATION_ENABLED | true | 启用翻译服务 |
 | TRANSLATION_MODEL | Helsinki-NLP/opus-mt-zh-en | 翻译模型名称 |
 | TRANSLATION_DEVICE | cpu | 翻译模型运行设备 |
+| UMLS_MAX_CONCURRENT | 5 | UMLS API最大并发请求数 |
+| TERMINOLOGY_PARALLEL_ENABLED | true | 启用术语规范化并行模式 |
+
+## 依赖关系
+
+### 核心依赖
+
+| 依赖 | 版本 | 用途 |
+|------|------|------|
+| fastapi | ^0.104.0 | Web框架 |
+| uvicorn | ^0.24.0 | ASGI服务器 |
+| sqlalchemy | ^2.0.0 | ORM框架 |
+| funasr | ^1.0.0 | ASR引擎 |
+| torch | ^2.0.0 | 深度学习框架 |
+| transformers | ^4.35.0 | 翻译模型 |
+| openai | ^1.3.0 | LLM API |
+| requests | ^2.31.0 | HTTP客户端 |
+| pydantic | ^2.5.0 | 数据验证 |
+| asyncio | 内置 | 异步编程 |
+| concurrent.futures | 内置 | 线程池执行 |
+
+### 性能优化依赖
+
+| 依赖 | 版本 | 用途 |
+|------|------|------|
+| asyncio | 内置 | 异步编程，并行处理 |
+| ThreadPoolExecutor | 内置 | 线程池，解决事件循环嵌套问题 |
+
+## 性能优化
+
+### 并行处理架构
+
+病历生成流程支持并行处理，主要优化点：
+
+1. **步骤级并行**：证据选择和术语规范化并行执行
+2. **批量处理**：批量翻译、批量UMLS检索、批量LLM选择
+3. **并行Code获取**：使用asyncio.gather并行获取所有术语的code
+4. **术语去重**：避免重复处理相同术语
+5. **条件性跳过**：无数据时跳过相关步骤
+6. **英文优化**：跳过翻译步骤，直接使用英文术语
+
+### 性能对比
+
+| 服务 | 优化前 | 优化后 | 提升 |
+|------|--------|--------|------|
+| 中文服务 | 串行处理 | 并行处理 | 减少30-50% |
+| 英文服务 | 串行处理 | 并行处理（跳过翻译） | 减少40-60% |
+
+### 并行处理流程图
+
+```mermaid
+graph TB
+    A[对话文本] --> B[证据选择]
+    A --> C[术语规范化]
+    B --> D[要素抽取]
+    C --> D
+    D --> E[病历生成]
+    
+    style B fill:#fff3e0
+    style C fill:#fff3e0
+    style D fill:#e8f5e9
+    style E fill:#e8f5e9
+```
+
+### 异步执行解决方案
+
+在FastAPI环境中，使用`run_async`辅助函数处理异步代码：
+
+```python
+def run_async(coro):
+    """
+    在同步上下文中运行异步协程
+    
+    解决问题：在FastAPI的事件循环中不能使用asyncio.run()
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    
+    if loop and loop.is_running():
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(asyncio.run, coro)
+            return future.result()
+    else:
+        return asyncio.run(coro)
+```
 
 ## 前端界面
 
@@ -1033,7 +1198,61 @@ graph TB
 
 ## 数据流程
 
-![数据流程图](data-flow.svg)
+### 标准流程
+
+```mermaid
+graph LR
+    A[音频输入] --> B[ASR转写]
+    B --> C[说话人分离]
+    C --> D[角色识别]
+    D --> E[证据选择]
+    E --> F[术语规范化]
+    F --> G[要素抽取]
+    G --> H[病历生成]
+    H --> I[病历输出]
+```
+
+### 并行处理流程
+
+```mermaid
+graph TB
+    A[对话文本] --> B[证据选择]
+    A --> C[术语规范化]
+    B --> D[要素抽取]
+    C --> D
+    D --> E[病历生成]
+    
+    style B fill:#fff3e0
+    style C fill:#fff3e0
+    style D fill:#e8f5e9
+    style E fill:#e8f5e9
+```
+
+**并行处理说明**：
+
+1. **证据选择和术语规范化并行执行**：两个步骤无数据依赖，可同时进行
+2. **术语规范化内部并行**：
+   - 批量翻译（中文服务）
+   - 并行UMLS检索
+   - 批量LLM选择
+   - 并行获取Code
+3. **条件性跳过**：
+   - 无对话轮次时跳过证据选择和术语规范化
+   - 无证据时跳过要素抽取
+   - 无术语时跳过术语规范化
+
+### 英文服务流程
+
+英文病历生成服务跳过翻译步骤：
+
+```mermaid
+graph LR
+    A[英文对话] --> B[证据选择]
+    A --> C[术语规范化<br/>跳过翻译]
+    B --> D[要素抽取]
+    C --> D
+    D --> E[病历生成]
+```
 
 ## ASR 模块架构
 

@@ -1,4 +1,6 @@
 import json
+import asyncio
+import time
 from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 from ..models import EMRRecord, ExtractedItem, TranscriptTurn, Visit
@@ -92,6 +94,7 @@ class EMRGenerationService:
         turns: list
     ) -> EMRRecord:
         logger.info("开始模板生成病历")
+        start_time = time.time()
         
         role_mapping = self._infer_roles(turns)
         logger.info(f"推断角色映射: {role_mapping}")
@@ -99,11 +102,16 @@ class EMRGenerationService:
         aggregated = self._aggregate_items(items)
         logger.debug(f"聚合数据: {aggregated}")
         
+        subjective = self._generate_subjective(aggregated, role_mapping, turns)
+        objective = self._generate_objective(aggregated, role_mapping, turns)
+        assessment = self._generate_assessment(aggregated, role_mapping, turns)
+        plan = self._generate_plan(aggregated, role_mapping, turns)
+        
         emr_json = {
-            "subjective": self._generate_subjective(aggregated, role_mapping, turns),
-            "objective": self._generate_objective(aggregated, role_mapping, turns),
-            "assessment": self._generate_assessment(aggregated, role_mapping, turns),
-            "plan": self._generate_plan(aggregated, role_mapping, turns)
+            "subjective": subjective,
+            "objective": objective,
+            "assessment": assessment,
+            "plan": plan
         }
         
         logger.info(f"生成的病历JSON: {emr_json}")
@@ -118,7 +126,8 @@ class EMRGenerationService:
             evidence_mapping=self._build_evidence_mapping(items)
         )
         
-        logger.info(f"病历生成完成，版本: {emr.version}")
+        elapsed_time = time.time() - start_time
+        logger.info(f"病历生成完成，版本: {emr.version}，耗时: {elapsed_time:.2f}秒")
         return emr
         
     def _generate_subjective(self, aggregated: Dict[str, Any], role_mapping: Dict[str, str], turns: list) -> Dict[str, Any]:

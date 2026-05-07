@@ -704,6 +704,23 @@ Note: Only output JSON, no other content."""
             selections = self._batch_select_candidates(term_candidates, contexts, translations)
             logger.info(f"批量LLM选择完成，耗时: {time.time() - select_start:.2f}秒")
 
+        code_tasks = {}
+        for term in terms:
+            if term in selections:
+                code_tasks[term] = self._async_get_code_from_candidate(selections[term])
+        
+        code_results = {}
+        if code_tasks:
+            code_start = time.time()
+            code_results_list = await asyncio.gather(*code_tasks.values(), return_exceptions=True)
+            for term, result in zip(code_tasks.keys(), code_results_list):
+                if isinstance(result, Exception):
+                    logger.warning(f"获取code失败 for {term}: {result}")
+                    code_results[term] = (None, None)
+                else:
+                    code_results[term] = result
+            logger.info(f"并行获取code完成，耗时: {time.time() - code_start:.2f}秒")
+
         normalized_terms = []
         for term_info in unique_terms:
             term = term_info.get("term", "")
@@ -720,7 +737,7 @@ Note: Only output JSON, no other content."""
 
             if term in selections:
                 best_candidate = selections[term]
-                code, code_system = await self._async_get_code_from_candidate(best_candidate)
+                code, code_system = code_results.get(term, (None, None))
 
                 candidates = term_candidates.get(term, [])
                 candidates_data = [
