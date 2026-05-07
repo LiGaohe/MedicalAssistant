@@ -11,6 +11,8 @@ from .umls.async_umls_client import AsyncUMLSClient
 from .umls.term_cache import TermCache
 from .umls import UMLSCandidate, UMLSSearchResult
 from .translation_service import TranslationService
+from .chinese_term_indexer import ChineseTermIndexer
+from .chinese_term_client import ChineseTermClient
 from ..config import settings
 from ..utils.logger import logger
 
@@ -33,6 +35,7 @@ class TerminologyService:
         self.umls_client = umls_client
         self.async_umls_client: Optional[AsyncUMLSClient] = None
         self.cache_service: Optional[TermCache] = None
+        self.chinese_term_client: Optional[ChineseTermClient] = None
         
         if settings.UMLS_ENABLED and settings.UMLS_API_KEY:
             self._init_umls()
@@ -40,7 +43,10 @@ class TerminologyService:
         if not self.translation_service and settings.TRANSLATION_ENABLED:
             self._init_translation()
         
-        logger.info(f"TerminologyService initialized, UMLS: {'enabled' if self.umls_client else 'disabled'}, Translation: {'enabled' if self.translation_service else 'disabled'}, language: {language}")
+        if settings.CHINESE_TERM_ENABLED:
+            self._init_chinese_term_client()
+        
+        logger.info(f"TerminologyService initialized, UMLS: {'enabled' if self.umls_client else 'disabled'}, Translation: {'enabled' if self.translation_service else 'disabled'}, ChineseTerm: {'enabled' if self.chinese_term_client else 'disabled'}, language: {language}")
     
     def _init_umls(self):
         try:
@@ -98,6 +104,42 @@ class TerminologyService:
         except Exception as e:
             logger.error(f"Failed to initialize translation service: {e}")
             self.translation_service = None
+    
+    def _init_chinese_term_client(self):
+        try:
+            logger.info("Initializing Chinese term client")
+            
+            indexer = ChineseTermIndexer()
+            
+            symptom_count = indexer.load_symptom_norm(settings.SYMPTOM_NORM_PATH)
+            logger.info(f"Loaded {symptom_count} symptom terms from IMCS")
+            
+            icd11_count = indexer.load_icd11_terms(settings.ICD11_ZH_PATH)
+            logger.info(f"Loaded {icd11_count} terms from ICD-11")
+            
+            colloquial_file = "data/text/colloquial_synonyms.json"
+            colloquial_count = indexer.load_colloquial_synonyms(colloquial_file)
+            logger.info(f"Loaded {colloquial_count} colloquial synonym mappings")
+            
+            total_count = indexer.build_index()
+            logger.info(f"Built index with {total_count} total terms")
+            
+            self.chinese_term_client = ChineseTermClient(
+                indexer=indexer,
+                fuzzy_threshold=settings.CHINESE_TERM_FUZZY_THRESHOLD,
+                exact_match_bonus=settings.CHINESE_TERM_EXACT_MATCH_BONUS
+            )
+            
+            if self.chinese_term_client.is_available():
+                stats = self.chinese_term_client.get_stats()
+                logger.info(f"Chinese term client initialized successfully: {stats}")
+            else:
+                logger.warning("Chinese term client initialization failed, no terms loaded")
+                self.chinese_term_client = None
+                
+        except Exception as e:
+            logger.error(f"Failed to initialize Chinese term client: {e}")
+            self.chinese_term_client = None
     
     def _load_term_type_hints(self) -> Dict[str, List[str]]:
         try:
@@ -213,7 +255,13 @@ Note: Only output JSON, no other content."""
         candidates = None
         cui = None
         
-        if self.umls_client:
+        if self.chinese_term_client:
+            chinese_result = self._normalize_by_chinese_term(term, term_type)
+            if chinese_result:
+                normalized, confidence, reasoning, code, code_system, source, candidates = chinese_result
+                logger.info(f"ChineseTerm normalized '{term}' -> '{normalized}' (confidence: {confidence:.2f})")
+        
+        if confidence < 0.5 and self.umls_client:
             umls_result = self._normalize_by_umls(term, context)
             if umls_result:
                 normalized, confidence, reasoning, code, code_system, source, candidates, cui = umls_result
@@ -247,6 +295,68 @@ Note: Only output JSON, no other content."""
             candidates=candidates,
             cui=cui
         )
+    
+    def _normalize_by_chinese_term(
+        self,
+        term: str,
+        term_type: Optional[str] = None
+    ) -> Optional[Tuple[str, float, str, Optional[str], Optional[str], str, Optional[List]]]:
+        if not self.chinese_term_client:
+            return None
+        
+        try:
+            logger.debug(f"Searching Chinese term index for: '{term}'")
+            
+            result = self.chinese_term_client.search_term(
+                term=term,
+                term_type=term_type,
+                use_fuzzy=True
+            )
+            
+            if not result:
+                logger.debug(f"No Chinese term match found for: '{term}'")
+                return None
+            
+            confidence = result.confidence
+            
+            if confidence < 0.7:
+                logger.debug(f"Chinese term match confidence too low: {confidence:.2f}")
+                return None
+            
+            candidates_data = None
+            if result.candidates:
+                candidates_data = [
+                    {
+                        "term": c.term,
+                        "code": c.code,
+                        "code_system": c.code_system,
+                        "term_type": c.term_type,
+                        "source": c.source
+                    }
+                    for c in result.candidates[:5]
+                ]
+            
+            match_type_desc = "精确匹配" if result.match_type == "exact" else "模糊匹配"
+            reasoning = f"中文术语库{match_type_desc}: {term} -> {result.matched_term}"
+            
+            if result.code:
+                reasoning += f" ({result.code_system}: {result.code})"
+            
+            logger.info(f"Chinese term match found: '{term}' -> '{result.matched_term}' (confidence: {confidence:.2f})")
+            
+            return (
+                result.matched_term,
+                confidence,
+                reasoning,
+                result.code,
+                result.code_system,
+                "ChineseTerm",
+                candidates_data
+            )
+            
+        except Exception as e:
+            logger.error(f"Chinese term normalization failed for '{term}': {e}")
+            return None
     
     def _normalize_by_umls(
         self,

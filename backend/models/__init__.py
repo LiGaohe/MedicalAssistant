@@ -8,16 +8,19 @@ from .term import NormalizedTerm
 from .extracted_item import ExtractedItem
 from .emr_record import EMRRecord
 from .evaluation_record import EvaluationRecord
+from .chinese_term import ChineseTerm, ChineseSearchResult
 
 __all__ = [
-    "Visit", 
-    "TranscriptTurn", 
-    "ASRCorrection", 
-    "Task", 
+    "Visit",
+    "TranscriptTurn",
+    "ASRCorrection",
+    "Task",
     "LLMConfig",
     "EvidenceSpan",
     "NormalizedTerm",
     "ExtractedItem",
     "EMRRecord",
-    "EvaluationRecord"
+    "EvaluationRecord",
+    "ChineseTerm",
+    "ChineseSearchResult"
 ]

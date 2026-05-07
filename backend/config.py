@@ -43,11 +43,17 @@ class Settings(BaseSettings):
     UMLS_MAX_CONCURRENT: int = 5
 
     TERMINOLOGY_PARALLEL_ENABLED: bool = True
-    
-    TRANSLATION_ENABLED: bool = True
+
+    TRANSLATION_ENABLED: bool = False
     TRANSLATION_MODEL: str = "Helsinki-NLP/opus-mt-zh-en"
     TRANSLATION_DEVICE: str = "cpu"
-    
+
+    CHINESE_TERM_ENABLED: bool = True
+    SYMPTOM_NORM_PATH: str = "data/text/symptom_norm.csv"
+    ICD11_ZH_PATH: str = "data/text/SimpleTabulation-ICD-11-MMS-zh.txt"
+    CHINESE_TERM_FUZZY_THRESHOLD: float = 0.7
+    CHINESE_TERM_EXACT_MATCH_BONUS: float = 0.2
+
     class Config:
         env_file = ".env"
         case_sensitive = True

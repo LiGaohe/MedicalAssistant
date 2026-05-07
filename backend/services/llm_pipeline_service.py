@@ -201,7 +201,7 @@ class LLMPipelineService:
         logger.info(f"病历生成阶段完成，耗时: {time.time() - emr_start:.2f}秒")
         
         dialogue_text = "\n".join(f"[{t.speaker}]: {t.text}" for t in turns)
-        self._run_evaluation(dialogue_text, emr_result)
+        # self._run_evaluation(dialogue_text, emr_result)  # 暂时禁用评估，评估标准需要改进
         
         total_time = time.time() - start_time
         logger.info(f"=== 多阶段LLM处理完成: {visit_id}, 总耗时: {total_time:.2f}秒 ===")
@@ -941,38 +941,40 @@ class LLMPipelineService:
         return normalized_terms
     
     async def _normalize_terms_parallel(self, unique_terms: List[Dict[str, Any]], context: str) -> List[Any]:
-        """并行规范化术语"""
+        """并行规范化术语 - 优先使用中文术语搜索"""
         terms = [t.get("term", "") for t in unique_terms]
         contexts = {t.get("term", ""): t.get("context", context) for t in unique_terms}
         term_types = {t.get("term", ""): t.get("term_type", "unknown") for t in unique_terms}
         
-        translations = {}
-        if self.language == "zh" and self.terminology_service.translation_service:
-            trans_start = time.time()
-            translations = self.terminology_service.translation_service.batch_translate_zh_to_en(terms)
-            logger.info(f"批量翻译完成，耗时: {time.time() - trans_start:.2f}秒")
+        chinese_results = {}
+        if self.terminology_service.chinese_term_client:
+            chinese_start = time.time()
+            chinese_results = self.terminology_service.chinese_term_client.batch_search(terms)
+            matched_count = sum(1 for r in chinese_results.values() if r is not None)
+            logger.info(f"中文术语批量搜索完成: {matched_count}/{len(terms)} 匹配, 耗时: {time.time() - chinese_start:.2f}秒")
         
         umls_results = {}
         if self.terminology_service.async_umls_client:
-            search_start = time.time()
-            search_terms = [translations.get(term, term) for term in terms]
-            umls_results = await self.terminology_service.async_umls_client.batch_search(
-                search_terms,
-                language="ENG"
-            )
-            logger.info(f"并行UMLS检索完成，耗时: {time.time() - search_start:.2f}秒")
+            unmatched_terms = [t for t in terms if t not in chinese_results or chinese_results[t] is None]
+            if unmatched_terms:
+                search_start = time.time()
+                umls_results = await self.terminology_service.async_umls_client.batch_search(
+                    unmatched_terms,
+                    language="ENG"
+                )
+                logger.info(f"并行UMLS检索完成（{len(unmatched_terms)}个未匹配术语）, 耗时: {time.time() - search_start:.2f}秒")
         
         term_candidates = {}
         for term in terms:
-            search_term = translations.get(term, term)
-            result = umls_results.get(search_term)
-            if result and hasattr(result, 'candidates') and result.candidates:
-                term_candidates[term] = result.candidates[:5]
+            if term in umls_results:
+                result = umls_results.get(term)
+                if result and hasattr(result, 'candidates') and result.candidates:
+                    term_candidates[term] = result.candidates[:5]
         
         selections = {}
         if term_candidates and self.llm_service:
             select_start = time.time()
-            selections = self.terminology_service._batch_select_candidates(term_candidates, contexts, translations)
+            selections = self.terminology_service._batch_select_candidates(term_candidates, contexts, {})
             logger.info(f"批量LLM选择完成，耗时: {time.time() - select_start:.2f}秒")
         
         code_tasks = {}
@@ -1007,7 +1009,34 @@ class LLMPipelineService:
             candidates_data = None
             cui = None
             
-            if term in selections:
+            if term in chinese_results and chinese_results[term]:
+                chinese_result = chinese_results[term]
+                normalized = chinese_result.matched_term
+                confidence = chinese_result.confidence
+                code = chinese_result.code
+                code_system = chinese_result.code_system
+                source = "ChineseTerm"
+                
+                match_type_desc = "精确匹配" if chinese_result.match_type == "exact" else "同义词匹配" if chinese_result.match_type == "synonym" else "模糊匹配"
+                reasoning = f"中文术语库{match_type_desc}: {term} -> {normalized}"
+                if code:
+                    reasoning += f" ({code_system}: {code})"
+                
+                if chinese_result.candidates:
+                    candidates_data = [
+                        {
+                            "term": c.term,
+                            "code": c.code,
+                            "code_system": c.code_system,
+                            "term_type": c.term_type,
+                            "source": c.source
+                        }
+                        for c in chinese_result.candidates[:5]
+                    ]
+                
+                logger.info(f"ChineseTerm并行规范化: '{term}' -> '{normalized}' (confidence: {confidence:.2f})")
+            
+            elif term in selections:
                 best_candidate = selections[term]
                 code, code_system = code_results.get(term, (None, None))
                 
@@ -1023,8 +1052,7 @@ class LLMPipelineService:
                 ]
                 
                 confidence = min(0.95, 0.6 + best_candidate.score * 0.35)
-                trans_info = f"(翻译:{translations.get(term, term)})" if translations.get(term) else ""
-                reasoning = f"UMLS匹配: {term}{trans_info} -> {best_candidate.term} (CUI: {best_candidate.cui})"
+                reasoning = f"UMLS匹配: {term} -> {best_candidate.term} (CUI: {best_candidate.cui})"
                 source = "UMLS"
                 cui = best_candidate.cui
                 normalized = best_candidate.term
