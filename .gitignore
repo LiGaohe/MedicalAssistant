@@ -18,4 +18,5 @@
 .env
 /backend/api/__pycache__
 /backend/services/__pycache__
-backend/models/__pycache__
+/backend/models/__pycache__
+/data/database

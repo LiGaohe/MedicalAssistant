@@ -65,6 +65,12 @@ python -c "from backend.database import init_db; init_db()"
 ### 4. 启动服务
 
 ```bash
+# 首先进入虚拟环境
+# Windows:
+source med_env/Scripts/activate
+# Linux/Mac:
+source med_env/bin/activate
+
 # 启动FastAPI服务
 uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 ```
