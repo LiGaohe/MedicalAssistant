@@ -40,10 +40,10 @@
 ```bash
 # 克隆项目
 git clone <repository-url>
-cd MedicalAssisstant
+cd MedicalAssistant
 
 # 创建虚拟环境（推荐）
-python -m venv venv
+python -m venv med_venv
 
 # 激活虚拟环境
 # Windows:
