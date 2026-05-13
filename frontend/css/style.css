@@ -689,11 +689,6 @@ h3 {
     flex: 1;
 }
 
-.emr-section {
-    margin-top: 40px;
-    animation: fadeIn 0.4s ease-in;
-}
-
 .emr-toolbar {
     display: flex;
     justify-content: space-between;
@@ -761,13 +756,183 @@ h3 {
     background: var(--warning-light);
     padding: 24px;
     border-radius: var(--border-radius-md);
-    margin-bottom: 24px;
+    margin-bottom: 32px;
     border-left: 4px solid var(--warning-color);
 }
 
 .evidence-panel h3 {
     color: var(--warning-color);
-    margin-bottom: 16px;
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid var(--warning-color);
+}
+
+.evidence-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--bg-secondary);
+    border-radius: var(--border-radius-sm);
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.evidence-table thead {
+    background: var(--primary-color);
+    color: white;
+}
+
+.evidence-table thead th {
+    padding: 12px 16px;
+    text-align: left;
+    font-weight: 600;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.evidence-table tbody tr {
+    border-bottom: 1px solid var(--border-color);
+    transition: background-color var(--transition-fast);
+}
+
+.evidence-table tbody tr:last-child {
+    border-bottom: none;
+}
+
+.evidence-table tbody tr:hover {
+    background: var(--bg-primary);
+}
+
+.evidence-table tbody td {
+    padding: 14px 16px;
+    font-size: 14px;
+    line-height: 1.5;
+    vertical-align: top;
+}
+
+.evidence-value-cell,
+.evidence-content-cell,
+.evidence-turn-cell {
+    max-width: 200px;
+    word-wrap: break-word;
+}
+
+.emr-section {
+    margin-top: 40px;
+    animation: fadeIn 0.4s ease-in;
+}
+
+.emr-section .emr-toolbar {
+    margin-bottom: 24px;
+    padding: 16px 20px;
+    background: var(--bg-primary);
+    border-radius: var(--border-radius-md);
+}
+
+.emr-section #evidencePanel + .emr-content {
+    margin-top: 24px;
+    padding-top: 24px;
+    border-top: 2px solid var(--border-color);
+}
+
+.evidence-traces {
+    margin-top: 12px;
+    padding: 12px 16px;
+    background: var(--info-light);
+    border-radius: var(--border-radius-sm);
+    border-left: 3px solid var(--info-color);
+}
+
+.evidence-traces > strong {
+    display: block;
+    font-size: 13px;
+    color: var(--info-color);
+    margin-bottom: 10px;
+}
+
+.evidence-final-value {
+    padding: 8px 12px;
+    margin-bottom: 8px;
+    background: var(--bg-secondary);
+    border-radius: 6px;
+    font-size: 14px;
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+}
+
+.evidence-traces ul {
+    list-style: none;
+    padding: 0;
+    margin: 8px 0 0 0;
+}
+
+.evidence-traces .evidence-item {
+    padding: 12px;
+    margin-bottom: 8px;
+    background: var(--bg-secondary);
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    transition: all var(--transition-fast);
+}
+
+.evidence-traces .evidence-item:last-child {
+    margin-bottom: 0;
+}
+
+.evidence-traces .evidence-item:hover {
+    border-color: var(--info-color);
+    box-shadow: 0 2px 6px rgba(41, 182, 246, 0.15);
+}
+
+.evidence-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.evidence-speaker {
+    font-weight: 600;
+    color: var(--primary-color);
+    font-size: 13px;
+}
+
+.evidence-speaker.corrected {
+    color: var(--secondary-color);
+}
+
+.evidence-speaker-correction {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.evidence-turn {
+    font-size: 12px;
+    color: var(--text-muted);
+    background: var(--bg-primary);
+    padding: 2px 8px;
+    border-radius: 10px;
+}
+
+.evidence-detail {
+    font-size: 13px;
+}
+
+.evidence-label {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-weight: 500;
+    margin: 6px 0 3px 0;
+}
+
+.evidence-content,
+.evidence-turn-text {
+    color: var(--text-secondary);
+    line-height: 1.5;
+    padding: 4px 0;
 }
 
 .evaluation-summary {

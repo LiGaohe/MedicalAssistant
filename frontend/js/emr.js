@@ -419,7 +419,21 @@ document.addEventListener('DOMContentLoaded', async function() {
         }
     }
     
-    function printEMR() {
+    async function printEMR() {
+        let patientName = '';
+        let visitDate = '';
+        
+        try {
+            const response = await fetch(`/api/emr/visit/${visitId}`);
+            if (response.ok) {
+                const visitInfo = await response.json();
+                patientName = visitInfo.patient_name || '';
+                visitDate = visitInfo.visit_date || '';
+            }
+        } catch (error) {
+            console.error('获取就诊信息失败:', error);
+        }
+        
         const printWindow = window.open('', '_blank');
         const emrContent = document.getElementById('emrContent').cloneNode(true);
         
@@ -446,11 +460,21 @@ document.addEventListener('DOMContentLoaded', async function() {
                 .field-value { display: inline; }
                 .field-meta { display: none; }
                 .section-fields { margin-top: 10px; }
+                .patient-info { text-align: center; margin-bottom: 20px; font-size: 14px; }
+                .patient-info span { margin: 0 15px; }
                 @media print {
                     body { padding: 0; }
                 }
             </style>
         `;
+        
+        let headerInfo = '';
+        if (patientName || visitDate) {
+            const parts = [];
+            if (patientName) parts.push(`患者姓名: ${patientName}`);
+            if (visitDate) parts.push(`就诊日期: ${visitDate}`);
+            headerInfo = `<p class="patient-info">${parts.join(' | ')}</p>`;
+        }
         
         printWindow.document.write(`
             <!DOCTYPE html>
@@ -462,9 +486,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             </head>
             <body>
                 <h1>门诊病历</h1>
-                <p style="text-align: center; margin-bottom: 20px;">
-                    就诊记录: ${visitId} | 打印时间: ${new Date().toLocaleString('zh-CN')}
-                </p>
+                ${headerInfo}
                 ${emrContent.innerHTML}
             </body>
             </html>

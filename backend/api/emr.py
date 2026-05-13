@@ -136,6 +136,36 @@ async def process_visit(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/visit/{visit_id}")
+async def get_visit_info(
+    visit_id: str,
+    db: Session = Depends(get_db)
+):
+    logger.info(f"获取就诊信息: visit_id={visit_id}")
+    try:
+        visit = db.query(Visit).filter(Visit.visit_id == visit_id).first()
+        
+        if not visit:
+            logger.warning(f"就诊记录不存在: visit_id={visit_id}")
+            raise HTTPException(status_code=404, detail="Visit not found")
+        
+        logger.info(f"返回就诊信息: patient_name={visit.patient_name}")
+        return {
+            "visit_id": visit.visit_id,
+            "patient_name": visit.patient_name,
+            "visit_date": visit.visit_date,
+            "language": visit.language,
+            "status": visit.status,
+            "created_at": visit.created_at.isoformat() if visit.created_at else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取就诊信息失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/status/{visit_id}")
 async def get_processing_status(
     visit_id: str,
