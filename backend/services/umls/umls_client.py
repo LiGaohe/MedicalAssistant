@@ -156,13 +156,36 @@ class UMLSClient:
         
         return None
     
+    MEDICAL_SOURCES = [
+        "SNOMEDCT_US",
+        "ICD10CM",
+        "ICD10PCS",
+        "ICD11",
+        "MTH",
+        "MSH",
+        "RXNORM",
+        "LNC",
+        "HPO",
+        "MEDCIN",
+        "MEDLINEPLUS",
+    ]
+    
+    EXCLUDED_SOURCES = [
+        "PHENX",
+        "LCH",
+        "CHV",
+        "MTHMST",
+        "MTHSPL",
+    ]
+    
     def search_term(
         self,
         term: str,
         language: str = "CHI",
         sabs: Optional[List[str]] = None,
         search_type: str = "words",
-        page_size: int = 20
+        page_size: int = 20,
+        medical_only: bool = True
     ) -> UMLSSearchResult:
         logger.info(f"Searching UMLS for term: '{term}' (language: {language})")
         
@@ -171,6 +194,9 @@ class UMLSClient:
             if cached:
                 logger.debug(f"Cache hit for term: '{term}'")
                 return cached
+        
+        if medical_only and sabs is None:
+            sabs = self.MEDICAL_SOURCES
         
         params = {
             "string": term,
@@ -196,8 +222,18 @@ class UMLSClient:
             results = result.get("result", {}).get("results", [])
             
             for item in results:
+                name = item.get("name", "")
+                
+                if len(name) > 100:
+                    logger.debug(f"Skipping long name candidate: '{name[:50]}...'")
+                    continue
+                
+                if any(pattern in name for pattern in [":Find:", ":Pt:", "^Patient:", "PhenX"]):
+                    logger.debug(f"Skipping questionnaire-style candidate: '{name[:50]}...'")
+                    continue
+                
                 candidate = UMLSCandidate(
-                    term=item.get("name", ""),
+                    term=name,
                     cui=item.get("ui", ""),
                     semantic_types=item.get("rootSource", "").split(",") if item.get("rootSource") else [],
                     preferred=item.get("preferred", "false").lower() == "true",

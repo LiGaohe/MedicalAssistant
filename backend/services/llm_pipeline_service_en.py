@@ -1081,6 +1081,12 @@ Notes:
         for term_result in terms_for_result:
             original = term_result["original"]
             normalized = term_result["normalized"]
+            if isinstance(normalized, dict):
+                logger.warning(f"术语规范化结果为dict类型: original='{original}', normalized={normalized}, 跳过替换")
+                continue
+            if not isinstance(normalized, str):
+                normalized = str(normalized)
+                term_result["normalized"] = normalized
             if original and normalized != original:
                 normalized_text = normalized_text.replace(original, normalized)
         

@@ -16,7 +16,9 @@
 /tests/__pycache__
 .env
 .env
+*__pycache__
 /backend/api/__pycache__
 /backend/services/__pycache__
 /backend/models/__pycache__
 /data/database
+/backend/services/evaluation/__pycache__

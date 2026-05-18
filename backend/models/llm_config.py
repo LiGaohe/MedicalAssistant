@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text
 from datetime import datetime
 
 from ..database import Base
@@ -16,6 +16,9 @@ class LLMConfig(Base):
     is_active = Column(Boolean, default=True)
     max_tokens = Column(Integer, default=2048)
     temperature = Column(String(10), default="0.7")
+    json_mode = Column(Boolean, default=False)
+    thinking_enabled = Column(Boolean, default=False)
+    thinking_effort = Column(String(10), default="high")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
@@ -27,5 +30,8 @@ class LLMConfig(Base):
             "model_name": self.model_name,
             "is_active": self.is_active,
             "max_tokens": self.max_tokens,
-            "temperature": self.temperature
+            "temperature": self.temperature,
+            "json_mode": self.json_mode,
+            "thinking_enabled": self.thinking_enabled,
+            "thinking_effort": self.thinking_effort
         }

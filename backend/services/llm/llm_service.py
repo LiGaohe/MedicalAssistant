@@ -5,6 +5,7 @@ from .openai_compatible_adapter import OpenAICompatibleAdapter
 from .prompts import PromptManager
 from ...models.llm_config import LLMConfig
 import json
+from ...utils.logger import logger
 
 
 class LLMService:
@@ -30,7 +31,10 @@ class LLMService:
             "api_key": config.api_key,
             "max_tokens": config.max_tokens,
             "temperature": float(config.temperature),
-            "provider_name": config.provider
+            "provider_name": config.provider,
+            "json_mode": config.json_mode,
+            "thinking_enabled": config.thinking_enabled,
+            "thinking_effort": config.thinking_effort
         }
         
         return OpenAICompatibleAdapter(config_dict)
@@ -40,7 +44,10 @@ class LLMService:
         prompt: str, 
         config_name: Optional[str] = None,
         max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None
+        temperature: Optional[float] = None,
+        json_mode: Optional[bool] = None,
+        thinking_enabled: Optional[bool] = None,
+        thinking_effort: Optional[str] = None
     ) -> LLMResponse:
         if not self.adapters:
             raise RuntimeError("No active LLM adapters available")
@@ -58,12 +65,22 @@ class LLMService:
         request = LLMRequest(
             prompt=prompt,
             max_tokens=max_tokens or config.max_tokens,
-            temperature=temperature or float(config.temperature)
+            temperature=temperature or float(config.temperature),
+            json_mode=json_mode if json_mode is not None else config.json_mode,
+            thinking_enabled=thinking_enabled if thinking_enabled is not None else config.thinking_enabled,
+            thinking_effort=thinking_effort or config.thinking_effort
         )
         
         response = adapter.generate(request)
         
+        logger.debug(f"LLM响应 - 模型: {response.model}, 提供商: {response.provider}")
+        logger.debug(f"LLM响应 - finish_reason: {response.finish_reason}")
+        logger.debug(f"LLM响应 - usage: {response.usage}")
+        logger.info(f"LLM响应 - 返回文本长度: {len(response.text)} 字符")
+        logger.debug(f"LLM响应 - 返回文本内容:\n{response.text}")
+        
         if not adapter.validate_response(response):
+            logger.error(f"LLM响应验证失败")
             raise RuntimeError("Invalid LLM response")
             
         return response
@@ -82,7 +99,7 @@ class LLMService:
         prompt: str,
         config_name: Optional[str] = None
     ) -> Dict[str, Any]:
-        response = self.generate(prompt, config_name)
+        response = self.generate(prompt, config_name, json_mode=True)
         
         try:
             json_start = response.text.find("{")
@@ -91,8 +108,12 @@ class LLMService:
                 json_str = response.text[json_start:json_end]
                 return json.loads(json_str)
             else:
+                logger.error(f"LLM响应中未找到JSON对象")
+                logger.error(f"原始响应内容:\n{response.text}")
                 raise ValueError("No JSON found in response")
         except json.JSONDecodeError as e:
+            logger.error(f"JSON解析失败: {e}")
+            logger.error(f"原始响应内容:\n{response.text}")
             raise ValueError(f"Failed to parse JSON response: {e}")
             
     def get_available_models(self) -> List[Dict[str, Any]]:

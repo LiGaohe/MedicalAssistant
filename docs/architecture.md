@@ -67,7 +67,7 @@ MedicalAssisstant/
 │   │   ├── task.py            # 任务模型
 │   │   ├── transcript.py      # 转写记录模型（含ASRCorrection）
 │   │   ├── visit.py           # 就诊记录模型
-│   │   ├── llm_config.py      # LLM配置模型
+│   │   ├── llm_config.py      # LLM配置模型（含JSON模式、思考模式）
 │   │   ├── evidence.py        # 证据片段模型
 │   │   ├── term.py            # 规范化术语模型（含UMLS编码）
 │   │   ├── extracted_item.py  # 抽取要素模型
@@ -81,7 +81,7 @@ MedicalAssisstant/
 │   │   ├── llm/               # LLM服务模块
 │   │   │   ├── __init__.py
 │   │   │   ├── base.py        # LLM基类
-│   │   │   ├── openai_compatible_adapter.py # OpenAI兼容接口
+│   │   │   ├── openai_compatible_adapter.py # OpenAI兼容接口（支持JSON模式、思考模式）
 │   │   │   ├── prompts.py     # Prompt模板管理（中英文）
 │   │   │   └── llm_service.py # LLM服务封装
 │   │   ├── umls/              # UMLS医学术语库模块
@@ -1031,7 +1031,26 @@ graph TB
 | NormalizedTerm | normalized_terms | 规范化术语 | backend/models/term.py |
 | ExtractedItem | extracted_items | 抽取的病历要素 | backend/models/extracted_item.py |
 | EMRRecord | emr_records | 病历记录 | backend/models/emr_record.py |
-| LLMConfig | llm_configs | LLM配置 | backend/models/llm_config.py |
+| LLMConfig | llm_configs | LLM配置（含JSON模式、思考模式） | backend/models/llm_config.py |
+
+#### LLMConfig 字段说明
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | Integer | 主键，自增 |
+| config_name | String(100) | 配置名称，唯一 |
+| provider | String(50) | 服务商（openai_compatible/openai/anthropic/sense-deepseek/custom） |
+| model_name | String(100) | 模型名称 |
+| api_key | String(200) | API密钥 |
+| api_endpoint | String(200) | API端点 |
+| is_active | Boolean | 是否启用 |
+| max_tokens | Integer | 最大Token数，默认2048 |
+| temperature | String(10) | 温度参数，默认"0.7" |
+| json_mode | Boolean | JSON输出模式，默认False |
+| thinking_enabled | Boolean | 思考模式开关，默认False |
+| thinking_effort | String(10) | 思考强度（high/low），默认"high" |
+| created_at | DateTime | 创建时间 |
+| updated_at | DateTime | 更新时间 |
 
 #### TranscriptTurn 字段说明
 
@@ -1065,7 +1084,7 @@ graph TB
 | MedicalRecordPipeline | 整合服务，串联所有处理步骤，支持并行处理 | backend/services/medical_record_pipeline.py |
 | LLMPipelineService | 多阶段LLM处理，支持调试模式和并行优化 | backend/services/llm_pipeline_service.py |
 | LLMPipelineServiceEnglish | 英文多阶段LLM处理，跳过翻译步骤优化 | backend/services/llm_pipeline_service_en.py |
-| LLMService | LLM服务，支持多适配器和模板渲染 | backend/services/llm/llm_service.py |
+| LLMService | LLM服务，支持多适配器、模板渲染、JSON模式和思考模式 | backend/services/llm/llm_service.py |
 
 ### 配置项
 

@@ -15,6 +15,9 @@ class GenerateRequest(BaseModel):
     config_name: Optional[str] = None
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
+    json_mode: Optional[bool] = None
+    thinking_enabled: Optional[bool] = None
+    thinking_effort: Optional[str] = None
 
 
 class GenerateWithTemplateRequest(BaseModel):
@@ -32,10 +35,23 @@ class ConfigCreate(BaseModel):
     max_tokens: int = 2048
     temperature: str = "0.7"
     is_active: bool = True
+    json_mode: bool = False
+    thinking_enabled: bool = False
+    thinking_effort: str = "high"
 
 
 class ConfigUpdate(BaseModel):
+    config_name: Optional[str] = None
+    provider: Optional[str] = None
+    model_name: Optional[str] = None
+    api_key: Optional[str] = None
+    api_endpoint: Optional[str] = None
+    max_tokens: Optional[int] = None
+    temperature: Optional[str] = None
     is_active: Optional[bool] = None
+    json_mode: Optional[bool] = None
+    thinking_enabled: Optional[bool] = None
+    thinking_effort: Optional[str] = None
 
 
 @router.post("/generate")
@@ -49,14 +65,20 @@ async def generate_text(
             prompt=request.prompt,
             config_name=request.config_name,
             max_tokens=request.max_tokens,
-            temperature=request.temperature
+            temperature=request.temperature,
+            json_mode=request.json_mode,
+            thinking_enabled=request.thinking_enabled,
+            thinking_effort=request.thinking_effort
         )
-        return {
+        result = {
             "text": response.text,
             "model": response.model,
             "provider": response.provider,
             "usage": response.usage
         }
+        if response.thinking_content:
+            result["thinking_content"] = response.thinking_content
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -112,6 +134,9 @@ async def create_config(
         existing.max_tokens = config.max_tokens
         existing.temperature = config.temperature
         existing.is_active = config.is_active
+        existing.json_mode = config.json_mode
+        existing.thinking_enabled = config.thinking_enabled
+        existing.thinking_effort = config.thinking_effort
         db.commit()
         db.refresh(existing)
         return {"success": True, "config_id": existing.id, "message": "配置更新成功"}
@@ -124,7 +149,10 @@ async def create_config(
         api_endpoint=config.api_endpoint,
         max_tokens=config.max_tokens,
         temperature=config.temperature,
-        is_active=config.is_active
+        is_active=config.is_active,
+        json_mode=config.json_mode,
+        thinking_enabled=config.thinking_enabled,
+        thinking_effort=config.thinking_effort
     )
     
     db.add(new_config)
@@ -145,8 +173,35 @@ async def update_config(
     if not existing:
         raise HTTPException(status_code=404, detail="Config not found")
     
+    if config.config_name is not None:
+        name_conflict = db.query(LLMConfig).filter(
+            LLMConfig.config_name == config.config_name,
+            LLMConfig.id != config_id
+        ).first()
+        if name_conflict:
+            raise HTTPException(status_code=400, detail="配置名称已存在")
+        existing.config_name = config.config_name
+    
+    if config.provider is not None:
+        existing.provider = config.provider
+    if config.model_name is not None:
+        existing.model_name = config.model_name
+    if config.api_key is not None and config.api_key != "":
+        existing.api_key = config.api_key
+    if config.api_endpoint is not None:
+        existing.api_endpoint = config.api_endpoint
+    if config.max_tokens is not None:
+        existing.max_tokens = config.max_tokens
+    if config.temperature is not None:
+        existing.temperature = config.temperature
     if config.is_active is not None:
         existing.is_active = config.is_active
+    if config.json_mode is not None:
+        existing.json_mode = config.json_mode
+    if config.thinking_enabled is not None:
+        existing.thinking_enabled = config.thinking_enabled
+    if config.thinking_effort is not None:
+        existing.thinking_effort = config.thinking_effort
     
     db.commit()
     db.refresh(existing)

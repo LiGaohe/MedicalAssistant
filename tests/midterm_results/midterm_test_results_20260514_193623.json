@@ -1,0 +1,1168 @@
+{
+  "asr_correction": {
+    "test": "asr_correction",
+    "summary": {
+      "total": 10,
+      "correct": 9,
+      "accuracy": 0.9,
+      "by_type": {
+        "日常用语": {
+          "total": 1,
+          "correct": 0
+        },
+        "医学术语": {
+          "total": 1,
+          "correct": 1
+        },
+        "药物名": {
+          "total": 3,
+          "correct": 3
+        },
+        "同音字": {
+          "total": 2,
+          "correct": 2
+        },
+        "拼音相似": {
+          "total": 2,
+          "correct": 2
+        },
+        "病名": {
+          "total": 1,
+          "correct": 1
+        }
+      }
+    },
+    "details": [
+      {
+        "original": "闲的食物",
+        "expected": "咸的食物",
+        "type": "日常用语",
+        "corrected_text": "患者有闲的食物的症状",
+        "corrections": [],
+        "success": false
+      },
+      {
+        "original": "搞血压",
+        "expected": "高血压",
+        "type": "医学术语",
+        "corrected_text": "患者有高血压的症状",
+        "corrections": [
+          {
+            "original": "搞血压",
+            "corrected": "高血压",
+            "type": "medical_term",
+            "confidence": 0.9
+          }
+        ],
+        "success": true
+      },
+      {
+        "original": "阿莫希林",
+        "expected": "阿莫西林",
+        "type": "药物名",
+        "corrected_text": "患者有阿莫西林的症状",
+        "corrections": [
+          {
+            "original": "阿莫希林",
+            "corrected": "阿莫西林",
+            "type": "medical_term",
+            "confidence": 0.9
+          }
+        ],
+        "success": true
+      },
+      {
+        "original": "刻嗽",
+        "expected": "咳嗽",
+        "type": "同音字",
+        "corrected_text": "患者有咳嗽的症状",
+        "corrections": [
+          {
+            "original": "刻嗽",
+            "corrected": "咳嗽",
+            "type": "pinyin_similar",
+            "confidence": 0.8
+          }
+        ],
+        "success": true
+      },
+      {
+        "original": "发骚",
+        "expected": "发烧",
+        "type": "同音字",
+        "corrected_text": "患者有发烧的症状",
+        "corrections": [
+          {
+            "original": "发骚",
+            "corrected": "发烧",
+            "type": "pinyin_similar",
+            "confidence": 0.8
+          }
+        ],
+        "success": true
+      },
+      {
+        "original": "头疼",
+        "expected": "头痛",
+        "type": "拼音相似",
+        "corrected_text": "患者有头痛的症状",
+        "corrections": [
+          {
+            "original": "头疼",
+            "corrected": "头痛",
+            "type": "pinyin_similar",
+            "confidence": 0.8
+          }
+        ],
+        "success": true
+      },
+      {
+        "original": "夫泻",
+        "expected": "腹泻",
+        "type": "拼音相似",
+        "corrected_text": "患者有腹泻的症状",
+        "corrections": [
+          {
+            "original": "夫泻",
+            "corrected": "腹泻",
+            "type": "pinyin_similar",
+            "confidence": 0.8
+          }
+        ],
+        "success": true
+      },
+      {
+        "original": "青梅素",
+        "expected": "青霉素",
+        "type": "药物名",
+        "corrected_text": "患者有青霉素的症状",
+        "corrections": [
+          {
+            "original": "青梅素",
+            "corrected": "青霉素",
+            "type": "medical_term",
+            "confidence": 0.9
+          }
+        ],
+        "success": true
+      },
+      {
+        "original": "头包",
+        "expected": "头孢",
+        "type": "药物名",
+        "corrected_text": "患者有头孢的症状",
+        "corrections": [
+          {
+            "original": "头包",
+            "corrected": "头孢",
+            "type": "medical_term",
+            "confidence": 0.9
+          }
+        ],
+        "success": true
+      },
+      {
+        "original": "观心病",
+        "expected": "冠心病",
+        "type": "病名",
+        "corrected_text": "患者有冠心病的症状",
+        "corrections": [
+          {
+            "original": "观心病",
+            "corrected": "冠心病",
+            "type": "medical_term",
+            "confidence": 0.9
+          }
+        ],
+        "success": true
+      }
+    ]
+  },
+  "existing_emr_quality": {
+    "test": "existing_emr_quality",
+    "field_stats": {
+      "chief_complaint": {
+        "filled": 11,
+        "total": 12
+      },
+      "history_present_illness": {
+        "filled": 12,
+        "total": 12
+      },
+      "past_history": {
+        "filled": 3,
+        "total": 12
+      },
+      "physical_examination": {
+        "filled": 12,
+        "total": 12
+      },
+      "auxiliary_examination": {
+        "filled": 5,
+        "total": 12
+      },
+      "diagnosis": {
+        "filled": 10,
+        "total": 12
+      },
+      "treatment": {
+        "filled": 12,
+        "total": 12
+      },
+      "advice": {
+        "filled": 12,
+        "total": 12
+      }
+    },
+    "term_stats": {
+      "total_terms": 156,
+      "umls_sourced": 0,
+      "llm_sourced": 0,
+      "with_cui": 116
+    },
+    "evidence_stats": {
+      "total_evidence": 138,
+      "avg_score": 0.5
+    }
+  },
+  "speaker_role_evolution": {
+    "test": "speaker_role_evolution",
+    "rule_accuracy": 0.7,
+    "rule_details": [
+      {
+        "text": "请问哪里不舒服？",
+        "expected": "doctor",
+        "predicted": "doctor",
+        "doc_score": 2,
+        "pat_score": 0,
+        "correct": true
+      },
+      {
+        "text": "我这几天一直头疼",
+        "expected": "patient",
+        "predicted": "patient",
+        "doc_score": 0,
+        "pat_score": 1,
+        "correct": true
+      },
+      {
+        "text": "头疼持续多长时间了？",
+        "expected": "doctor",
+        "predicted": "doctor",
+        "doc_score": 1,
+        "pat_score": 0,
+        "correct": true
+      },
+      {
+        "text": "大概三天了",
+        "expected": "patient",
+        "predicted": "patient",
+        "doc_score": 0,
+        "pat_score": 1,
+        "correct": true
+      },
+      {
+        "text": "我给您量一下血压",
+        "expected": "doctor",
+        "predicted": "unknown",
+        "doc_score": 0,
+        "pat_score": 0,
+        "correct": false
+      },
+      {
+        "text": "血压高会引起头疼吗？",
+        "expected": "patient",
+        "predicted": "doctor",
+        "doc_score": 2,
+        "pat_score": 0,
+        "correct": false
+      },
+      {
+        "text": "考虑是高血压引起的头疼",
+        "expected": "doctor",
+        "predicted": "unknown",
+        "doc_score": 0,
+        "pat_score": 0,
+        "correct": false
+      },
+      {
+        "text": "好的，谢谢医生",
+        "expected": "patient",
+        "predicted": "patient",
+        "doc_score": 0,
+        "pat_score": 1,
+        "correct": true
+      },
+      {
+        "text": "注意低盐饮食，一周后复查",
+        "expected": "doctor",
+        "predicted": "doctor",
+        "doc_score": 1,
+        "pat_score": 0,
+        "correct": true
+      },
+      {
+        "text": "我有时候会恶心",
+        "expected": "patient",
+        "predicted": "patient",
+        "doc_score": 0,
+        "pat_score": 2,
+        "correct": true
+      }
+    ]
+  },
+  "terminology_normalization": {
+    "test": "terminology_normalization",
+    "summary": {
+      "total_tested": 20,
+      "umls_hit": 0,
+      "llm_fallback": 0,
+      "no_match": 20,
+      "umls_rate": 0.0,
+      "llm_fallback_rate": 0.0,
+      "match_count": 0,
+      "match_rate": 0.0
+    },
+    "details": [
+      {
+        "colloquial": "拉肚子",
+        "expected_standards": [
+          "腹泻"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      },
+      {
+        "colloquial": "肚子疼",
+        "expected_standards": [
+          "腹痛",
+          "腹泻"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      },
+      {
+        "colloquial": "肚子痛",
+        "expected_standards": [
+          "腹痛"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      },
+      {
+        "colloquial": "头疼",
+        "expected_standards": [
+          "头痛"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      },
+      {
+        "colloquial": "头痛",
+        "expected_standards": [
+          "头痛"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      },
+      {
+        "colloquial": "发高烧",
+        "expected_standards": [
+          "发热",
+          "高热"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      },
+      {
+        "colloquial": "发低烧",
+        "expected_standards": [
+          "发热",
+          "低热"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      },
+      {
+        "colloquial": "流鼻涕",
+        "expected_standards": [
+          "鼻流涕",
+          "感冒"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      },
+      {
+        "colloquial": "鼻涕",
+        "expected_standards": [
+          "鼻流涕"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      },
+      {
+        "colloquial": "咳嗽不止",
+        "expected_standards": [
+          "咳嗽"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      },
+      {
+        "colloquial": "干咳",
+        "expected_standards": [
+          "干咳",
+          "咳嗽"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      },
+      {
+        "colloquial": "咳痰",
+        "expected_standards": [
+          "咳痰",
+          "咳嗽"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      },
+      {
+        "colloquial": "嗓子疼",
+        "expected_standards": [
+          "咽喉炎",
+          "咽喉不适"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      },
+      {
+        "colloquial": "嗓子沙哑",
+        "expected_standards": [
+          "嗓子沙哑",
+          "声音嘶哑"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      },
+      {
+        "colloquial": "声音哑",
+        "expected_standards": [
+          "声音嘶哑"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      },
+      {
+        "colloquial": "喘气",
+        "expected_standards": [
+          "喘息",
+          "气喘"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      },
+      {
+        "colloquial": "气短",
+        "expected_standards": [
+          "呼吸困难"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      },
+      {
+        "colloquial": "喘不上气",
+        "expected_standards": [
+          "呼吸困难",
+          "气喘"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      },
+      {
+        "colloquial": "吐",
+        "expected_standards": [
+          "呕吐"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      },
+      {
+        "colloquial": "恶心想吐",
+        "expected_standards": [
+          "恶心",
+          "呕吐"
+        ],
+        "normalized": null,
+        "source": "error",
+        "error": "'NormalizedTerm' object has no attribute 'get'",
+        "is_match": false
+      }
+    ]
+  },
+  "e2e_vs_multistage": {
+    "test": "e2e_vs_multistage",
+    "comparison": {
+      "e2e_time": 3.2042813301086426,
+      "multi_time": 0.3924109935760498,
+      "e2e_result": {
+        "subjective": {
+          "chief_complaint": "头痛3天，晨起明显",
+          "history_present_illness": "患者3天前出现头痛，晨起时明显，伴恶心，无呕吐。",
+          "past_history": "未提及"
+        },
+        "objective": {
+          "physical_examination": "血压145/95mmHg",
+          "auxiliary_examination": "无"
+        },
+        "assessment": {
+          "diagnosis": "高血压病（血压偏高，考虑高血压性头痛）"
+        },
+        "plan": {
+          "treatment": "口服降压药，每日一次，晨起服用",
+          "advice": "低盐饮食，注意休息，一周后复查，如头痛加重及时就诊"
+        }
+      },
+      "multi_result": {
+        "error": "'LLMPipelineService' object has no attribute 'process_text'"
+      },
+      "ground_truth": {
+        "chief_complaint": "头疼3天",
+        "history_present_illness": "头疼3天，晨起加重，伴恶心，无呕吐",
+        "physical_examination": "血压145/95mmHg",
+        "diagnosis": "高血压",
+        "treatment": "降压药，每日一次",
+        "advice": "低盐饮食，注意休息，一周后复查"
+      },
+      "e2e_field_status": {
+        "chief_complaint": "partial",
+        "history_present_illness": "partial",
+        "physical_examination": "match",
+        "diagnosis": "match",
+        "treatment": "match",
+        "advice": "match"
+      },
+      "multi_field_status": {
+        "chief_complaint": "missing",
+        "history_present_illness": "missing",
+        "physical_examination": "missing",
+        "diagnosis": "missing",
+        "treatment": "missing",
+        "advice": "missing"
+      }
+    }
+  },
+  "evaluation_pipeline": {
+    "test": "evaluation_pipeline",
+    "results": [
+      {
+        "record_id": 1,
+        "visit_id": "1df5213e-a7a5-4920-bfed-c3e83be108b4",
+        "result": {
+          "record_id": 1,
+          "visit_id": "1df5213e-a7a5-4920-bfed-c3e83be108b4",
+          "consistency": {
+            "facts": [
+              {
+                "fact": "主诉为头痛",
+                "section": "subjective",
+                "is_supported": true,
+                "evidence_text": "我这几天一直头疼",
+                "reasoning": "患者明确表述头疼症状"
+              },
+              {
+                "fact": "血压高引起头痛",
+                "section": "subjective",
+                "is_supported": true,
+                "evidence_text": "血压高确实会引起头疼",
+                "reasoning": "医生确认血压高与头痛的因果关系"
+              },
+              {
+                "fact": "体格检查血压145/95mmHg",
+                "section": "objective",
+                "is_supported": true,
+                "evidence_text": "一百四十五九十五",
+                "reasoning": "医生测量并报告血压值"
+              },
+              {
+                "fact": "诊断高血压",
+                "section": "assessment",
+                "is_supported": true,
+                "evidence_text": "血压高",
+                "reasoning": "医生根据血压值和症状诊断为血压高，并开具降压药"
+              },
+              {
+                "fact": "给予降压药物治疗",
+                "section": "plan",
+                "is_supported": true,
+                "evidence_text": "我给你开一些降压药",
+                "reasoning": "医生明确表示开降压药"
+              },
+              {
+                "fact": "每日晨起口服降压药1片",
+                "section": "plan",
+                "is_supported": true,
+                "evidence_text": "每天早上吃一片",
+                "reasoning": "医生明确医嘱用药方法"
+              },
+              {
+                "fact": "注意休息",
+                "section": "plan",
+                "is_supported": true,
+                "evidence_text": "注意休息",
+                "reasoning": "医生明确建议"
+              },
+              {
+                "fact": "减少高盐饮食摄入",
+                "section": "plan",
+                "is_supported": true,
+                "evidence_text": "少吃咸的食物",
+                "reasoning": "医生明确建议"
+              },
+              {
+                "fact": "一周后复诊",
+                "section": "plan",
+                "is_supported": true,
+                "evidence_text": "一周后再来复查",
+                "reasoning": "医生明确建议"
+              }
+            ],
+            "summary": {
+              "total_facts": 9,
+              "supported_count": 9,
+              "unsupported_count": 0,
+              "support_rate": 1.0
+            },
+            "internal_conflicts": [],
+            "consistency_score": 1.0
+          },
+          "completeness": {
+            "coverage": [
+              {
+                "fact": "头疼持续3天，早上起床时加重",
+                "importance": "high",
+                "coverage_status": "partial",
+                "emr_text": "患者因血压高引起头痛就诊",
+                "reasoning": "病历中仅提及头痛，但未描述持续时间（3天）和加重时间（早上起床时），因此部分覆盖。"
+              },
+              {
+                "fact": "有时伴有恶心",
+                "importance": "medium",
+                "coverage_status": "none",
+                "emr_text": "",
+                "reasoning": "病历中未提及恶心症状。"
+              },
+              {
+                "fact": "否认呕吐",
+                "importance": "medium",
+                "coverage_status": "none",
+                "emr_text": "",
+                "reasoning": "病历中未提及呕吐或否认呕吐。"
+              },
+              {
+                "fact": "血压145/95 mmHg",
+                "importance": "high",
+                "coverage_status": "full",
+                "emr_text": "血压145/95mmHg",
+                "reasoning": "客观资料中明确记录血压值，完全覆盖。"
+              },
+              {
+                "fact": "高血压引起头疼",
+                "importance": "high",
+                "coverage_status": "full",
+                "emr_text": "患者因血压高引起头痛就诊",
+                "reasoning": "主观资料直接陈述因果关系，完全覆盖。"
+              },
+              {
+                "fact": "开具降压药，每天早上吃一片",
+                "importance": "high",
+                "coverage_status": "full",
+                "emr_text": "每日晨起口服降压药1片",
+                "reasoning": "计划中明确给出用药方案，完全覆盖。"
+              },
+              {
+                "fact": "注意休息，少吃咸的食物",
+                "importance": "low",
+                "coverage_status": "full",
+                "emr_text": "注意休息；减少高盐饮食摄入",
+                "reasoning": "计划中包含了休息和减少高盐饮食，与“少吃咸的食物”一致，完全覆盖。"
+              },
+              {
+                "fact": "一周后复查",
+                "importance": "low",
+                "coverage_status": "full",
+                "emr_text": "一周后复诊",
+                "reasoning": "计划中明确要求一周后复诊，完全覆盖。"
+              }
+            ],
+            "summary": {
+              "total_facts": 8,
+              "full_coverage_count": 5,
+              "partial_coverage_count": 1,
+              "none_coverage_count": 2,
+              "recall_rate": 0.6875,
+              "weighted_recall": 0.7069
+            }
+          },
+          "quality": {
+            "scores": {
+              "structure_completeness": {
+                "score": 2,
+                "reasoning": "SOAP四部分齐全，主观资料、客观资料、评估、计划均正确落在对应章节，无缺失或错放。"
+              },
+              "organization_clarity": {
+                "score": 2,
+                "reasoning": "顺序合理，从主诉到体格检查、诊断、治疗计划，逻辑清晰，易于阅读。"
+              },
+              "conciseness": {
+                "score": 2,
+                "reasoning": "无重复或冗余内容，表达精炼，每个部分信息量适当。"
+              },
+              "readability": {
+                "score": 2,
+                "reasoning": "句子通顺，代词指代清楚，无歧义，计划中的医嘱明确易懂。"
+              },
+              "terminology_appropriateness": {
+                "score": 1,
+                "reasoning": "大部分术语规范，但主观资料中“血压高”为口语化表达，客观资料中“血压偏高”亦不够严谨，且未明确降压药具体名称，建议使用标准医学术语。"
+              }
+            },
+            "total_score": 9,
+            "overall_assessment": "病历结构完整、逻辑清晰、表达简洁，但部分术语口语化，需进一步规范。"
+          },
+          "safety": {
+            "risks": [
+              {
+                "risk_type": "major_omission",
+                "severity": "high",
+                "description": "遗漏了患者明确提及的关键阳性症状：头痛持续3天、晨起加重、伴有恶心。",
+                "emr_location": "主观资料(S)",
+                "emr_content": "患者因血压高引起头痛就诊。",
+                "correct_content": "患者头痛3天，晨起时明显，伴恶心，无呕吐。",
+                "evidence_text": "对话中患者说'我这几天一直头疼，特别是早上起来的时候'，'大概三天了'，'有时候会恶心，但没有呕吐'。"
+              }
+            ],
+            "has_high_risk": true,
+            "high_risk_count": 1,
+            "total_risk_count": 1,
+            "safety_assessment": "病历遗漏了头痛的持续时间、晨起加重及恶心症状，可能影响对病情的全面评估，存在高风险。"
+          },
+          "overall_score": 0.5862499999999999,
+          "evaluation_id": 1
+        }
+      },
+      {
+        "record_id": 2,
+        "visit_id": "66b589fe-d981-423f-8f13-bebed8432a58",
+        "result": {
+          "record_id": 2,
+          "visit_id": "66b589fe-d981-423f-8f13-bebed8432a58",
+          "consistency": {
+            "facts": [
+              {
+                "fact": "主诉有头痛",
+                "section": "subjective",
+                "is_supported": true,
+                "evidence_text": "患者说“我这几天一直头疼”",
+                "reasoning": "对话中患者明确表述头疼，与病历主诉一致。"
+              },
+              {
+                "fact": "主诉有恶心",
+                "section": "subjective",
+                "is_supported": true,
+                "evidence_text": "患者说“有时候会恶心”",
+                "reasoning": "对话中患者承认有恶心症状，病历主诉包含恶心。"
+              },
+              {
+                "fact": "头痛持续三天",
+                "section": "subjective",
+                "is_supported": true,
+                "evidence_text": "患者说“大概三天了”",
+                "reasoning": "对话中患者明确头痛持续三天，与现病史一致。"
+              },
+              {
+                "fact": "伴随恶心但无呕吐",
+                "section": "subjective",
+                "is_supported": true,
+                "evidence_text": "患者说“有时候会恶心，但没有呕吐”",
+                "reasoning": "对话中患者明确恶心但无呕吐，与病历描述一致。"
+              },
+              {
+                "fact": "血压145/95 mmHg",
+                "section": "objective",
+                "is_supported": true,
+                "evidence_text": "医生说“一百四十五九十五”",
+                "reasoning": "对话中医生测量并报告血压值为145/95 mmHg，与病历一致。"
+              },
+              {
+                "fact": "诊断为高血压病",
+                "section": "assessment",
+                "is_supported": true,
+                "evidence_text": "医生说“血压高确实会引起头疼”并开降压药",
+                "reasoning": "对话中医生明确血压高并给予降压治疗，隐含高血压诊断，与病历诊断一致。"
+              },
+              {
+                "fact": "服用降压药每日一片",
+                "section": "plan",
+                "is_supported": true,
+                "evidence_text": "医生说“我给你开一些降压药，每天早上吃一片”",
+                "reasoning": "对话中医生明确开具降压药并指定每日一片，与治疗方案一致。"
+              },
+              {
+                "fact": "注意休息",
+                "section": "plan",
+                "is_supported": true,
+                "evidence_text": "医生说“注意休息”",
+                "reasoning": "对话中医生直接建议注意休息，与医嘱一致。"
+              },
+              {
+                "fact": "少吃咸的食物",
+                "section": "plan",
+                "is_supported": true,
+                "evidence_text": "医生说“少吃闲的食物”（咸的食物）",
+                "reasoning": "对话中医生建议少吃咸的食物，与医嘱一致。"
+              },
+              {
+                "fact": "一周后复诊",
+                "section": "plan",
+                "is_supported": true,
+                "evidence_text": "医生说“一周后再来复查”",
+                "reasoning": "对话中医生明确要求一周后复查，与医嘱一致。"
+              }
+            ],
+            "summary": {
+              "total_facts": 10,
+              "supported_count": 10,
+              "unsupported_count": 0,
+              "support_rate": 1.0
+            },
+            "internal_conflicts": [],
+            "consistency_score": 1.0
+          },
+          "completeness": {
+            "coverage": [
+              {
+                "fact": "患者主诉头疼3天，早晨加重",
+                "importance": "high",
+                "coverage_status": "partial",
+                "emr_text": "主诉：Headache, Nausea；现病史：Headache持续三天",
+                "reasoning": "病历中记录了头疼持续三天，但未提及“早晨加重”这一关键细节，因此部分覆盖。"
+              },
+              {
+                "fact": "伴有恶心症状",
+                "importance": "medium",
+                "coverage_status": "full",
+                "emr_text": "伴随Nausea",
+                "reasoning": "病历现病史中明确提到伴随Nausea，完全覆盖。"
+              },
+              {
+                "fact": "否认呕吐症状",
+                "importance": "medium",
+                "coverage_status": "full",
+                "emr_text": "但无呕吐",
+                "reasoning": "病历现病史中明确提到无呕吐，完全覆盖。"
+              },
+              {
+                "fact": "血压测量值为145/95 mmHg",
+                "importance": "high",
+                "coverage_status": "full",
+                "emr_text": "血压145/95 mmHg",
+                "reasoning": "病历体格检查中准确记录了血压值，完全覆盖。"
+              },
+              {
+                "fact": "医生判断头疼由高血压引起",
+                "importance": "high",
+                "coverage_status": "none",
+                "emr_text": "",
+                "reasoning": "病历诊断仅为Hypertensive disease，未明确表述头疼与高血压的因果关系，因此未覆盖。"
+              },
+              {
+                "fact": "开具降压药，每日早上服用一片",
+                "importance": "high",
+                "coverage_status": "partial",
+                "emr_text": "服用降压药，每日一片",
+                "reasoning": "病历记录了服用降压药每日一片，但缺少“早上”这一时间信息，因此部分覆盖。"
+              },
+              {
+                "fact": "建议注意休息",
+                "importance": "low",
+                "coverage_status": "full",
+                "emr_text": "注意休息",
+                "reasoning": "病历医嘱中明确包含注意休息，完全覆盖。"
+              },
+              {
+                "fact": "建议少吃咸的食物",
+                "importance": "low",
+                "coverage_status": "full",
+                "emr_text": "少吃咸的食物",
+                "reasoning": "病历医嘱中明确包含少吃咸的食物，完全覆盖。"
+              },
+              {
+                "fact": "建议一周后复查",
+                "importance": "low",
+                "coverage_status": "full",
+                "emr_text": "一周后复诊",
+                "reasoning": "病历医嘱中明确包含一周后复诊，完全覆盖。"
+              }
+            ],
+            "summary": {
+              "total_facts": 9,
+              "full_coverage_count": 6,
+              "partial_coverage_count": 2,
+              "none_coverage_count": 1,
+              "recall_rate": 0.7778,
+              "weighted_recall": 0.6721
+            }
+          },
+          "quality": {
+            "scores": {
+              "structure_completeness": {
+                "score": 2,
+                "reasoning": "SOAP四部分（主观、客观、评估、计划）齐全，且字段均落在正确章节，无缺失或错放。"
+              },
+              "organization_clarity": {
+                "score": 2,
+                "reasoning": "顺序合理，从主诉、现病史到体格检查、诊断、治疗方案，逻辑清晰，易于阅读。"
+              },
+              "conciseness": {
+                "score": 2,
+                "reasoning": "无重复或冗余信息，表达精炼，每个部分均简洁明了。"
+              },
+              "readability": {
+                "score": 1,
+                "reasoning": "句子基本通顺，但主诉和现病史使用英文（Headache, Nausea等），在中文病历中可能造成理解障碍，存在少量表达不清。"
+              },
+              "terminology_appropriateness": {
+                "score": 1,
+                "reasoning": "大部分术语规范（如血压145/95 mmHg、降压药），但主诉和现病史使用英文而非中文医学表达，且“少吃咸的食物”为口语化表述，不够专业。"
+              }
+            },
+            "total_score": 8,
+            "overall_assessment": "病历结构完整、逻辑清晰、简洁，但部分术语使用英文及口语化表达，规范性有待提升。"
+          },
+          "safety": {
+            "risks": [
+              {
+                "risk_type": "major_omission",
+                "severity": "high",
+                "description": "遗漏了患者明确提及的头痛在早晨加重的关键时间特征，该信息对高血压晨峰等鉴别诊断有重要意义。",
+                "emr_location": "现病史",
+                "emr_content": "Headache持续三天，伴随Nausea但无呕吐",
+                "correct_content": "Headache持续三天，早晨起床时加重，伴随Nausea但无呕吐",
+                "evidence_text": "患者陈述：“特别是早上起来的时候。”"
+              }
+            ],
+            "has_high_risk": true,
+            "high_risk_count": 1,
+            "total_risk_count": 1,
+            "safety_assessment": "病历遗漏了头痛在早晨加重的关键症状特征，可能影响高血压相关风险评估和治疗方案调整，存在高风险。"
+          },
+          "overall_score": 0.59334,
+          "evaluation_id": 2
+        }
+      },
+      {
+        "record_id": 3,
+        "visit_id": "test_pipeline_001",
+        "result": {
+          "record_id": 3,
+          "visit_id": "test_pipeline_001",
+          "consistency": {
+            "facts": [
+              {
+                "fact": "患者主诉头痛，尤其晨起时明显，病程约3天",
+                "section": "subjective",
+                "is_supported": true,
+                "evidence_text": "医生你好，我这几天一直头疼，特别是早上起来的时候。大概三天了。",
+                "reasoning": "对话中患者明确提到头痛晨起明显，持续三天，与病历一致。"
+              },
+              {
+                "fact": "伴间歇性恶心，无呕吐",
+                "section": "subjective",
+                "is_supported": true,
+                "evidence_text": "有时候会恶心，但没有呕吐。",
+                "reasoning": "对话中患者陈述恶心但无呕吐，与病历一致。"
+              },
+              {
+                "fact": "体格检查示血压145/95mmHg",
+                "section": "objective",
+                "is_supported": true,
+                "evidence_text": "我给您量一下血压。一百四十五九十五，血压偏高。",
+                "reasoning": "对话中医生测量血压为145/95mmHg，病历记录相同。"
+              },
+              {
+                "fact": "考虑高血压所致头痛",
+                "section": "assessment",
+                "is_supported": true,
+                "evidence_text": "是的，考虑是高血压引起的头疼。",
+                "reasoning": "对话中医生明确诊断高血压引起的头痛，与病历一致。"
+              },
+              {
+                "fact": "予降压药物治疗，每日晨服1次",
+                "section": "plan",
+                "is_supported": true,
+                "evidence_text": "我给您开点降压药，每天一次，早上吃。",
+                "reasoning": "对话中医生开具降压药并交代每日晨服一次，与病历一致。"
+              },
+              {
+                "fact": "建议低盐饮食，避免熬夜，1周后复查",
+                "section": "plan",
+                "is_supported": true,
+                "evidence_text": "注意低盐饮食，避免熬夜，一周后复查。",
+                "reasoning": "对话中医生给出低盐饮食、避免熬夜、一周后复查的医嘱，与病历一致。"
+              }
+            ],
+            "summary": {
+              "total_facts": 6,
+              "supported_count": 6,
+              "unsupported_count": 0,
+              "support_rate": 1.0
+            },
+            "internal_conflicts": [],
+            "consistency_score": 1.0
+          },
+          "completeness": {
+            "coverage": [
+              {
+                "fact": "患者主诉头疼3天，早上起床时明显",
+                "importance": "high",
+                "coverage_status": "full",
+                "emr_text": "患者主诉头痛，尤其晨起时明显。病程约3天",
+                "reasoning": "病历中明确描述了头痛、晨起明显、病程3天，与关键事实完全一致。"
+              },
+              {
+                "fact": "伴有恶心症状",
+                "importance": "medium",
+                "coverage_status": "full",
+                "emr_text": "伴间歇性恶心",
+                "reasoning": "病历中明确提到伴间歇性恶心，覆盖了恶心症状。"
+              },
+              {
+                "fact": "否认呕吐症状",
+                "importance": "medium",
+                "coverage_status": "full",
+                "emr_text": "无呕吐",
+                "reasoning": "病历中明确记录无呕吐，与否认呕吐一致。"
+              },
+              {
+                "fact": "血压测量结果为145/95mmHg，偏高",
+                "importance": "high",
+                "coverage_status": "full",
+                "emr_text": "体格检查示血压145/95mmHg，提示高血压",
+                "reasoning": "病历中完整记录了血压数值及偏高判断。"
+              },
+              {
+                "fact": "医生诊断为高血压引起的头疼",
+                "importance": "high",
+                "coverage_status": "full",
+                "emr_text": "考虑高血压所致头痛",
+                "reasoning": "病历中明确诊断高血压所致头痛，与关键事实一致。"
+              },
+              {
+                "fact": "开具降压药，每日一次，早上服用",
+                "importance": "high",
+                "coverage_status": "full",
+                "emr_text": "予降压药物治疗，每日晨服1次",
+                "reasoning": "病历中完整描述了降压药、每日一次、早上服用。"
+              },
+              {
+                "fact": "建议低盐饮食，避免熬夜",
+                "importance": "low",
+                "coverage_status": "full",
+                "emr_text": "建议低盐饮食，避免熬夜",
+                "reasoning": "病历中直接给出了相同的建议。"
+              },
+              {
+                "fact": "建议一周后复查",
+                "importance": "low",
+                "coverage_status": "full",
+                "emr_text": "1周后复查",
+                "reasoning": "病历中明确建议1周后复查，与关键事实一致。"
+              }
+            ],
+            "summary": {
+              "total_facts": 8,
+              "full_coverage_count": 8,
+              "partial_coverage_count": 0,
+              "none_coverage_count": 0,
+              "recall_rate": 1.0,
+              "weighted_recall": 1.0
+            }
+          },
+          "quality": {
+            "scores": {
+              "structure_completeness": {
+                "score": 2,
+                "reasoning": "SOAP四部分（S、O、A、P）齐全，且各字段均落在正确章节，无缺失或错放。"
+              },
+              "organization_clarity": {
+                "score": 2,
+                "reasoning": "顺序合理，从主观资料到客观资料、评估、计划，逻辑清晰，易于阅读。"
+              },
+              "conciseness": {
+                "score": 2,
+                "reasoning": "无重复或冗余信息，表达精炼，每个部分均简洁明了。"
+              },
+              "readability": {
+                "score": 2,
+                "reasoning": "句子通顺，代词指代清楚（如“患者”），无歧义，易于理解。"
+              },
+              "terminology_appropriateness": {
+                "score": 2,
+                "reasoning": "症状（头痛、恶心）、体征（血压145/95mmHg）、诊断（高血压）、治疗（降压药物、低盐饮食）等术语规范，符合医学表达习惯。"
+              }
+            },
+            "total_score": 10,
+            "overall_assessment": "病历质量优秀，SOAP结构完整，内容清晰规范，无任何缺陷。"
+          },
+          "safety": {
+            "risks": [],
+            "has_high_risk": false,
+            "high_risk_count": 0,
+            "total_risk_count": 0,
+            "safety_assessment": "病历记录完整准确，与对话内容一致，未发现高风险错误。"
+          },
+          "overall_score": 0.85,
+          "evaluation_id": 3
+        }
+      }
+    ]
+  }
+}

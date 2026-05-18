@@ -15,6 +15,8 @@
             <p class="hint">配置大模型API以获得更好的病历生成效果</p>
             
             <form id="llmConfigForm">
+                <input type="hidden" id="editingConfigId" name="editing_config_id" value="">
+                
                 <div class="form-group">
                     <label for="configName">配置名称 *</label>
                     <input type="text" id="configName" name="config_name" required placeholder="例如：qwen">
@@ -26,6 +28,7 @@
                         <option value="openai_compatible">OpenAI兼容接口</option>
                         <option value="openai">OpenAI</option>
                         <option value="anthropic">Anthropic</option>
+                        <option value="sense-deepseek">Sense-DeepSeek</option>
                         <option value="custom">自定义</option>
                     </select>
                 </div>
@@ -63,7 +66,32 @@
                     </label>
                 </div>
                 
-                <button type="submit" class="btn-primary">保存配置</button>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="jsonMode" name="json_mode">
+                        JSON输出模式
+                    </label>
+                    <p class="hint">启用后模型将以JSON格式输出（需在prompt中指示模型输出JSON）</p>
+                </div>
+                
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="thinkingEnabled" name="thinking_enabled">
+                        启用思考模式
+                    </label>
+                    <p class="hint">启用后模型会先进行推理思考再给出回答（支持DeepSeek等模型）</p>
+                </div>
+                
+                <div class="form-group" id="thinkingEffortGroup" style="display:none;">
+                    <label for="thinkingEffort">思考强度</label>
+                    <select id="thinkingEffort" name="thinking_effort">
+                        <option value="high">高（更深入思考）</option>
+                        <option value="low">低（快速响应）</option>
+                    </select>
+                </div>
+                
+                <button type="submit" class="btn-primary" id="submitBtn">保存配置</button>
+                <button type="button" class="btn-secondary" id="cancelEditBtn" style="display:none;">取消编辑</button>
             </form>
         </div>
         

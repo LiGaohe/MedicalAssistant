@@ -57,6 +57,7 @@ backend/config.py
 backend/database.py
 backend/main.py
 backend/models/__init__.py
+backend/models/chinese_term.py
 backend/models/emr_record.py
 backend/models/evaluation_record.py
 backend/models/evidence.py
@@ -70,6 +71,8 @@ backend/scripts/__init__.py
 backend/scripts/add_corrected_speaker_column.py
 backend/services/__init__.py
 backend/services/asr_service.py
+backend/services/chinese_term_client.py
+backend/services/chinese_term_indexer.py
 backend/services/emr_generation_service.py
 backend/services/evaluation_service.py
 backend/services/evaluation/__init__.py
@@ -81,6 +84,7 @@ backend/services/evaluation/quality.py
 backend/services/evaluation/safety.py
 backend/services/evidence_service.py
 backend/services/extraction_service.py
+backend/services/fuzzy_matcher.py
 backend/services/llm_pipeline_service_en.py
 backend/services/llm_pipeline_service.py
 backend/services/llm/__init__.py
@@ -132,6 +136,7 @@ scripts/generate_test_dialogs.py
 scripts/set_cache_path.bat
 scripts/test_asr_correction.py
 scripts/test_asr_no_role.py
+scripts/test_chinese_term_search.py
 scripts/test_diarization.py
 scripts/test_emr_with_logging.py
 scripts/test_english_asr_service.py
@@ -294,6 +299,39 @@ router = APIRouter(prefix="/api/task", tags=["task"])
 task = db.query(Task).filter(Task.task_id == task_id).first()
 </file>
 
+<file path="backend/models/chinese_term.py">
+@dataclass
+class ChineseTerm
+⋮----
+"""中文术语数据模型"""
+term: str
+code: Optional[str] = None
+code_system: Optional[str] = None
+term_type: str = "unknown"
+synonyms: List[str] = field(default_factory=list)
+source: str = "unknown"
+⋮----
+def to_dict(self) -> dict
+⋮----
+"""转换为字典格式"""
+⋮----
+@classmethod
+    def from_dict(cls, data: dict) -> "ChineseTerm"
+⋮----
+"""从字典创建实例"""
+⋮----
+@dataclass
+class ChineseSearchResult
+⋮----
+"""中文术语搜索结果"""
+original_term: str
+matched_term: str
+confidence: float
+⋮----
+match_type: str = "exact"
+candidates: List[ChineseTerm] = field(default_factory=list)
+</file>
+
 <file path="backend/models/evaluation_record.py">
 """
 病历质量评估记录模型
@@ -406,6 +444,243 @@ def migrate()
 ⋮----
 result = conn.execute(text(
 exists = result.fetchone() is not None
+</file>
+
+<file path="backend/services/chinese_term_client.py">
+class ChineseTermClient
+⋮----
+"""中文术语搜索客户端"""
+⋮----
+"""
+        初始化中文术语搜索客户端
+
+        Args:
+            indexer: 术语索引器
+            fuzzy_threshold: 模糊匹配阈值
+            exact_match_bonus: 精确匹配的额外加分
+        """
+⋮----
+"""
+        搜索中文术语
+
+        Args:
+            term: 待搜索的术语
+            term_type: 术语类型过滤（symptom/diagnosis等）
+            use_fuzzy: 是否使用模糊匹配
+
+        Returns:
+            搜索结果，如果没有匹配则返回None
+        """
+⋮----
+exact_term = self.indexer.get_term(term)
+⋮----
+confidence = 1.0 + self.exact_match_bonus
+confidence = min(confidence, 1.0)
+⋮----
+synonyms = self.indexer.colloquial_synonyms[term]
+⋮----
+synonym_term = self.indexer.get_term(synonym)
+⋮----
+confidence = 0.95
+⋮----
+candidates = self.indexer.search(term, term_type=term_type)
+⋮----
+candidate_terms = [c.term for c in candidates]
+⋮----
+best_match = self.fuzzy_matcher.find_best_match(term, candidate_terms)
+⋮----
+matched_term_obj = self.indexer.get_term(matched_term_text)
+⋮----
+top_matches = self.fuzzy_matcher.find_top_matches(term, candidate_terms, top_n=5)
+candidate_list = []
+⋮----
+candidate_obj = self.indexer.get_term(matched_text)
+⋮----
+"""
+        批量搜索术语
+
+        Args:
+            terms: 术语列表
+            term_type: 术语类型过滤
+            use_fuzzy: 是否使用模糊匹配
+
+        Returns:
+            术语到搜索结果的映射
+        """
+⋮----
+results = {}
+⋮----
+matched_count = sum(1 for r in results.values() if r is not None)
+⋮----
+def get_stats(self) -> Dict[str, int]
+⋮----
+"""
+        获取统计信息
+
+        Returns:
+            统计信息字典
+        """
+⋮----
+def is_available(self) -> bool
+⋮----
+"""
+        检查客户端是否可用
+
+        Returns:
+            是否可用
+        """
+stats = self.indexer.get_stats()
+</file>
+
+<file path="backend/services/chinese_term_indexer.py">
+class ChineseTermIndexer
+⋮----
+"""中文术语索引服务，负责加载和索引中文术语库"""
+⋮----
+def __init__(self)
+⋮----
+def load_symptom_norm(self, file_path: str) -> int
+⋮----
+"""
+        加载IMCS标准症状库
+
+        Args:
+            file_path: symptom_norm.csv文件路径
+
+        Returns:
+            加载的术语数量
+        """
+⋮----
+count = 0
+⋮----
+reader = csv.reader(f)
+⋮----
+term_text = row[0].strip()
+⋮----
+term = ChineseTerm(
+⋮----
+def load_icd11_terms(self, file_path: str) -> int
+⋮----
+"""
+        加载ICD-11中文术语库
+
+        Args:
+            file_path: ICD-11中文术语文件路径
+
+        Returns:
+            加载的术语数量
+        """
+⋮----
+lines = f.readlines()
+⋮----
+header = lines[0].strip().split('\t')
+⋮----
+code_idx = None
+title_zh_idx = None
+class_kind_idx = None
+⋮----
+col_clean = col.strip().lower()
+⋮----
+code_idx = i
+⋮----
+title_zh_idx = i
+⋮----
+class_kind_idx = i
+⋮----
+line = line.strip()
+⋮----
+parts = line.split('\t')
+⋮----
+code = parts[code_idx].strip() if code_idx is not None and len(parts) > code_idx else None
+title_zh = parts[title_zh_idx].strip()
+⋮----
+title_zh = title_zh[1:-1]
+⋮----
+title_zh = title_zh.lstrip('- ').strip()
+⋮----
+term_type = "diagnosis"
+⋮----
+class_kind = parts[class_kind_idx].strip().lower()
+⋮----
+term_type = "chapter"
+⋮----
+term_type = "block"
+⋮----
+code = code.strip()
+⋮----
+code = None
+⋮----
+def load_colloquial_synonyms(self, file_path: str) -> int
+⋮----
+"""
+        加载口语化术语同义词映射
+
+        Args:
+            file_path: 同义词映射文件路径
+
+        Returns:
+            加载的映射数量
+        """
+⋮----
+count = len(self.colloquial_synonyms)
+⋮----
+def build_index(self) -> int
+⋮----
+"""
+        构建字符级倒排索引，用于快速检索
+
+        Returns:
+            索引的术语总数
+        """
+⋮----
+"""
+        搜索术语
+
+        Args:
+            query: 查询术语
+            term_type: 术语类型过滤（symptom/diagnosis等）
+            use_index: 是否使用倒排索引加速
+
+        Returns:
+            匹配的术语列表
+        """
+⋮----
+term = self.all_terms[query]
+⋮----
+candidates = set()
+⋮----
+candidates = set(self.all_terms.keys())
+⋮----
+candidates = candidates.intersection(set(self.symptom_terms.keys()))
+⋮----
+candidates = candidates.intersection(set(self.diagnosis_terms.keys()))
+⋮----
+results = []
+⋮----
+def get_term(self, term_text: str) -> Optional[ChineseTerm]
+⋮----
+"""
+        获取指定术语
+
+        Args:
+            term_text: 术语文本
+
+        Returns:
+            术语对象，如果不存在则返回None
+        """
+⋮----
+def get_stats(self) -> Dict[str, int]
+⋮----
+"""
+        获取索引统计信息
+
+        Returns:
+            统计信息字典
+        """
+⋮----
+def clear(self)
+⋮----
+"""清空索引"""
 </file>
 
 <file path="backend/services/evaluation_service.py">
@@ -726,6 +1001,163 @@ result = self._call_llm_json(
 ⋮----
 has_high_risk = result.get("has_high_risk", False)
 high_risk_count = result.get("high_risk_count", 0)
+</file>
+
+<file path="backend/services/fuzzy_matcher.py">
+class FuzzyMatcher
+⋮----
+"""模糊匹配器，用于中文术语的相似度计算和匹配"""
+⋮----
+def __init__(self, threshold: float = 0.7)
+⋮----
+"""
+        初始化模糊匹配器
+
+        Args:
+            threshold: 相似度阈值，默认0.7
+        """
+⋮----
+def calculate_similarity(self, term1: str, term2: str) -> float
+⋮----
+"""
+        计算两个术语的相似度
+
+        使用SequenceMatcher算法计算相似度，适用于中文字符串
+
+        Args:
+            term1: 第一个术语
+            term2: 第二个术语
+
+        Returns:
+            相似度分数，范围[0, 1]
+        """
+⋮----
+similarity = SequenceMatcher(None, term1, term2).ratio()
+⋮----
+shorter = min(len(term1), len(term2))
+longer = max(len(term1), len(term2))
+length_penalty = shorter / longer
+similarity = similarity * (0.7 + 0.3 * length_penalty)
+⋮----
+def calculate_jaccard_similarity(self, term1: str, term2: str) -> float
+⋮----
+"""
+        计算Jaccard相似度
+
+        适用于部分匹配场景
+
+        Args:
+            term1: 第一个术语
+            term2: 第二个术语
+
+        Returns:
+            Jaccard相似度分数，范围[0, 1]
+        """
+⋮----
+set1 = set(term1)
+set2 = set(term2)
+⋮----
+intersection = len(set1 & set2)
+union = len(set1 | set2)
+⋮----
+def calculate_levenshtein_distance(self, term1: str, term2: str) -> int
+⋮----
+"""
+        计算编辑距离（Levenshtein距离）
+
+        Args:
+            term1: 第一个术语
+            term2: 第二个术语
+
+        Returns:
+            编辑距离
+        """
+⋮----
+previous_row = range(len(term2) + 1)
+⋮----
+current_row = [i + 1]
+⋮----
+insertions = previous_row[j + 1] + 1
+deletions = current_row[j] + 1
+substitutions = previous_row[j] + (c1 != c2)
+⋮----
+previous_row = current_row
+⋮----
+def calculate_levenshtein_similarity(self, term1: str, term2: str) -> float
+⋮----
+"""
+        基于编辑距离计算相似度
+
+        Args:
+            term1: 第一个术语
+            term2: 第二个术语
+
+        Returns:
+            相似度分数，范围[0, 1]
+        """
+⋮----
+distance = self.calculate_levenshtein_distance(term1, term2)
+max_len = max(len(term1), len(term2))
+⋮----
+"""
+        从候选列表中找到最佳匹配
+
+        Args:
+            query: 查询术语
+            candidates: 候选术语列表
+            use_multiple_algorithms: 是否使用多种算法综合评分
+
+        Returns:
+            最佳匹配的术语和相似度分数，如果没有匹配则返回None
+        """
+⋮----
+best_match = None
+best_score = 0.0
+⋮----
+score1 = self.calculate_similarity(query, candidate)
+score2 = self.calculate_jaccard_similarity(query, candidate)
+score3 = self.calculate_levenshtein_similarity(query, candidate)
+⋮----
+score = (score1 * 0.5 + score2 * 0.3 + score3 * 0.2)
+⋮----
+score = self.calculate_similarity(query, candidate)
+⋮----
+best_score = score
+best_match = candidate
+⋮----
+"""
+        找到前N个最佳匹配
+
+        Args:
+            query: 查询术语
+            candidates: 候选术语列表
+            top_n: 返回的匹配数量
+            use_multiple_algorithms: 是否使用多种算法综合评分
+
+        Returns:
+            匹配结果列表，每个元素为(术语, 相似度)元组
+        """
+⋮----
+matches = []
+⋮----
+top_matches = matches[:top_n]
+⋮----
+def contains_match(self, query: str, candidate: str) -> Tuple[bool, float]
+⋮----
+"""
+        检查查询术语是否包含在候选术语中，或候选术语是否包含查询术语
+
+        Args:
+            query: 查询术语
+            candidate: 候选术语
+
+        Returns:
+            (是否匹配, 相似度分数)
+        """
+⋮----
+ratio = len(query) / len(candidate)
+⋮----
+ratio = len(candidate) / len(query)
 </file>
 
 <file path="backend/services/llm/llm_service.py">
@@ -2366,6 +2798,86 @@ start_sec = start_ms / 1000
 end_sec = end_ms / 1000
 ⋮----
 output_file = Path("output/asr_result_no_role.json")
+</file>
+
+<file path="scripts/test_chinese_term_search.py">
+"""
+中文术语搜索功能测试脚本
+"""
+⋮----
+def test_indexer_loading()
+⋮----
+"""测试索引加载"""
+⋮----
+indexer = ChineseTermIndexer()
+⋮----
+symptom_count = indexer.load_symptom_norm("data/text/symptom_norm.csv")
+⋮----
+icd11_count = indexer.load_icd11_terms("data/text/SimpleTabulation-ICD-11-MMS-zh.txt")
+⋮----
+colloquial_count = indexer.load_colloquial_synonyms("data/text/colloquial_synonyms.json")
+⋮----
+total_count = indexer.build_index()
+⋮----
+stats = indexer.get_stats()
+⋮----
+def test_exact_match(client: ChineseTermClient)
+⋮----
+"""测试精确匹配"""
+⋮----
+test_terms = [
+⋮----
+result = client.search_term(term, use_fuzzy=False)
+⋮----
+def test_fuzzy_match(client: ChineseTermClient)
+⋮----
+"""测试模糊匹配"""
+⋮----
+result = client.search_term(term, use_fuzzy=True)
+⋮----
+def test_term_type_filter(client: ChineseTermClient)
+⋮----
+"""测试术语类型过滤"""
+⋮----
+test_cases = [
+⋮----
+result = client.search_term(term, term_type=term_type, use_fuzzy=True)
+⋮----
+def test_batch_search(client: ChineseTermClient)
+⋮----
+"""测试批量搜索"""
+⋮----
+start_time = time.time()
+results = client.batch_search(test_terms)
+elapsed_time = time.time() - start_time
+⋮----
+matched_count = sum(1 for r in results.values() if r is not None)
+⋮----
+def test_performance(client: ChineseTermClient)
+⋮----
+"""测试性能"""
+⋮----
+test_terms = ["咳嗽", "发热", "感冒", "腹泻", "肺炎"] * 20
+⋮----
+avg_time = (elapsed_time / len(test_terms)) * 1000
+⋮----
+def test_fuzzy_matcher()
+⋮----
+"""测试模糊匹配器"""
+⋮----
+matcher = FuzzyMatcher(threshold=0.7)
+⋮----
+similarity = matcher.calculate_similarity(term1, term2)
+jaccard = matcher.calculate_jaccard_similarity(term1, term2)
+levenshtein = matcher.calculate_levenshtein_similarity(term1, term2)
+⋮----
+def main()
+⋮----
+"""主测试函数"""
+⋮----
+indexer = test_indexer_loading()
+⋮----
+client = ChineseTermClient(
 </file>
 
 <file path="scripts/test_diarization.py">
@@ -4647,12 +5159,6 @@ index_path = Path(__file__).parent.parent / "frontend" / "index.html"
 async def health_check()
 </file>
 
-<file path="backend/models/__init__.py">
-"""数据模型"""
-⋮----
-__all__ = [
-</file>
-
 <file path="backend/services/medical_record_pipeline.py">
 def run_async(coro)
 ⋮----
@@ -4948,6 +5454,12 @@ sentencepiece>=0.1.99
     }
   }
 }
+</file>
+
+<file path="backend/models/__init__.py">
+"""数据模型"""
+⋮----
+__all__ = [
 </file>
 
 <file path="backend/models/transcript.py">
@@ -5421,62 +5933,6 @@ turns = db.query(TranscriptTurn).filter(
 turns_data = []
 </file>
 
-<file path="backend/config.py">
-class Settings(BaseSettings)
-⋮----
-APP_NAME: str = "中文门诊病历生成系统"
-APP_VERSION: str = "1.0.0"
-DEBUG: bool = True
-⋮----
-DATABASE_URL: str = "sqlite:///data/database/medical.db"
-⋮----
-AUDIO_STORAGE_PATH: str = "data/audio"
-MAX_AUDIO_SIZE: int = 100 * 1024 * 1024
-⋮----
-ASR_ENGINE: str = "funasr"
-ASR_DEVICE: str = "cpu"
-HOTWORD_PATH: str = "config/hotwords_medical.txt"
-HOTWORD_PATH_EN: str = "config/hotwords_medical_en.txt"
-⋮----
-ASR_MODEL_ZH: str = "paraformer-zh"
-ASR_MODEL_EN: str = "paraformer-en"
-⋮----
-QWEN3_ASR_MODEL_SIZE: str = "1.7B"
-QWEN3_ASR_LANGUAGE: str = "Chinese"
-⋮----
-ENABLE_DIARIZATION: bool = True
-ENABLE_ASR_CORRECTION: bool = True
-CORRECTION_CONFIDENCE_THRESHOLD: float = 0.7
-⋮----
-LLM_DEBUG_MODE: bool = False
-LLM_SEGMENT_TURNS: int = 10
-⋮----
-DEFAULT_LANGUAGE: str = "zh"
-SUPPORTED_LANGUAGES: list = ["zh", "en"]
-⋮----
-UMLS_API_KEY: str = ""
-UMLS_ENABLED: bool = False
-UMLS_CACHE_DIR: str = "data/cache/umls"
-UMLS_CACHE_TTL_HOURS: int = 168
-UMLS_REQUEST_TIMEOUT: int = 30
-UMLS_MAX_RETRIES: int = 3
-UMLS_RATE_LIMIT_DELAY: float = 0.1
-UMLS_MAX_CONCURRENT: int = 5
-⋮----
-TERMINOLOGY_PARALLEL_ENABLED: bool = True
-⋮----
-TRANSLATION_ENABLED: bool = True
-TRANSLATION_MODEL: str = "Helsinki-NLP/opus-mt-zh-en"
-TRANSLATION_DEVICE: str = "cpu"
-⋮----
-class Config
-⋮----
-env_file = ".env"
-case_sensitive = True
-⋮----
-settings = Settings()
-</file>
-
 <file path="backend/services/asr_service.py">
 class ASRService
 ⋮----
@@ -5567,6 +6023,68 @@ speaker_id = f"spk{segment.get('spk', 0)}" if "spk" in segment else "unknown"
 response = {
 </file>
 
+<file path="backend/config.py">
+class Settings(BaseSettings)
+⋮----
+APP_NAME: str = "中文门诊病历生成系统"
+APP_VERSION: str = "1.0.0"
+DEBUG: bool = True
+⋮----
+DATABASE_URL: str = "sqlite:///data/database/medical.db"
+⋮----
+AUDIO_STORAGE_PATH: str = "data/audio"
+MAX_AUDIO_SIZE: int = 100 * 1024 * 1024
+⋮----
+ASR_ENGINE: str = "funasr"
+ASR_DEVICE: str = "cpu"
+HOTWORD_PATH: str = "config/hotwords_medical.txt"
+HOTWORD_PATH_EN: str = "config/hotwords_medical_en.txt"
+⋮----
+ASR_MODEL_ZH: str = "paraformer-zh"
+ASR_MODEL_EN: str = "paraformer-en"
+⋮----
+QWEN3_ASR_MODEL_SIZE: str = "1.7B"
+QWEN3_ASR_LANGUAGE: str = "Chinese"
+⋮----
+ENABLE_DIARIZATION: bool = True
+ENABLE_ASR_CORRECTION: bool = True
+CORRECTION_CONFIDENCE_THRESHOLD: float = 0.7
+⋮----
+LLM_DEBUG_MODE: bool = False
+LLM_SEGMENT_TURNS: int = 10
+⋮----
+DEFAULT_LANGUAGE: str = "zh"
+SUPPORTED_LANGUAGES: list = ["zh", "en"]
+⋮----
+UMLS_API_KEY: str = ""
+UMLS_ENABLED: bool = False
+UMLS_CACHE_DIR: str = "data/cache/umls"
+UMLS_CACHE_TTL_HOURS: int = 168
+UMLS_REQUEST_TIMEOUT: int = 30
+UMLS_MAX_RETRIES: int = 3
+UMLS_RATE_LIMIT_DELAY: float = 0.1
+UMLS_MAX_CONCURRENT: int = 5
+⋮----
+TERMINOLOGY_PARALLEL_ENABLED: bool = True
+⋮----
+TRANSLATION_ENABLED: bool = False
+TRANSLATION_MODEL: str = "Helsinki-NLP/opus-mt-zh-en"
+TRANSLATION_DEVICE: str = "cpu"
+⋮----
+CHINESE_TERM_ENABLED: bool = True
+SYMPTOM_NORM_PATH: str = "data/text/symptom_norm.csv"
+ICD11_ZH_PATH: str = "data/text/SimpleTabulation-ICD-11-MMS-zh.txt"
+CHINESE_TERM_FUZZY_THRESHOLD: float = 0.7
+CHINESE_TERM_EXACT_MATCH_BONUS: float = 0.2
+⋮----
+class Config
+⋮----
+env_file = ".env"
+case_sensitive = True
+⋮----
+settings = Settings()
+</file>
+
 <file path="backend/services/terminology_service.py">
 class TerminologyService
 ⋮----
@@ -5575,6 +6093,21 @@ def _init_umls(self)
 max_concurrent = getattr(settings, 'UMLS_MAX_CONCURRENT', 5)
 ⋮----
 def _init_translation(self)
+⋮----
+def _init_chinese_term_client(self)
+⋮----
+indexer = ChineseTermIndexer()
+⋮----
+symptom_count = indexer.load_symptom_norm(settings.SYMPTOM_NORM_PATH)
+⋮----
+icd11_count = indexer.load_icd11_terms(settings.ICD11_ZH_PATH)
+⋮----
+colloquial_file = "data/text/colloquial_synonyms.json"
+colloquial_count = indexer.load_colloquial_synonyms(colloquial_file)
+⋮----
+total_count = indexer.build_index()
+⋮----
+stats = self.chinese_term_client.get_stats()
 ⋮----
 def _load_term_type_hints(self) -> Dict[str, List[str]]
 ⋮----
@@ -5605,6 +6138,8 @@ source = "none"
 candidates = None
 cui = None
 ⋮----
+chinese_result = self._normalize_by_chinese_term(term, term_type)
+⋮----
 umls_result = self._normalize_by_umls(term, context)
 ⋮----
 llm_result = self._normalize_by_llm(term, context)
@@ -5615,6 +6150,17 @@ confidence = 0.3
 reasoning = "无法规范化，保留原术语"
 ⋮----
 is_risky = confidence < 0.5
+⋮----
+result = self.chinese_term_client.search_term(
+⋮----
+confidence = result.confidence
+⋮----
+candidates_data = None
+⋮----
+candidates_data = [
+⋮----
+match_type_desc = "精确匹配" if result.match_type == "exact" else "模糊匹配"
+reasoning = f"中文术语库{match_type_desc}: {term} -> {result.matched_term}"
 ⋮----
 search_term = term
 translated_term = None
@@ -5634,8 +6180,6 @@ selected = self._llm_select_candidate(term, context, candidates, translated_term
 best_candidate = selected
 ⋮----
 best_candidate = candidates[0]
-⋮----
-candidates_data = [
 ⋮----
 confidence = min(0.95, 0.6 + best_candidate.score * 0.35)
 ⋮----
@@ -5771,8 +6315,6 @@ normalized_terms = []
 ⋮----
 term_type = term_types.get(term, "unknown")
 ⋮----
-candidates_data = None
-⋮----
 best_candidate = selections[term]
 ⋮----
 candidates = term_candidates.get(term, [])
@@ -5842,7 +6384,7 @@ function makeSectionEditable(section)
 ⋮----
 async function saveEMREdits()
 ⋮----
-function printEMR()
+async function printEMR()
 ⋮----
 async function showEvidence()
 ⋮----
@@ -5857,182 +6399,6 @@ function hideEvidence()
 async function loadDebugPrompts()
 ⋮----
 function displayCurrentStage()
-</file>
-
-<file path=".gitignore">
-%TEMP%install-qwen.bat
-/.qwen
-/.trae
-*.0
-/.agents
-/data
-/output
-/.agents
-/_bmad
-/backend/services/correction/__pycache__
-/backend/services/llm/__pycache__
-/docs
-/src/asr/__pycache__
-/tests/test_correction/__pycache__
-/backend/__pycache__
-/tests/__pycache__
-.env
-.env
-/backend/api/__pycache__
-/backend/services/__pycache__
-</file>
-
-<file path="backend/api/emr.py">
-router = APIRouter(prefix="/api/emr", tags=["EMR"])
-⋮----
-class ProcessRequest(BaseModel)
-⋮----
-visit_id: str
-use_llm: bool = True
-save_intermediate: bool = True
-⋮----
-class ProcessResponse(BaseModel)
-⋮----
-status: str
-evidence_count: int
-normalized_terms_count: int
-extracted_items_count: int
-emr_record: Optional[Dict[str, Any]]
-errors: list
-⋮----
-llm_service = LLMService(db)
-⋮----
-visit = db.query(Visit).filter(Visit.visit_id == request.visit_id).first()
-language = visit.language if visit and visit.language else "zh"
-⋮----
-pipeline = LLMPipelineServiceEnglish(db, llm_service)
-⋮----
-pipeline = LLMPipelineService(db, llm_service)
-result = pipeline.process_transcript(request.visit_id)
-⋮----
-evidence_count = len(result.get("evidence_traces", []))
-normalized_terms_count = len(result.get("normalized_result", {}).get("terms", []))
-⋮----
-emr_result = result.get("emr_result", {})
-⋮----
-latest_emr = db.query(EMRRecord).filter(
-⋮----
-emr_record = {
-⋮----
-pipeline = MedicalRecordPipeline(db, llm_service)
-⋮----
-result = pipeline.process_visit(
-⋮----
-status = pipeline.get_processing_status(visit_id)
-⋮----
-emr_service = EMRGenerationService(db, llm_service)
-⋮----
-emr = emr_service.get_emr_by_visit(visit_id, version)
-⋮----
-versions = emr_service.get_all_versions(visit_id)
-⋮----
-class PipelineProcessRequest(BaseModel)
-⋮----
-class PipelineProcessResponse(BaseModel)
-⋮----
-role_mapping: Optional[Dict[str, str]] = None
-annotated_text: Optional[str] = None
-normalized_result: Optional[Dict[str, Any]] = None
-extraction_result: Optional[Dict[str, Any]] = None
-emr_result: Optional[Dict[str, Any]] = None
-error: Optional[str] = None
-⋮----
-@router.get("/config/debug-mode")
-async def get_debug_mode()
-⋮----
-class CreateFromTextRequest(BaseModel)
-⋮----
-dialog_text: str
-language: str = "zh"
-⋮----
-class CreateFromTextResponse(BaseModel)
-⋮----
-visit_id: Optional[str] = None
-turn_count: Optional[int] = None
-⋮----
-visit_id = f"text_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
-⋮----
-visit = Visit(
-⋮----
-lines = request.dialog_text.strip().split('\n')
-turns = []
-turn_index = 0
-⋮----
-speaker_pattern = r'^\[([^\]]+)\]:\s*(.+)$'
-⋮----
-line = line.strip()
-⋮----
-match = re.match(speaker_pattern, line)
-⋮----
-speaker = match.group(1)
-text = match.group(2)
-⋮----
-speaker = "unknown"
-text = line
-⋮----
-turn = TranscriptTurn(
-⋮----
-class DebugPromptsResponse(BaseModel)
-⋮----
-stages: List[Dict[str, Any]]
-⋮----
-class DebugProcessStageRequest(BaseModel)
-⋮----
-stage: str
-user_response: str
-context: Optional[Dict[str, Any]] = None
-⋮----
-class DebugProcessStageResponse(BaseModel)
-⋮----
-result: Optional[Dict[str, Any]] = None
-next_stage: Optional[str] = None
-next_prompt: Optional[str] = None
-next_segment_index: Optional[int] = None
-next_description: Optional[str] = None
-context_update: Optional[Dict[str, Any]] = None
-completed: Optional[bool] = None
-⋮----
-visit = db.query(Visit).filter(Visit.visit_id == visit_id).first()
-⋮----
-turns = db.query(TranscriptTurn).filter(
-⋮----
-pipeline = LLMPipelineServiceEnglish(db)
-⋮----
-pipeline = LLMPipelineService(db)
-stages = pipeline.get_all_prompts(turns)
-⋮----
-result = pipeline.process_stage_with_user_input(
-⋮----
-class UpdateEMRRequest(BaseModel)
-⋮----
-emr_json: Dict[str, Any]
-record_type: str = "user_edited"
-⋮----
-class UpdateEMRResponse(BaseModel)
-⋮----
-record_id: int
-version: int
-message: Optional[str] = None
-⋮----
-latest_version = emr_service._get_latest_version(visit_id)
-new_version = latest_version + 1
-⋮----
-emr = EMRRecord(
-⋮----
-evidence_list = db.query(EvidenceSpan).filter(
-⋮----
-result = []
-⋮----
-turn = db.query(TranscriptTurn).filter(
-⋮----
-turn_text = ev.turn_text
-⋮----
-turn_text = turn.text
 </file>
 
 <file path="frontend/js/result.js">
@@ -6122,6 +6488,184 @@ speaker_config = None
 speaker_config = {
 ⋮----
 vad_config = {
+</file>
+
+<file path="backend/api/emr.py">
+router = APIRouter(prefix="/api/emr", tags=["EMR"])
+⋮----
+class ProcessRequest(BaseModel)
+⋮----
+visit_id: str
+use_llm: bool = True
+save_intermediate: bool = True
+⋮----
+class ProcessResponse(BaseModel)
+⋮----
+status: str
+evidence_count: int
+normalized_terms_count: int
+extracted_items_count: int
+emr_record: Optional[Dict[str, Any]]
+errors: list
+⋮----
+llm_service = LLMService(db)
+⋮----
+visit = db.query(Visit).filter(Visit.visit_id == request.visit_id).first()
+language = visit.language if visit and visit.language else "zh"
+⋮----
+pipeline = LLMPipelineServiceEnglish(db, llm_service)
+⋮----
+pipeline = LLMPipelineService(db, llm_service)
+result = pipeline.process_transcript(request.visit_id)
+⋮----
+evidence_count = len(result.get("evidence_traces", []))
+normalized_terms_count = len(result.get("normalized_result", {}).get("terms", []))
+⋮----
+emr_result = result.get("emr_result", {})
+⋮----
+latest_emr = db.query(EMRRecord).filter(
+⋮----
+emr_record = {
+⋮----
+pipeline = MedicalRecordPipeline(db, llm_service)
+⋮----
+result = pipeline.process_visit(
+⋮----
+visit = db.query(Visit).filter(Visit.visit_id == visit_id).first()
+⋮----
+status = pipeline.get_processing_status(visit_id)
+⋮----
+emr_service = EMRGenerationService(db, llm_service)
+⋮----
+emr = emr_service.get_emr_by_visit(visit_id, version)
+⋮----
+versions = emr_service.get_all_versions(visit_id)
+⋮----
+class PipelineProcessRequest(BaseModel)
+⋮----
+class PipelineProcessResponse(BaseModel)
+⋮----
+role_mapping: Optional[Dict[str, str]] = None
+annotated_text: Optional[str] = None
+normalized_result: Optional[Dict[str, Any]] = None
+extraction_result: Optional[Dict[str, Any]] = None
+emr_result: Optional[Dict[str, Any]] = None
+error: Optional[str] = None
+⋮----
+@router.get("/config/debug-mode")
+async def get_debug_mode()
+⋮----
+class CreateFromTextRequest(BaseModel)
+⋮----
+dialog_text: str
+language: str = "zh"
+⋮----
+class CreateFromTextResponse(BaseModel)
+⋮----
+visit_id: Optional[str] = None
+turn_count: Optional[int] = None
+⋮----
+visit_id = f"text_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+⋮----
+visit = Visit(
+⋮----
+lines = request.dialog_text.strip().split('\n')
+turns = []
+turn_index = 0
+⋮----
+speaker_pattern = r'^\[([^\]]+)\]:\s*(.+)$'
+⋮----
+line = line.strip()
+⋮----
+match = re.match(speaker_pattern, line)
+⋮----
+speaker = match.group(1)
+text = match.group(2)
+⋮----
+speaker = "unknown"
+text = line
+⋮----
+turn = TranscriptTurn(
+⋮----
+class DebugPromptsResponse(BaseModel)
+⋮----
+stages: List[Dict[str, Any]]
+⋮----
+class DebugProcessStageRequest(BaseModel)
+⋮----
+stage: str
+user_response: str
+context: Optional[Dict[str, Any]] = None
+⋮----
+class DebugProcessStageResponse(BaseModel)
+⋮----
+result: Optional[Dict[str, Any]] = None
+next_stage: Optional[str] = None
+next_prompt: Optional[str] = None
+next_segment_index: Optional[int] = None
+next_description: Optional[str] = None
+context_update: Optional[Dict[str, Any]] = None
+completed: Optional[bool] = None
+⋮----
+turns = db.query(TranscriptTurn).filter(
+⋮----
+pipeline = LLMPipelineServiceEnglish(db)
+⋮----
+pipeline = LLMPipelineService(db)
+stages = pipeline.get_all_prompts(turns)
+⋮----
+result = pipeline.process_stage_with_user_input(
+⋮----
+class UpdateEMRRequest(BaseModel)
+⋮----
+emr_json: Dict[str, Any]
+record_type: str = "user_edited"
+⋮----
+class UpdateEMRResponse(BaseModel)
+⋮----
+record_id: int
+version: int
+message: Optional[str] = None
+⋮----
+latest_version = emr_service._get_latest_version(visit_id)
+new_version = latest_version + 1
+⋮----
+emr = EMRRecord(
+⋮----
+evidence_list = db.query(EvidenceSpan).filter(
+⋮----
+result = []
+⋮----
+turn = db.query(TranscriptTurn).filter(
+⋮----
+turn_text = ev.turn_text
+⋮----
+turn_text = turn.text
+</file>
+
+<file path=".gitignore">
+%TEMP%install-qwen.bat
+/.qwen
+/.trae
+*.0
+/.agents
+/data
+/output
+/.agents
+/_bmad
+/backend/services/correction/__pycache__
+/backend/services/llm/__pycache__
+/docs
+/src/asr/__pycache__
+/tests/test_correction/__pycache__
+/backend/__pycache__
+/tests/__pycache__
+.env
+.env
+/backend/api/__pycache__
+/backend/services/__pycache__
+/backend/models/__pycache__
+/data/database
 </file>
 
 <file path="backend/services/llm_pipeline_service.py">
@@ -6216,6 +6760,7 @@ emr_start = time.time()
 emr_result = self._generate_emr_stage(
 ⋮----
 dialogue_text = "\n".join(f"[{t.speaker}]: {t.text}" for t in turns)
+# self._run_evaluation(dialogue_text, emr_result)  # 暂时禁用评估，评估标准需要改进
 ⋮----
 total_time = time.time() - start_time
 ⋮----
@@ -6496,31 +7041,32 @@ normalized = self.terminology_service.normalize_term(term, context, term_type)
 ⋮----
 async def _normalize_terms_parallel(self, unique_terms: List[Dict[str, Any]], context: str) -> List[Any]
 ⋮----
-"""并行规范化术语"""
+"""并行规范化术语 - 优先使用中文术语搜索"""
 terms = [t.get("term", "") for t in unique_terms]
 contexts = {t.get("term", ""): t.get("context", context) for t in unique_terms}
 term_types = {t.get("term", ""): t.get("term_type", "unknown") for t in unique_terms}
 ⋮----
-translations = {}
+chinese_results = {}
 ⋮----
-trans_start = time.time()
-translations = self.terminology_service.translation_service.batch_translate_zh_to_en(terms)
+chinese_start = time.time()
+chinese_results = self.terminology_service.chinese_term_client.batch_search(terms)
+matched_count = sum(1 for r in chinese_results.values() if r is not None)
 ⋮----
 umls_results = {}
 ⋮----
+unmatched_terms = [t for t in terms if t not in chinese_results or chinese_results[t] is None]
+⋮----
 search_start = time.time()
-search_terms = [translations.get(term, term) for term in terms]
 umls_results = await self.terminology_service.async_umls_client.batch_search(
 ⋮----
 term_candidates = {}
 ⋮----
-search_term = translations.get(term, term)
-result = umls_results.get(search_term)
+result = umls_results.get(term)
 ⋮----
 selections = {}
 ⋮----
 select_start = time.time()
-selections = self.terminology_service._batch_select_candidates(term_candidates, contexts, translations)
+selections = self.terminology_service._batch_select_candidates(term_candidates, contexts, {})
 ⋮----
 code_tasks = {}
 ⋮----
@@ -6540,14 +7086,24 @@ source = "none"
 candidates_data = None
 cui = None
 ⋮----
+chinese_result = chinese_results[term]
+normalized = chinese_result.matched_term
+confidence = chinese_result.confidence
+code = chinese_result.code
+code_system = chinese_result.code_system
+source = "ChineseTerm"
+⋮----
+match_type_desc = "精确匹配" if chinese_result.match_type == "exact" else "同义词匹配" if chinese_result.match_type == "synonym" else "模糊匹配"
+reasoning = f"中文术语库{match_type_desc}: {term} -> {normalized}"
+⋮----
+candidates_data = [
+⋮----
 best_candidate = selections[term]
 ⋮----
 candidates = term_candidates.get(term, [])
-candidates_data = [
 ⋮----
 confidence = min(0.95, 0.6 + best_candidate.score * 0.35)
-trans_info = f"(翻译:{translations.get(term, term)})" if translations.get(term) else ""
-reasoning = f"UMLS匹配: {term}{trans_info} -> {best_candidate.term} (CUI: {best_candidate.cui})"
+reasoning = f"UMLS匹配: {term} -> {best_candidate.term} (CUI: {best_candidate.cui})"
 source = "UMLS"
 cui = best_candidate.cui
 normalized = best_candidate.term
@@ -6697,13 +7253,23 @@ result = self._parse_emr_response(user_response, extraction_result, visit_id, Tr
 </file>
 
 <file path="frontend/css/style.css">
+:root {
+⋮----
 * {
 ⋮----
 body {
 ⋮----
 .container {
 ⋮----
+.container::before {
+⋮----
 h1 {
+⋮----
+h1::after {
+⋮----
+h2 {
+⋮----
+h3 {
 ⋮----
 .upload-section {
 ⋮----
@@ -6715,19 +7281,65 @@ h1 {
 ⋮----
 .drop-zone p {
 ⋮----
+.drop-zone p:first-child {
+⋮----
 .drop-zone .hint {
 ⋮----
 .form-group {
 ⋮----
 .form-group label {
 ⋮----
-.form-group input {
+.form-group input,
+⋮----
+.form-group input:focus,
+⋮----
+.form-group input:hover,
+⋮----
+.form-group textarea {
+⋮----
+.form-group .hint {
+⋮----
+.form-group label:has(input[type="checkbox"]) {
+⋮----
+.form-group label:has(input[type="checkbox"]):hover {
+⋮----
+.form-group input[type="checkbox"] {
+⋮----
+.form-group input[type="checkbox"]:hover {
+⋮----
+.form-group input[type="checkbox"]:checked {
+⋮----
+.form-group input[type="checkbox"]:checked::after {
+⋮----
+.form-group input[type="checkbox"]:focus {
+⋮----
+.form-group label:has(input[type="checkbox"]) input[type="checkbox"] {
+⋮----
+.btn-primary,
 ⋮----
 .btn-primary {
 ⋮----
 .btn-primary:hover:not(:disabled) {
 ⋮----
+.btn-primary:active:not(:disabled) {
+⋮----
 .btn-primary:disabled {
+⋮----
+.btn-secondary {
+⋮----
+.btn-secondary:hover {
+⋮----
+.btn-success {
+⋮----
+.btn-success:hover {
+⋮----
+.btn-warning {
+⋮----
+.btn-warning:hover {
+⋮----
+.btn-info {
+⋮----
+.btn-info:hover {
 ⋮----
 .upload-actions {
 ⋮----
@@ -6739,17 +7351,19 @@ h1 {
 ⋮----
 .progress-fill {
 ⋮----
+.progress-fill::after {
+⋮----
 #progressText {
 ⋮----
 .info-section {
 ⋮----
 .info-section p {
 ⋮----
+.info-section strong {
+⋮----
 .actions {
 ⋮----
-.btn-secondary {
-⋮----
-.btn-secondary:hover {
+.actions button {
 ⋮----
 .turns-section {
 ⋮----
@@ -6757,105 +7371,21 @@ h1 {
 ⋮----
 .turn-item {
 ⋮----
+.turn-item:hover {
+⋮----
 .turn-header {
 ⋮----
 .speaker-0 {
 ⋮----
 .speaker-1 {
 ⋮----
-.speaker-other {
-⋮----
-.doctor-turn {
-⋮----
-.patient-turn {
-⋮----
-.turn-text {
-⋮----
-.loading {
-⋮----
-.btn-success {
-⋮----
-.btn-success:hover {
-⋮----
-.btn-info {
-⋮----
-.btn-info:hover {
-⋮----
-.btn-small {
-⋮----
-.btn-small:hover {
-⋮----
-.btn-danger {
-⋮----
-.btn-danger:hover {
-⋮----
-.config-section {
-⋮----
-.config-section h2 {
-⋮----
-.config-section .hint {
-⋮----
-.configs-section {
-⋮----
-.configs-section h2 {
-⋮----
-.config-item {
-⋮----
-.config-item.active {
-⋮----
-.config-header {
-⋮----
-.config-header h3 {
-⋮----
-.config-status {
-⋮----
-.config-status.active {
-⋮----
-.config-status.inactive {
-⋮----
-.config-details {
-⋮----
-.config-details p {
-⋮----
-.config-actions {
-⋮----
-.emr-section {
-⋮----
-.emr-section h2 {
-⋮----
-.emr-version {
-⋮----
-.emr-version label {
-⋮----
-.emr-version select {
-⋮----
-.emr-content {
-⋮----
-.emr-part {
-⋮----
-.emr-part h3 {
-⋮----
-.section-text {
-⋮----
-.section-fields {
-⋮----
-.field-item {
-⋮----
-.field-name {
-⋮----
-.field-value {
-⋮----
-.field-meta {
-⋮----
-.empty {
-⋮----
-.btn-warning {
-⋮----
-.btn-warning:hover {
+.turn-content {
 ⋮----
 .modal {
 ⋮----
 .modal-content {
+⋮----
+.modal-large {
 ⋮----
 .modal-header {
 ⋮----
@@ -6863,45 +7393,51 @@ h1 {
 ⋮----
 .close {
 ⋮----
-.close:hover,
+.close:hover {
 ⋮----
 .modal-body {
 ⋮----
-.debug-stage-selector {
+.loading {
 ⋮----
-.debug-stage-selector label {
+.loading p {
 ⋮----
-.debug-stage-selector select {
+.config-section,
 ⋮----
-.debug-prompt,
+.config-section h2,
 ⋮----
-.debug-prompt h4,
+.text-input-section h3 {
 ⋮----
-.debug-prompt pre,
+.text-input-format-hint {
 ⋮----
-.debug-input {
+.text-input-format-hint p {
 ⋮----
-.debug-input h4 {
+.text-input-format-hint ul {
 ⋮----
-.debug-input textarea {
+.text-input-format-hint li {
 ⋮----
-.debug-actions {
+.text-input-format-hint code {
 ⋮----
-.debug-actions button {
+.text-input-actions {
 ⋮----
-#debugResult {
-⋮----
-#debugResult h4 {
-⋮----
-#resultContent {
+.text-input-actions button {
 ⋮----
 .emr-toolbar {
 ⋮----
-.emr-toolbar .emr-version {
+.emr-version {
 ⋮----
-.emr-toolbar .emr-actions {
+.emr-version label {
 ⋮----
-.emr-toolbar .emr-actions button {
+.emr-version select {
+⋮----
+.emr-actions {
+⋮----
+.emr-content {
+⋮----
+.emr-part {
+⋮----
+.emr-part:last-child {
+⋮----
+.emr-part h3 {
 ⋮----
 .evidence-panel {
 ⋮----
@@ -6909,25 +7445,39 @@ h1 {
 ⋮----
 .evidence-table {
 ⋮----
-.evidence-table th,
+.evidence-table thead {
 ⋮----
-.evidence-table th {
+.evidence-table thead th {
 ⋮----
-.evidence-table tr:nth-child(even) {
+.evidence-table tbody tr {
 ⋮----
-.evidence-value-cell {
+.evidence-table tbody tr:last-child {
 ⋮----
-.evidence-content-cell {
+.evidence-table tbody tr:hover {
 ⋮----
-.evidence-turn-cell {
+.evidence-table tbody td {
+⋮----
+.evidence-value-cell,
+⋮----
+.emr-section {
+⋮----
+.emr-section .emr-toolbar {
+⋮----
+.emr-section #evidencePanel + .emr-content {
 ⋮----
 .evidence-traces {
+⋮----
+.evidence-traces > strong {
 ⋮----
 .evidence-final-value {
 ⋮----
 .evidence-traces ul {
 ⋮----
-.evidence-traces li {
+.evidence-traces .evidence-item {
+⋮----
+.evidence-traces .evidence-item:last-child {
+⋮----
+.evidence-traces .evidence-item:hover {
 ⋮----
 .evidence-header {
 ⋮----
@@ -6943,53 +7493,9 @@ h1 {
 ⋮----
 .evidence-label {
 ⋮----
-.evidence-content {
-⋮----
-.evidence-turn-text {
-⋮----
-.evidence-item {
-⋮----
-.evidence-item:hover {
-⋮----
-.edit-textarea {
-⋮----
-.field-edit {
-⋮----
-.emr-toolbar,
-⋮----
-.modal-large {
-⋮----
-.debug-input-mode {
-⋮----
-.debug-input-mode h3 {
-⋮----
-.debug-mode-buttons {
-⋮----
-.debug-mode-buttons button {
-⋮----
-.text-input-section {
-⋮----
-.text-input-section h3 {
-⋮----
-.text-input-format-hint {
-⋮----
-.text-input-format-hint p {
-⋮----
-.text-input-format-hint ul {
-⋮----
-.text-input-format-hint li {
-⋮----
-.text-input-format-hint code {
-⋮----
-#dialogTextInput {
-⋮----
-#dialogTextInput:focus {
-⋮----
-.text-input-actions {
+.evidence-content,
 ⋮----
 .evaluation-summary {
-⋮----
-.evaluation-summary h2 {
 ⋮----
 .score-overview {
 ⋮----
@@ -6997,11 +7503,7 @@ h1 {
 ⋮----
 .score-circle {
 ⋮----
-.score-circle.score-good {
-⋮----
-.score-circle.score-medium {
-⋮----
-.score-circle.score-poor {
+.score-circle::before {
 ⋮----
 .score-value {
 ⋮----
@@ -7025,119 +7527,71 @@ h1 {
 ⋮----
 .risk-status {
 ⋮----
-.risk-status.risk-high {
+.debug-stage-selector {
 ⋮----
-.risk-status.risk-low {
+.debug-prompt,
 ⋮----
-.evaluation-tabs {
+.debug-prompt h4,
 ⋮----
-.tab-btn {
+.debug-prompt pre,
 ⋮----
-.tab-btn:hover {
+.debug-actions {
 ⋮----
-.tab-btn.active {
+.debug-actions button {
 ⋮----
-.tab-content {
+#debugResult {
 ⋮----
-.tab-content h3 {
+#debugResult h4 {
 ⋮----
-.stats-row {
+.config-item {
 ⋮----
-.stat-item {
+.config-item:hover {
 ⋮----
-.stat-value {
+.config-item.active {
 ⋮----
-.stat-label {
+.config-header {
 ⋮----
-.facts-list,
+.config-header h3 {
 ⋮----
-.fact-item,
+.config-status {
 ⋮----
-.fact-item.supported {
+.config-status.active {
 ⋮----
-.fact-item.unsupported {
+.config-status.inactive {
 ⋮----
-.fact-header,
+.config-details {
 ⋮----
-.fact-status {
+.config-details p {
 ⋮----
-.fact-item.supported .fact-status {
+.config-details strong {
 ⋮----
-.fact-item.unsupported .fact-status {
+.config-actions {
 ⋮----
-.fact-text,
+.btn-small {
 ⋮----
-.fact-evidence,
+.btn-small:hover {
 ⋮----
-.no-issues {
+.btn-small.btn-danger {
 ⋮----
-.conflict-item {
+.btn-small.btn-danger:hover {
 ⋮----
-.conflict-description {
+.empty {
 ⋮----
-.conflict-details p {
+.upload-actions,
 ⋮----
-.coverage-item.full {
+.upload-actions button,
 ⋮----
-.coverage-item.partial {
+.config-actions button {
 ⋮----
-.coverage-item.none {
+::-webkit-scrollbar {
 ⋮----
-.coverage-status {
+::-webkit-scrollbar-track {
 ⋮----
-.coverage-item.full .coverage-status {
+::-webkit-scrollbar-thumb {
 ⋮----
-.coverage-item.partial .coverage-status {
+::-webkit-scrollbar-thumb:hover {
 ⋮----
-.coverage-item.none .coverage-status {
-⋮----
-.quality-scores {
-⋮----
-.quality-item {
-⋮----
-.quality-name {
-⋮----
-.quality-bar {
-⋮----
-.quality-bar-fill {
-⋮----
-.quality-value {
-⋮----
-.quality-assessment {
-⋮----
-.safety-summary {
-⋮----
-.safety-status {
-⋮----
-.safety-status.no-risk {
-⋮----
-.safety-status.has-risk {
-⋮----
-.safety-icon {
-⋮----
-.safety-text {
-⋮----
-.risk-item.high-risk {
-⋮----
-.risk-item.medium-risk {
-⋮----
-.risk-type {
-⋮----
-.risk-severity {
-⋮----
-.risk-item.high-risk .risk-severity {
-⋮----
-.risk-item.medium-risk .risk-severity {
-⋮----
-.expand-btn {
-⋮----
-.expand-btn:hover {
-⋮----
-.truncated-text,
-⋮----
-.evidence-table td {
-⋮----
-.evidence-value-cell,
+::selection {
 </file>
 
 </files>

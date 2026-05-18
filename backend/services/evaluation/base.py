@@ -28,25 +28,36 @@ class BaseEvaluator(ABC):
     ) -> Dict[str, Any]:
         prompt = self.llm_service.prompt_manager.render(template_name, **kwargs)
         
+        logger.info(f"评估器LLM调用 - 模板: {template_name}")
+        logger.debug(f"评估器LLM调用 - prompt长度: {len(prompt)} 字符")
+        
         response = self.llm_service.generate(
             prompt=prompt,
             temperature=temperature
         )
         
+        logger.info(f"评估器LLM响应长度: {len(response.text)} 字符")
+        logger.debug(f"评估器LLM响应内容:\n{response.text}")
+        
         return self._parse_json_response(response.text)
         
     def _parse_json_response(self, text: str) -> Dict[str, Any]:
+        logger.info(f"开始解析评估器JSON响应, 响应长度: {len(text)} 字符")
         try:
             json_start = text.find("{")
             json_end = text.rfind("}") + 1
             if json_start != -1 and json_end > json_start:
                 json_str = text[json_start:json_end]
-                return json.loads(json_str)
+                result = json.loads(json_str)
+                logger.info(f"评估器JSON解析成功")
+                return result
             else:
+                logger.error(f"评估器响应中未找到JSON对象")
+                logger.error(f"响应内容:\n{text}")
                 raise ValueError("No JSON found in response")
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON: {e}")
-            logger.error(f"Response text: {text[:500]}")
+            logger.error(f"评估器JSON解析失败: {e}")
+            logger.error(f"响应内容:\n{text}")
             raise ValueError(f"Failed to parse JSON response: {e}")
             
     def _validate_result(

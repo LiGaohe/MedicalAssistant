@@ -37,10 +37,12 @@ class TerminologyService:
         self.cache_service: Optional[TermCache] = None
         self.chinese_term_client: Optional[ChineseTermClient] = None
         
-        if settings.UMLS_ENABLED and settings.UMLS_API_KEY:
+        if settings.UMLS_ENABLED and settings.UMLS_API_KEY and language != "zh":
             self._init_umls()
+        elif language == "zh":
+            logger.info("Chinese mode: UMLS disabled, using local ICD-11 and Chinese term libraries")
         
-        if not self.translation_service and settings.TRANSLATION_ENABLED:
+        if not self.translation_service and settings.TRANSLATION_ENABLED and language != "zh":
             self._init_translation()
         
         if settings.CHINESE_TERM_ENABLED:
@@ -224,19 +226,126 @@ Note: Only output JSON, no other content."""
 
             response = self.llm_service.generate(prompt, max_tokens=8000)
             
-            json_match = re.search(r'\{[\s\S]*\}', response.text)
+            logger.info(f"LLM识别口语化术语响应长度: {len(response.text)} 字符")
+            logger.debug(f"LLM识别口语化术语响应内容:\n{response.text}")
+            
+            if response.thinking_content:
+                logger.info(f"LLM返回thinking内容, 长度: {len(response.thinking_content)} 字符")
+            
+            text = response.text.strip()
+            text = self._strip_whitespace_padding(text)
+            
+            json_match = re.search(r'\{[\s\S]*\}', text)
             if json_match:
-                result = json.loads(json_match.group())
-                terms = result.get("terms", [])
-                logger.info(f"Identified {len(terms)} colloquial terms from text")
-                return terms
+                json_str = json_match.group()
+                try:
+                    result = json.loads(json_str)
+                    terms = result.get("terms", [])
+                    logger.info(f"Identified {len(terms)} colloquial terms from text")
+                    return terms
+                except json.JSONDecodeError as e:
+                    logger.warning(f"JSON解析失败，尝试修复: {e}")
+                    fixed = self._try_fix_json(json_str)
+                    if fixed is not None:
+                        terms = fixed.get("terms", [])
+                        logger.info(f"JSON修复成功，识别到 {len(terms)} 个术语")
+                        return terms
+                    logger.error(f"JSON修复也失败，原始响应内容:\n{response.text[:500]}")
+                    return []
             else:
                 logger.warning("No valid JSON found in LLM response")
+                logger.debug(f"完整响应内容:\n{response.text[:500]}")
                 return []
                 
         except Exception as e:
             logger.error(f"Failed to identify colloquial terms: {e}")
             return []
+    
+    def _strip_whitespace_padding(self, text: str) -> str:
+        if not text:
+            return text
+        
+        original_len = len(text)
+        text = re.sub(r'[\t ]+', ' ', text)
+        text = re.sub(r'\n\s*\n', '\n', text)
+        text = text.strip()
+        
+        if len(text) < original_len:
+            logger.debug(f"去除空白填充: {original_len} -> {len(text)} 字符")
+        
+        return text
+    
+    def _try_fix_json(self, json_str: str) -> Optional[Dict[str, Any]]:
+        if not json_str:
+            return None
+        
+        fixed = json_str
+        
+        fixed = re.sub(r',\s*}', '}', fixed)
+        fixed = re.sub(r',\s*]', ']', fixed)
+        fixed = re.sub(r':\s*,', ': null,', fixed)
+        fixed = re.sub(r':\s*}', ': null}', fixed)
+        fixed = re.sub(r',\s*,', ',', fixed)
+        
+        try:
+            return json.loads(fixed)
+        except json.JSONDecodeError:
+            pass
+        
+        brace_count = fixed.count('{') - fixed.count('}')
+        bracket_count = fixed.count('[') - fixed.count(']')
+        
+        if brace_count > 0:
+            fixed += '}' * brace_count
+        if bracket_count > 0:
+            fixed += ']' * bracket_count
+        
+        try:
+            return json.loads(fixed)
+        except json.JSONDecodeError:
+            pass
+        
+        try:
+            last_valid_brace = fixed.rfind('}')
+            if last_valid_brace > 0:
+                for end_pos in range(last_valid_brace, 0, -1):
+                    if fixed[end_pos] == '}':
+                        candidate = fixed[:end_pos + 1]
+                        brace_c = candidate.count('{') - candidate.count('}')
+                        bracket_c = candidate.count('[') - candidate.count(']')
+                        if brace_c > 0:
+                            candidate += '}' * brace_c
+                        if bracket_c > 0:
+                            candidate += ']' * bracket_c
+                        try:
+                            return json.loads(candidate)
+                        except json.JSONDecodeError:
+                            continue
+        except Exception:
+            pass
+        
+        try:
+            last_complete_item = json_str.rfind('},')
+            if last_complete_item > 0:
+                candidate = json_str[:last_complete_item + 1] + ']}'
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    pass
+                
+                candidate = json_str[:last_complete_item + 1] + ']'
+                brace_c = candidate.count('{') - candidate.count('}')
+                if brace_c > 0:
+                    candidate += '}' * brace_c
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    pass
+        except Exception:
+            pass
+        
+        logger.debug("所有JSON修复尝试均失败")
+        return None
     
     def normalize_term(
         self, 
@@ -416,13 +525,21 @@ Note: Only output JSON, no other content."""
             
             confidence = min(0.95, 0.6 + best_candidate.score * 0.35)
             
-            if translated_term:
-                reasoning = f"UMLS匹配: {term}(翻译:{translated_term}) -> {best_candidate.term} (CUI: {best_candidate.cui})"
+            if self.language == "zh":
+                normalized_term = term
+                if translated_term:
+                    reasoning = f"UMLS匹配(保留中文): {term}(翻译:{translated_term}) -> CUI: {best_candidate.cui}, 英文: {best_candidate.term}"
+                else:
+                    reasoning = f"UMLS匹配(保留中文): {term} -> CUI: {best_candidate.cui}, 英文: {best_candidate.term}"
             else:
-                reasoning = f"UMLS匹配: {term} -> {best_candidate.term} (CUI: {best_candidate.cui})"
+                normalized_term = best_candidate.term
+                if translated_term:
+                    reasoning = f"UMLS匹配: {term}(翻译:{translated_term}) -> {best_candidate.term} (CUI: {best_candidate.cui})"
+                else:
+                    reasoning = f"UMLS匹配: {term} -> {best_candidate.term} (CUI: {best_candidate.cui})"
             
             return (
-                best_candidate.term,
+                normalized_term,
                 confidence,
                 reasoning,
                 code,
@@ -598,18 +715,34 @@ Please output in the following JSON format:
 
             response = self.llm_service.generate(prompt, max_tokens=1000)
             
-            json_match = re.search(r'\{[\s\S]*\}', response.text)
+            text = response.text.strip()
+            text = self._strip_whitespace_padding(text)
+            
+            json_match = re.search(r'\{[\s\S]*\}', text)
             if json_match:
-                result = json.loads(json_match.group())
-                normalized_term = result.get("normalized_term", term)
-                reasoning = result.get("reasoning", "")
+                json_str = json_match.group()
+                try:
+                    result = json.loads(json_str)
+                except json.JSONDecodeError:
+                    result = self._try_fix_json(json_str)
                 
-                if normalized_term != term:
-                    confidence = 0.5
-                else:
-                    confidence = 0.3
-                
-                return (normalized_term, confidence, reasoning)
+                if result is not None:
+                    normalized_term = result.get("normalized_term", term)
+                    if isinstance(normalized_term, dict):
+                        logger.warning(f"LLM返回normalized_term为dict类型: {normalized_term}, 尝试提取字符串值")
+                        normalized_term = normalized_term.get("value") or normalized_term.get("term") or str(normalized_term)
+                    if not isinstance(normalized_term, str):
+                        normalized_term = str(normalized_term)
+                    reasoning = result.get("reasoning", "")
+                    if isinstance(reasoning, dict):
+                        reasoning = str(reasoning)
+                    
+                    if normalized_term != term:
+                        confidence = 0.5
+                    else:
+                        confidence = 0.3
+                    
+                    return (normalized_term, confidence, reasoning)
             return None
             
         except Exception as e:

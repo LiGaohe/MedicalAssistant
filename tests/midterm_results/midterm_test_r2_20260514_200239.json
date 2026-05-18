@@ -1,0 +1,644 @@
+{
+  "llm_post_correction": {
+    "test": "llm_post_correction",
+    "summary": {
+      "total_expected": 5,
+      "total_corrected": 5,
+      "accuracy": 1.0
+    },
+    "details": [
+      {
+        "name": "日常同音字",
+        "expected": [
+          "闲的食物→咸的食物"
+        ],
+        "corrections": [
+          {
+            "original": "闲",
+            "corrected": "咸",
+            "type": "同音字",
+            "reason": "闲与咸同音，但医嘱中常建议少吃咸的食物（高盐食物），而非闲的食物。"
+          }
+        ],
+        "matched": 1,
+        "total": 1
+      },
+      {
+        "name": "医学术语拼音错误",
+        "expected": [
+          "搞血压→高血压",
+          "阿莫希林→阿莫西林"
+        ],
+        "corrections": [
+          {
+            "original": "搞血压",
+            "corrected": "高血压",
+            "type": "同音字",
+            "reason": "“搞”与“高”同音，但“高血压”是正确医学术语。"
+          },
+          {
+            "original": "阿莫希林",
+            "corrected": "阿莫西林",
+            "type": "药物名",
+            "reason": "“希”与“西”同音，但正确药物名称为“阿莫西林”。"
+          }
+        ],
+        "matched": 2,
+        "total": 2
+      },
+      {
+        "name": "症状同音字",
+        "expected": [
+          "刻嗽→咳嗽",
+          "发骚→发烧"
+        ],
+        "corrections": [
+          {
+            "original": "刻嗽",
+            "corrected": "咳嗽",
+            "type": "同音字",
+            "reason": "“刻嗽”是“咳嗽”的同音字错误，咳嗽是常见症状术语。"
+          },
+          {
+            "original": "发骚",
+            "corrected": "发烧",
+            "type": "同音字",
+            "reason": "“发骚”是“发烧”的同音字错误，发烧是医学术语。"
+          }
+        ],
+        "matched": 2,
+        "total": 2
+      }
+    ]
+  },
+  "terminology_normalization": {
+    "test": "terminology_normalization",
+    "summary": {
+      "total_tested": 15,
+      "umls_hit": 0,
+      "llm_fallback": 0,
+      "no_match": 0,
+      "umls_rate": 0,
+      "semantic_match": 5,
+      "semantic_match_rate": 0.3333333333333333
+    },
+    "details": [
+      {
+        "colloquial": "拉肚子",
+        "expected": [
+          "腹泻"
+        ],
+        "normalized": "腹泻",
+        "source": "LLM",
+        "cui": "",
+        "confidence": 0.5,
+        "is_match": true
+      },
+      {
+        "colloquial": "肚子疼",
+        "expected": [
+          "腹痛",
+          "腹泻"
+        ],
+        "normalized": "腹痛",
+        "source": "LLM",
+        "cui": "",
+        "confidence": 0.5,
+        "is_match": true
+      },
+      {
+        "colloquial": "肚子痛",
+        "expected": [
+          "腹痛"
+        ],
+        "normalized": "Does your child complain of an upset stomach at night:Find:Pt:^Patient:Ord:PhenX",
+        "source": "UMLS",
+        "cui": "C3173270",
+        "confidence": 0.6,
+        "is_match": false
+      },
+      {
+        "colloquial": "头疼",
+        "expected": [
+          "头痛"
+        ],
+        "normalized": "Which statement best describes the pain of your severe headaches:Find:Pt:^Patient:Ord:PhenX",
+        "source": "UMLS",
+        "cui": "C3174220",
+        "confidence": 0.6,
+        "is_match": false
+      },
+      {
+        "colloquial": "头痛",
+        "expected": [
+          "头痛"
+        ],
+        "normalized": "Do you consider your severe headaches to be migraines:Find:Pt:^Patient:Ord:PhenX",
+        "source": "UMLS",
+        "cui": "C3175733",
+        "confidence": 0.6,
+        "is_match": false
+      },
+      {
+        "colloquial": "发高烧",
+        "expected": [
+          "发热",
+          "高热"
+        ],
+        "normalized": "高热",
+        "source": "LLM",
+        "cui": "",
+        "confidence": 0.5,
+        "is_match": true
+      },
+      {
+        "colloquial": "发低烧",
+        "expected": [
+          "发热",
+          "低热"
+        ],
+        "normalized": "低热",
+        "source": "LLM",
+        "cui": "",
+        "confidence": 0.5,
+        "is_match": true
+      },
+      {
+        "colloquial": "流鼻涕",
+        "expected": [
+          "鼻流涕",
+          "感冒"
+        ],
+        "normalized": "Have you ever had a problem with sneezing, or a runny or blocked nose, when you did not have a cold or the flu:Find:Pt:^Patient:Ord:PhenX",
+        "source": "UMLS",
+        "cui": "C3173781",
+        "confidence": 0.6,
+        "is_match": false
+      },
+      {
+        "colloquial": "鼻涕",
+        "expected": [
+          "鼻流涕"
+        ],
+        "normalized": "Have you ever had a problem with sneezing, or a runny or blocked nose, when you did not have a cold or the flu:Find:Pt:^Patient:Ord:PhenX",
+        "source": "UMLS",
+        "cui": "C3173781",
+        "confidence": 0.6,
+        "is_match": false
+      },
+      {
+        "colloquial": "咳嗽不止",
+        "expected": [
+          "咳嗽"
+        ],
+        "normalized": "Coughing",
+        "source": "UMLS",
+        "cui": "C0010200",
+        "confidence": 0.6,
+        "is_match": false
+      },
+      {
+        "colloquial": "干咳",
+        "expected": [
+          "干咳",
+          "咳嗽"
+        ],
+        "normalized": "In the last 12Mo, have you had a dry cough at night, apart from a cough associated with a cold or chest infection:Find:12Mo:^Patient:Ord:PhenX",
+        "source": "UMLS",
+        "cui": "C3173779",
+        "confidence": 0.6,
+        "is_match": false
+      },
+      {
+        "colloquial": "咳痰",
+        "expected": [
+          "咳痰",
+          "咳嗽"
+        ],
+        "normalized": "Do you usually bring up phlegm from your chest:Find:Pt:^Patient:Ord:PhenX",
+        "source": "UMLS",
+        "cui": "C3173639",
+        "confidence": 0.6,
+        "is_match": false
+      },
+      {
+        "colloquial": "嗓子疼",
+        "expected": [
+          "咽喉炎",
+          "咽喉不适"
+        ],
+        "normalized": "咽痛",
+        "source": "LLM",
+        "cui": "",
+        "confidence": 0.5,
+        "is_match": false
+      },
+      {
+        "colloquial": "嗓子沙哑",
+        "expected": [
+          "嗓子沙哑",
+          "声音嘶哑"
+        ],
+        "normalized": "声音嘶哑",
+        "source": "LLM",
+        "cui": "",
+        "confidence": 0.5,
+        "is_match": true
+      },
+      {
+        "colloquial": "声音哑",
+        "expected": [
+          "声音嘶哑"
+        ],
+        "normalized": "声嘶",
+        "source": "LLM",
+        "cui": "",
+        "confidence": 0.5,
+        "is_match": false
+      }
+    ]
+  },
+  "e2e_vs_multistage": {
+    "test": "e2e_vs_multistage",
+    "comparison": [
+      {
+        "field": "chief_complaint",
+        "ground_truth": "头疼3天",
+        "e2e_value": "头疼三天，早上明显",
+        "e2e_match": "partial",
+        "multi_value": "{'value': '', 'evidence_traces': []}",
+        "multi_match": "partial"
+      },
+      {
+        "field": "history_present_illness",
+        "ground_truth": "头疼3天，晨起加重，伴恶心，无呕吐",
+        "e2e_value": "患者三天前出现头疼，以晨起时为著，伴恶心，无呕吐",
+        "e2e_match": "partial",
+        "multi_value": "{'value': '', 'evidence_traces': []}",
+        "multi_match": "partial"
+      },
+      {
+        "field": "physical_examination",
+        "ground_truth": "血压145/95mmHg",
+        "e2e_value": "血压145/95mmHg",
+        "e2e_match": "match",
+        "multi_value": "{'value': '', 'evidence_traces': []}",
+        "multi_match": "partial"
+      },
+      {
+        "field": "diagnosis",
+        "ground_truth": "高血压",
+        "e2e_value": "高血压（考虑高血压引起头疼）",
+        "e2e_match": "match",
+        "multi_value": "{'value': '', 'evidence_traces': []}",
+        "multi_match": "partial"
+      },
+      {
+        "field": "treatment",
+        "ground_truth": "降压药，每日一次",
+        "e2e_value": "降压药，每日一次，晨起服用",
+        "e2e_match": "match",
+        "multi_value": "{'value': '', 'evidence_traces': []}",
+        "multi_match": "partial"
+      },
+      {
+        "field": "advice",
+        "ground_truth": "低盐饮食，注意休息，一周后复查",
+        "e2e_value": "低盐饮食，注意休息；一周后复查；若头疼加重及时就诊",
+        "e2e_match": "partial",
+        "multi_value": "{'value': '', 'evidence_traces': []}",
+        "multi_match": "partial"
+      }
+    ],
+    "e2e_time": 3.7328104972839355,
+    "multi_time": 9.038758993148804,
+    "e2e_match_count": 3,
+    "multi_match_count": 0,
+    "e2e_result": {
+      "subjective": {
+        "chief_complaint": "头疼三天，早上明显",
+        "history_present_illness": "患者三天前出现头疼，以晨起时为著，伴恶心，无呕吐",
+        "past_history": ""
+      },
+      "objective": {
+        "physical_examination": "血压145/95mmHg",
+        "auxiliary_examination": ""
+      },
+      "assessment": {
+        "diagnosis": "高血压（考虑高血压引起头疼）"
+      },
+      "plan": {
+        "treatment": "降压药，每日一次，晨起服用",
+        "advice": "低盐饮食，注意休息；一周后复查；若头疼加重及时就诊"
+      }
+    },
+    "multi_result": {
+      "subjective": {
+        "text": "",
+        "chief_complaint": {
+          "value": "",
+          "evidence_traces": []
+        },
+        "history_present_illness": {
+          "value": "",
+          "evidence_traces": []
+        },
+        "past_history": {
+          "value": "",
+          "evidence_traces": []
+        }
+      },
+      "objective": {
+        "text": "",
+        "physical_examination": {
+          "value": "",
+          "evidence_traces": []
+        },
+        "auxiliary_examination": {
+          "value": "",
+          "evidence_traces": []
+        }
+      },
+      "assessment": {
+        "text": "诊断：待定",
+        "diagnosis": {
+          "value": "",
+          "evidence_traces": []
+        }
+      },
+      "plan": {
+        "text": "",
+        "treatment": {
+          "value": "",
+          "evidence_traces": []
+        },
+        "advice": {
+          "value": "",
+          "evidence_traces": []
+        }
+      }
+    }
+  },
+  "ablation": {
+    "test": "ablation",
+    "term_comparison": [
+      {
+        "colloquial": "拉肚子",
+        "standard": "腹泻",
+        "e2e_uses_colloquial": false,
+        "e2e_uses_standard": true,
+        "multi_uses_colloquial": false,
+        "multi_uses_standard": false
+      },
+      {
+        "colloquial": "肚子疼",
+        "standard": "腹痛",
+        "e2e_uses_colloquial": false,
+        "e2e_uses_standard": true,
+        "multi_uses_colloquial": false,
+        "multi_uses_standard": false
+      },
+      {
+        "colloquial": "发低烧",
+        "standard": "低热",
+        "e2e_uses_colloquial": false,
+        "e2e_uses_standard": true,
+        "multi_uses_colloquial": false,
+        "multi_uses_standard": false
+      },
+      {
+        "colloquial": "恶心想吐",
+        "standard": "恶心、呕吐",
+        "e2e_uses_colloquial": false,
+        "e2e_uses_standard": false,
+        "multi_uses_colloquial": false,
+        "multi_uses_standard": false
+      }
+    ],
+    "e2e_standard_count": 3,
+    "multi_standard_count": 0,
+    "total_colloquial": 4,
+    "e2e_result": {
+      "subjective": {
+        "chief_complaint": "腹泻伴腹痛2天",
+        "history_present_illness": "患者2天前出现腹泻，伴有腹痛，低热（体温37.8℃），恶心呕吐，无寒战、里急后重等。",
+        "past_history": ""
+      },
+      "objective": {
+        "physical_examination": "体温37.8℃，腹部有压痛，无反跳痛及肌紧张。",
+        "auxiliary_examination": ""
+      },
+      "assessment": {
+        "diagnosis": "急性胃肠炎"
+      },
+      "plan": {
+        "treatment": "蒙脱石散、左氧氟沙星",
+        "advice": "多喝水，少食油腻食物，注意休息。"
+      }
+    },
+    "multi_result": {
+      "subjective": {
+        "text": "",
+        "chief_complaint": {
+          "value": "",
+          "evidence_traces": []
+        },
+        "history_present_illness": {
+          "value": "",
+          "evidence_traces": []
+        },
+        "past_history": {
+          "value": "",
+          "evidence_traces": []
+        }
+      },
+      "objective": {
+        "text": "",
+        "physical_examination": {
+          "value": "",
+          "evidence_traces": []
+        },
+        "auxiliary_examination": {
+          "value": "",
+          "evidence_traces": []
+        }
+      },
+      "assessment": {
+        "text": "诊断：待定",
+        "diagnosis": {
+          "value": "",
+          "evidence_traces": []
+        }
+      },
+      "plan": {
+        "text": "",
+        "treatment": {
+          "value": "",
+          "evidence_traces": []
+        },
+        "advice": {
+          "value": "",
+          "evidence_traces": []
+        }
+      }
+    },
+    "normalized_terms": []
+  },
+  "evaluation_pipeline": {
+    "test": "evaluation_pipeline",
+    "results": [
+      {
+        "record_id": 1,
+        "visit_id": "1df5213e-a7a5-4920-bfed-c3e83be108b4",
+        "overall_score": 0.60625,
+        "consistency_support_rate": 1.0,
+        "consistency_score": 1.0,
+        "completeness_recall_rate": 0.6875,
+        "quality_score": 10,
+        "safety_has_high_risk": true
+      },
+      {
+        "record_id": 2,
+        "visit_id": "66b589fe-d981-423f-8f13-bebed8432a58",
+        "overall_score": 0.7937500000000001,
+        "consistency_support_rate": 1.0,
+        "consistency_score": 1.0,
+        "completeness_recall_rate": 0.8125,
+        "quality_score": 10,
+        "safety_has_high_risk": false
+      }
+    ]
+  },
+  "existing_emr_quality": {
+    "test": "existing_emr_quality",
+    "field_stats": {
+      "chief_complaint": {
+        "filled": 13,
+        "total": 14
+      },
+      "history_present_illness": {
+        "filled": 14,
+        "total": 14
+      },
+      "past_history": {
+        "filled": 5,
+        "total": 14
+      },
+      "physical_examination": {
+        "filled": 14,
+        "total": 14
+      },
+      "auxiliary_examination": {
+        "filled": 7,
+        "total": 14
+      },
+      "diagnosis": {
+        "filled": 12,
+        "total": 14
+      },
+      "treatment": {
+        "filled": 14,
+        "total": 14
+      },
+      "advice": {
+        "filled": 14,
+        "total": 14
+      }
+    },
+    "term_stats": {
+      "total_terms": 156,
+      "umls_sourced": 0,
+      "llm_sourced": 0,
+      "with_cui": 116
+    },
+    "evidence_stats": {
+      "total_evidence": 138
+    }
+  },
+  "speaker_role_evolution": {
+    "test": "speaker_role_evolution",
+    "rule_accuracy": 0.7,
+    "rule_details": [
+      {
+        "text": "请问哪里不舒服？",
+        "expected": "doctor",
+        "predicted": "doctor",
+        "doc_score": 2,
+        "pat_score": 0,
+        "correct": true
+      },
+      {
+        "text": "我这几天一直头疼",
+        "expected": "patient",
+        "predicted": "patient",
+        "doc_score": 0,
+        "pat_score": 1,
+        "correct": true
+      },
+      {
+        "text": "头疼持续多长时间了？",
+        "expected": "doctor",
+        "predicted": "doctor",
+        "doc_score": 1,
+        "pat_score": 0,
+        "correct": true
+      },
+      {
+        "text": "大概三天了",
+        "expected": "patient",
+        "predicted": "patient",
+        "doc_score": 0,
+        "pat_score": 1,
+        "correct": true
+      },
+      {
+        "text": "我给您量一下血压",
+        "expected": "doctor",
+        "predicted": "unknown",
+        "doc_score": 0,
+        "pat_score": 0,
+        "correct": false
+      },
+      {
+        "text": "血压高会引起头疼吗？",
+        "expected": "patient",
+        "predicted": "doctor",
+        "doc_score": 2,
+        "pat_score": 0,
+        "correct": false
+      },
+      {
+        "text": "考虑是高血压引起的头疼",
+        "expected": "doctor",
+        "predicted": "unknown",
+        "doc_score": 0,
+        "pat_score": 0,
+        "correct": false
+      },
+      {
+        "text": "好的，谢谢医生",
+        "expected": "patient",
+        "predicted": "patient",
+        "doc_score": 0,
+        "pat_score": 1,
+        "correct": true
+      },
+      {
+        "text": "注意低盐饮食，一周后复查",
+        "expected": "doctor",
+        "predicted": "doctor",
+        "doc_score": 1,
+        "pat_score": 0,
+        "correct": true
+      },
+      {
+        "text": "我有时候会恶心",
+        "expected": "patient",
+        "predicted": "patient",
+        "doc_score": 0,
+        "pat_score": 2,
+        "correct": true
+      }
+    ]
+  }
+}

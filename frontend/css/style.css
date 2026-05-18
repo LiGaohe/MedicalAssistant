@@ -1208,6 +1208,16 @@ h3 {
     box-shadow: 0 4px 12px rgba(255, 107, 107, 0.2);
 }
 
+.btn-small.btn-edit {
+    background: #43A047;
+    box-shadow: 0 2px 8px rgba(67, 160, 71, 0.15);
+}
+
+.btn-small.btn-edit:hover {
+    background: #388E3C;
+    box-shadow: 0 4px 12px rgba(67, 160, 71, 0.2);
+}
+
 .empty {
     text-align: center;
     padding: 40px 20px;

@@ -1,5 +1,264 @@
 # 完成状态记录
 
+## 2026-05-18 修复术语规范化replace()类型错误
+
+### 问题
+
+`TypeError: replace() argument 2 must be str, not dict`，发生在术语规范化阶段替换文本时。
+
+### 根因
+
+DeepSeek思考模式下，LLM返回的JSON中`normalized_term`字段值可能为dict而非string（如`{"value": "头痛"}`而非`"头痛"`），传播到`normalized_text.replace(original, normalized)`时触发类型错误。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| _normalize_by_llm类型防护 | ✅ 完成 | 检测normalized_term为dict时尝试提取value/term字段，否则转str |
+| _normalize_terms_stage类型防护 | ✅ 完成 | 替换前检查normalized类型，dict跳过替换，非str转str |
+| 英文pipeline同步修复 | ✅ 完成 | llm_pipeline_service_en.py同样添加类型防护 |
+
+### 修改文件
+
+1. **backend/services/terminology_service.py**
+   - `_normalize_by_llm()`：检测`normalized_term`为dict时尝试提取`value`/`term`字段，否则`str()`转换
+   - `reasoning`字段同样添加dict→str防护
+
+2. **backend/services/llm_pipeline_service.py**
+   - `_normalize_terms_stage()`：替换前检查`normalized`类型，dict跳过替换并记录警告，非str转str
+
+3. **backend/services/llm_pipeline_service_en.py**
+   - 同步添加相同的类型防护逻辑
+
+---
+
+## 2026-05-18 修复DeepSeek思考模式导致术语规范化失败
+
+### 问题
+
+DeepSeek启用high深度思考模式后，术语规范化阶段输出"未识别到任何医学术语"。
+
+### 根因
+
+| 原因 | 说明 |
+|------|------|
+| reasoning_tokens计入completion_tokens | DeepSeek思考模式下，`reasoning_tokens`（2649）计入`completion_tokens`（10651），实际可用于content的token仅约8000，达到`max_tokens=8000`上限即被截断 |
+| finish_reason: length | 输出被截断，JSON结构不完整 |
+| 空白填充异常 | 截断后content被填充大量`\t`和空白字符（54367字符），导致JSON解析失败 |
+| JSON解析不够健壮 | `terminology_service.py`仅使用简单`re.search`解析JSON，无修复能力 |
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 思考模式自动增加max_tokens | ✅ 完成 | 启用思考模式时max_tokens×3，补偿reasoning_tokens消耗 |
+| 思考模式增加HTTP超时 | ✅ 完成 | 思考模式超时从120s增加到300s |
+| 截断检测与日志 | ✅ 完成 | 检测finish_reason=length和空白填充异常，输出警告日志 |
+| 空白填充清理 | ✅ 完成 | 新增`_strip_whitespace_padding`方法，清理响应中的空白填充 |
+| JSON修复能力 | ✅ 完成 | 新增`_try_fix_json`方法，处理截断JSON、末尾多余逗号、缺失括号等 |
+| identify_colloquial_terms健壮化 | ✅ 完成 | 解析失败时尝试修复，而非直接返回空列表 |
+| _normalize_by_llm健壮化 | ✅ 完成 | 同样增加空白清理和JSON修复 |
+
+### 修改文件
+
+1. **backend/services/llm/openai_compatible_adapter.py**
+   - 启用思考模式时自动将`max_tokens`乘以3，补偿reasoning_tokens消耗
+   - 思考模式HTTP超时从120s增加到300s
+   - 新增`finish_reason=length`截断检测和日志警告
+   - 新增空白填充异常检测和日志警告
+
+2. **backend/services/terminology_service.py**
+   - 新增`_strip_whitespace_padding()`方法：清理响应中的大量空白填充字符
+   - 新增`_try_fix_json()`方法：修复截断JSON、末尾多余逗号、缺失闭合括号等
+   - `identify_colloquial_terms()`：解析前先清理空白填充，解析失败时尝试JSON修复
+   - `_normalize_by_llm()`：同样增加空白清理和JSON修复逻辑
+   - 记录thinking_content长度日志
+
+### 修复策略
+
+**预防层（解决根因）**：
+
+| 问题 | 修复 |
+|------|------|
+| max_tokens不足 | 思考模式自动×3，8000→24000 |
+| 超时不够 | 思考模式120s→300s |
+
+**容错层（处理截断后的恢复）**：
+
+| 问题 | 修复 |
+|------|------|
+| 空白填充 | `_strip_whitespace_padding`清理 |
+| JSON截断 | `_try_fix_json`丢弃未完成项，保留已完成项 |
+| 缺失括号 | 自动补全`}`和`]` |
+
+---
+
+## 2026-05-18 前端大模型配置编辑功能
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 后端ConfigUpdate模型扩展 | ✅ 完成 | 支持全字段更新（config_name/provider/model_name等） |
+| 后端update_config端点扩展 | ✅ 完成 | 支持全字段更新，含配置名称唯一性校验、API Key空值保护 |
+| 前端编辑按钮 | ✅ 完成 | 配置列表中每个配置项新增绿色"编辑"按钮 |
+| 前端编辑模式 | ✅ 完成 | 点击编辑后表单填充已有数据，提交按钮变为"更新配置" |
+| 前端取消编辑 | ✅ 完成 | 编辑模式下显示"取消编辑"按钮，退出编辑模式恢复表单 |
+| 编辑按钮样式 | ✅ 完成 | 绿色主题编辑按钮（btn-edit），与蓝色启用/红色删除区分 |
+| API Key安全处理 | ✅ 完成 | 编辑时不回显密钥，未修改时不覆盖原有密钥 |
+
+### 修改文件
+
+1. **backend/api/llm.py**
+   - `ConfigUpdate` 模型新增 `config_name`、`provider`、`model_name`、`api_key`、`api_endpoint`、`max_tokens`、`temperature` 字段
+   - `update_config` 端点支持全字段更新
+   - 更新时校验 `config_name` 唯一性（排除自身）
+   - `api_key` 为空字符串时不覆盖原有密钥
+
+2. **frontend/config.html**
+   - 表单新增隐藏字段 `editingConfigId` 存储正在编辑的配置ID
+   - 提交按钮添加 `id="submitBtn"`，文本在新建/编辑模式间切换
+   - 新增"取消编辑"按钮，仅在编辑模式下显示
+
+3. **frontend/js/config.js**
+   - 新增 `enterEditMode(config)` 函数：填充表单数据、切换UI状态、滚动到表单
+   - 新增 `exitEditMode()` 函数：重置表单、恢复新建模式
+   - 新增 `editConfig(configId)` 全局函数：加载配置数据并进入编辑模式
+   - 表单提交逻辑根据 `editingConfigId` 判断走 POST（新建）或 PUT（更新）
+   - 编辑模式下 API Key 为空时不发送该字段，避免覆盖原有密钥
+   - 删除配置时若正在编辑该配置则自动退出编辑模式
+
+4. **frontend/css/style.css**
+   - 新增 `.btn-small.btn-edit` 绿色编辑按钮样式
+   - 新增 `.btn-small.btn-edit:hover` 悬浮样式
+
+### 交互流程
+
+| 操作 | 触发 | 行为 |
+|------|------|------|
+| 点击"编辑" | 配置列表中的编辑按钮 | 填充表单、切换为更新模式、滚动到表单 |
+| 点击"更新配置" | 编辑模式下的提交按钮 | PUT请求更新配置、退出编辑模式、刷新列表 |
+| 点击"取消编辑" | 编辑模式下的取消按钮 | 清空表单、恢复新建模式 |
+| 点击"保存配置" | 新建模式下的提交按钮 | POST请求创建配置、刷新列表 |
+| 删除正在编辑的配置 | 删除按钮 | 退出编辑模式、删除配置、刷新列表 |
+
+---
+
+## 2026-05-18 DeepSeek思考模式与JSON输出支持
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| LLMConfig模型扩展 | ✅ 完成 | 新增json_mode、thinking_enabled、thinking_effort字段 |
+| LLMRequest/LLMResponse扩展 | ✅ 完成 | 请求支持json_mode/thinking参数，响应支持thinking_content |
+| OpenAICompatibleAdapter扩展 | ✅ 完成 | payload中添加response_format和thinking参数构建 |
+| LLMService扩展 | ✅ 完成 | generate方法支持json_mode/thinking参数传递 |
+| API层扩展 | ✅ 完成 | ConfigCreate/ConfigUpdate/GenerateRequest支持新字段 |
+| 前端配置页面扩展 | ✅ 完成 | 新增JSON模式、思考模式、思考强度配置选项 |
+| 数据库自动迁移 | ✅ 完成 | 新增列自动添加到现有数据库 |
+| generate_json自动启用JSON模式 | ✅ 完成 | 调用generate_json时自动设置json_mode=True |
+
+### 修改文件
+
+1. **backend/models/llm_config.py**
+   - 新增 `json_mode` 列（Boolean，默认False）
+   - 新增 `thinking_enabled` 列（Boolean，默认False）
+   - 新增 `thinking_effort` 列（String，默认"high"）
+   - `to_dict()` 方法添加新字段输出
+
+2. **backend/services/llm/base.py**
+   - `LLMRequest` 新增 `json_mode`、`thinking_enabled`、`thinking_effort` 字段
+   - `LLMResponse` 新增 `thinking_content` 字段
+   - `LLMAdapter.__init__` 读取 `json_mode`、`thinking_enabled`、`thinking_effort` 配置
+
+3. **backend/services/llm/openai_compatible_adapter.py**
+   - `generate()` 方法构建payload时添加 `response_format` 参数（JSON模式）
+   - `generate()` 方法构建payload时添加 `thinking` 参数（思考模式）
+   - 响应解析提取 `reasoning_content` 或 `reasoning` 字段作为 `thinking_content`
+   - 新增日志输出json_mode和thinking_enabled状态
+
+4. **backend/services/llm/llm_service.py**
+   - `_create_adapter()` 传递 `json_mode`、`thinking_enabled`、`thinking_effort` 到适配器
+   - `generate()` 方法新增 `json_mode`、`thinking_enabled`、`thinking_effort` 参数
+   - `generate_json()` 调用时自动设置 `json_mode=True`
+
+5. **backend/api/llm.py**
+   - `GenerateRequest` 新增 `json_mode`、`thinking_enabled`、`thinking_effort` 字段
+   - `ConfigCreate` 新增 `json_mode`、`thinking_enabled`、`thinking_effort` 字段
+   - `ConfigUpdate` 新增 `json_mode`、`thinking_enabled`、`thinking_effort` 字段
+   - `generate_text` 端点传递新参数，响应中包含 `thinking_content`
+   - `create_config` 端点保存和更新新字段
+   - `update_config` 端点支持更新新字段
+
+6. **frontend/config.html**
+   - 服务商下拉框新增 `Sense-DeepSeek` 选项
+   - 新增JSON输出模式复选框
+   - 新增思考模式复选框
+   - 新增思考强度下拉框（高/低，仅在思考模式启用时显示）
+
+7. **frontend/js/config.js**
+   - 表单提交时包含 `json_mode`、`thinking_enabled`、`thinking_effort`
+   - 思考模式复选框联动控制思考强度下拉框显示
+   - 配置列表显示JSON模式和思考模式状态
+
+### 设计决策
+
+**参数传递优先级**：
+
+| 参数 | 请求级别 | 配置级别 | 优先级 |
+|------|---------|---------|--------|
+| json_mode | `request.json_mode` | `config.json_mode` | 请求级 > 配置级（OR逻辑） |
+| thinking_enabled | `request.thinking_enabled` | `config.thinking_enabled` | 请求级 > 配置级（OR逻辑） |
+| thinking_effort | `request.thinking_effort` | `config.thinking_effort` | 请求级优先，配置级兜底 |
+
+**DeepSeek API参数映射**：
+
+| 功能 | API参数 | 值 |
+|------|---------|-----|
+| JSON输出 | `response_format` | `{"type": "json_object"}` |
+| 思考模式 | `thinking` | `{"type": "enabled", "reasoning_effort": "high"/"low"}` |
+| 思考内容 | 响应中 `reasoning_content` 或 `reasoning` 字段 | 字符串 |
+
+**向后兼容**：
+
+- 所有新字段均有默认值，不影响现有配置
+- `json_mode` 默认 `False`，不启用JSON输出
+- `thinking_enabled` 默认 `False`，不启用思考模式
+- `thinking_effort` 默认 `"high"`
+- 数据库自动迁移机制自动添加新列
+
+---
+
+## 2026-05-14 中期汇报大纲更新（基于实测结果）
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 修正术语规范化描述 | ✅ 完成 | 从"UMLS为主"修正为"本地ICD-11/症状库(ChineseTerm)为主"，UMLS降级 |
+| 修正纠错描述 | ✅ 完成 | 从"ASR纠错"修正为"LLM后处理纠错" |
+| 填入实测数据 | ✅ 完成 | 7项测试结果全部填入大纲 |
+| 更新方案演进过程 | ✅ 完成 | 增加UMLS中文覆盖差的实测证据，补充方案修正过程 |
+
+### 修改文件
+
+1. **docs/汇报/中期/修改后大纲.md**
+   - 创新点2从"UMLS术语规范化集成"改为"基于本地术语库的中文术语规范化"
+   - 3.1节"ASR纠错"改为"LLM后处理纠错"，注明纠错由LLM完成
+   - 3.2节方案演进增加UMLS中文覆盖差的实测证据
+   - 3.4节填入四层评估体系实测数据（2个样本）
+   - 4.2节增加"ASR纠错→LLM后处理纠错"的偏差说明
+   - 删除"需要紧急执行的测试清单"（测试已完成）
+
+### 关键修正
+
+1. **术语规范化核心来源**：ChineseTerm（本地ICD-11/症状库）命中率100%，UMLS对中文口语命中率0%
+2. **纠错归属**：纠错由LLM后处理完成，与ASR模型无关
+3. **质量评估**：QualityEvaluator使用LLM打分
+
+---
+
 ## 2026-05-07 病历生成流程性能优化
 
 ### 已完成
