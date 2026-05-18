@@ -333,16 +333,17 @@ class LLMPipelineService:
         time.sleep(self.STAGE_DELAY)
         
         emr_start = time.time()
+        dialogue_text = "\n".join(f"[{t.speaker}]: {t.text}" for t in turns)
         emr_result = self._generate_emr_stage(
             extraction_result,
             all_role_mappings,
             turns,
             visit_id,
-            save_evidence
+            save_evidence,
+            dialogue_text
         )
         logger.info(f"病历生成阶段完成，耗时: {time.time() - emr_start:.2f}秒")
         
-        dialogue_text = "\n".join(f"[{t.speaker}]: {t.text}" for t in turns)
         # self._run_evaluation(dialogue_text, emr_result)  # 暂时禁用评估，评估标准需要改进
         
         total_time = time.time() - start_time
@@ -1472,11 +1473,12 @@ class LLMPipelineService:
         role_mapping: Dict[str, str],
         turns: List[TranscriptTurn],
         visit_id: str,
-        save_evidence: bool = True
+        save_evidence: bool = True,
+        dialogue_text: str = ""
     ) -> Dict[str, Any]:
         logger.info(">>> 阶段4: 病历生成")
         
-        prompt = self._build_emr_generation_prompt(extraction_result, role_mapping)
+        prompt = self._build_emr_generation_prompt(extraction_result, role_mapping, dialogue_text)
         
         if self.debug_mode:
             response_text = self._debug_interact(
@@ -1501,11 +1503,15 @@ class LLMPipelineService:
     def _build_emr_generation_prompt(
         self,
         extraction_result: Dict[str, Any],
-        role_mapping: Dict[str, str]
+        role_mapping: Dict[str, str],
+        dialogue_text: str = ""
     ) -> str:
         extraction_json = json.dumps(extraction_result, ensure_ascii=False, indent=2)
         
-        return f"""你是一个医疗病历撰写专家。请根据以下抽取的结构化数据生成符合中国医疗病历书写规范的病历文本。
+        return f"""你是一个医疗病历撰写专家。请根据以下信息生成符合中国医疗病历书写规范的病历文本。
+
+## 原始对话
+{dialogue_text}
 
 ## 结构化数据
 {extraction_json}
@@ -1516,11 +1522,27 @@ class LLMPipelineService:
 3. 使用规范的医学术语
 4. 保持内容的准确性和完整性
 
+## 诊断推断要求（重要）
+诊断字段需要结合上下文进行综合推断，而不是简单复述对话中提到的诊断：
+
+1. **综合分析**：结合症状持续时间、症状特点、治疗效果、既往病史等信息进行综合判断
+2. **症状演变**：注意症状的发展过程，如"时好时坏"、"反复发作"等提示慢性或迁延性疾病
+3. **治疗反应**：关注患者对治疗的反应，如"未痊愈"、"效果不佳"等提示可能需要调整诊断
+4. **医生建议**：重视医生在对话中提到的后续检查建议和可能的诊断方向
+5. **证据溯源**：诊断必须基于原始对话中的证据，不能凭空编造
+
+**示例**：
+- 对话中患者提到"医生诊断为上呼吸道感染，但至今未痊愈，时好时坏"
+- 医生后续建议检查支原体，提到"支原体感染会导致反复呼吸道感染"
+- 患者提到"孩子一直特别容易咳嗽"
+- 综合判断：症状持续时间长、反复发作、医生建议检查支原体，更倾向于支气管炎
+
 ## 重要约束
 1. **严禁幻觉**：只能使用上述结构化数据中明确存在的内容，绝对不能添加、编造或推测任何原文中没有的信息
 2. **内容一致性**：生成的病历内容必须完全来自结构化数据，不能添加任何额外的描述、推断或假设
 3. **空字段处理**：如果某个字段在结构化数据中为空或不存在，则该字段保持为空，不要编造内容
 4. **忠实原文**：病历内容必须忠实于原始对话，不能添加患者未提及的症状、医生未做出的诊断等
+5. **诊断推断例外**：诊断字段可以根据上下文进行综合推断，但必须有充分的证据支持
 
 ## 输出格式
 请按以下JSON格式输出：
