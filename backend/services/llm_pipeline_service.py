@@ -2,15 +2,17 @@ import json
 import re
 import time
 import asyncio
+import uuid
 from typing import Dict, Any, Optional, List, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from sqlalchemy.orm import Session
-from ..models import TranscriptTurn, EMRRecord, EvidenceSpan, NormalizedTerm
+from ..models import TranscriptTurn, EMRRecord, EvidenceSpan, NormalizedTerm, AtomicFact
 from .llm.llm_service import LLMService
 from .llm.prompts import PromptManager
 from .evaluation_service import EMREvaluationService
 from .validation_service import ValidationService
 from .terminology_service import TerminologyService
+from .fact_service import FactService
 from ..config import settings
 from ..utils.logger import logger
 
@@ -292,8 +294,7 @@ class LLMPipelineService:
         logger.info(f"对话分为 {len(segments)} 个段落")
         
         all_role_mappings = {}
-        all_annotated_texts = []
-        all_evidence_traces = []
+        all_cleaned_turns = []
         
         segment_start = time.time()
         for i, segment in enumerate(segments):
@@ -303,46 +304,81 @@ class LLMPipelineService:
             
             if result.get("role_mapping"):
                 all_role_mappings.update(result["role_mapping"])
-            if result.get("annotated_text"):
-                all_annotated_texts.append(result["annotated_text"])
-            if result.get("evidence_traces"):
-                all_evidence_traces.extend(result["evidence_traces"])
+            if result.get("turns"):
+                all_cleaned_turns.extend(result["turns"])
         
         logger.info(f"段落处理完成，耗时: {time.time() - segment_start:.2f}秒")
         
-        combined_text = "\n\n".join(all_annotated_texts)
-        logger.info(f"合并后的标注文本长度: {len(combined_text)} 字符")
-        logger.info(f"收集到 {len(all_evidence_traces)} 条证据溯源记录")
+        combined_text = self._build_text_from_cleaned_turns(all_cleaned_turns, turns)
+        logger.info(f"合并后的清洗文本长度: {len(combined_text)} 字符")
+        logger.info(f"收集到 {len(all_cleaned_turns)} 个清洗后的turn")
+        
+        time.sleep(self.STAGE_DELAY)
+        
+        fact_start = time.time()
+        fact_result = self._fact_extraction_stage(all_cleaned_turns, all_role_mappings, visit_id)
+        logger.info(f"事实抽取阶段完成，共 {fact_result.get('fact_count', 0)} 条事实，耗时: {time.time() - fact_start:.2f}秒")
         
         time.sleep(self.STAGE_DELAY)
         
         normalize_start = time.time()
-        normalized_result = self._normalize_terms_stage(combined_text, all_role_mappings, visit_id, save_evidence)
+        fact_service = FactService(self.db)
+        fact_records = fact_service.get_facts_by_visit(visit_id)
+        logger.info(f"从数据库查询到 {len(fact_records)} 条原子事实用于阶段3规范化")
+        normalized_result = self._normalize_terms_stage(fact_records, all_role_mappings, visit_id, save_evidence)
         logger.info(f"术语规范化阶段完成，耗时: {time.time() - normalize_start:.2f}秒")
         
         time.sleep(self.STAGE_DELAY)
         
-        extract_start = time.time()
-        extraction_result = self._extract_fields_stage(
-            normalized_result.get("normalized_text", combined_text),
-            all_role_mappings,
-            all_evidence_traces
-        )
-        logger.info(f"字段抽取阶段完成，耗时: {time.time() - extract_start:.2f}秒")
+        # DEPRECATED: _extract_fields_stage() 已被阶段2(fact_extraction)替代
+        # 事实表本身已是结构化数据，不再需要从文本中抽取字段
+        # extraction_result 现在直接来自 fact_result
+        # extract_start = time.time()
+        # extraction_result = self._extract_fields_stage(
+        #     normalized_result.get("normalized_text", combined_text),
+        #     all_role_mappings,
+        #     []
+        # )
+        # logger.info(f"字段抽取阶段完成，耗时: {time.time() - extract_start:.2f}秒")
+        extraction_result = fact_result
         
         time.sleep(self.STAGE_DELAY)
         
         emr_start = time.time()
-        dialogue_text = "\n".join(f"[{t.speaker}]: {t.text}" for t in turns)
-        emr_result = self._generate_emr_stage(
-            extraction_result,
-            all_role_mappings,
-            turns,
-            visit_id,
-            save_evidence,
-            dialogue_text
-        )
-        logger.info(f"病历生成阶段完成，耗时: {time.time() - emr_start:.2f}秒")
+        so_result = self._generate_so_stage(fact_records, all_role_mappings)
+        ap_result = self._generate_ap_stage(so_result, fact_records, all_role_mappings)
+        emr_draft = {
+            "subjective": so_result.get("subjective", {}),
+            "objective": so_result.get("objective", {}),
+            "assessment": ap_result.get("assessment", {}),
+            "plan": ap_result.get("plan", {}),
+            "so_used_fact_ids": so_result.get("used_fact_ids", []),
+            "assessment_items": ap_result.get("assessment_items", []),
+            "plan_items": ap_result.get("plan_items", {})
+        }
+        so_used_fact_ids = emr_draft.get("so_used_fact_ids", [])
+        assessment_items = emr_draft.get("assessment_items", [])
+        plan_items = emr_draft.get("plan_items", {})
+        logger.info(f"病历生成阶段完成（SO/AP分节），S/O使用fact数={len(so_used_fact_ids)}, 评估项数={len(assessment_items)}, 耗时: {time.time() - emr_start:.2f}秒")
+        
+        time.sleep(self.STAGE_DELAY)
+        
+        verify_start = time.time()
+        fact_records = fact_service.get_facts_by_visit(visit_id)
+        verification_result = self._verification_stage(emr_draft, fact_records, all_role_mappings)
+        logger.info(f"核查修订阶段完成，耗时: {time.time() - verify_start:.2f}秒")
+        
+        emr_final = verification_result.get("soap_final", emr_draft)
+        emr_final["so_used_fact_ids"] = so_used_fact_ids
+        emr_final["assessment_items"] = assessment_items
+        emr_final["plan_items"] = plan_items
+        
+        emr_final = self._normalize_emr_format(emr_final)
+        emr_final = self._enrich_evidence_traces(emr_final, fact_records, turns)
+        if save_evidence and visit_id:
+            self._save_evidence_spans_from_emr(emr_final, visit_id)
+            self._save_emr_record(emr_final, visit_id)
+            logger.info(f"已保存最终病历记录及证据溯源到数据库: visit_id={visit_id}")
         
         # self._run_evaluation(dialogue_text, emr_result)  # 暂时禁用评估，评估标准需要改进
         
@@ -352,11 +388,14 @@ class LLMPipelineService:
         return {
             "status": "completed",
             "role_mapping": all_role_mappings,
-            "annotated_text": combined_text,
+            "cleaned_turns": all_cleaned_turns,
+            "combined_text": combined_text,
+            "fact_result": fact_result,
             "normalized_result": normalized_result,
             "extraction_result": extraction_result,
-            "emr_result": emr_result,
-            "evidence_traces": all_evidence_traces,
+            "emr_result": emr_final,
+            "emr_draft": emr_draft,
+            "verification_result": verification_result,
             "processing_time": total_time
         }
     
@@ -411,6 +450,56 @@ class LLMPipelineService:
             
         return segments
     
+    def _build_text_from_cleaned_turns(
+        self,
+        cleaned_turns: List[Dict[str, Any]],
+        original_turns: List[TranscriptTurn]
+    ) -> str:
+        """
+        从清洗后的turn JSON构建合并文本，供后续阶段使用。
+        
+        优先使用 corrected_text，没有修正时使用原始文本。
+        
+        Args:
+            cleaned_turns: 阶段1输出的清洗后turn列表
+            original_turns: 原始数据库turn列表（用于回退）
+        
+        Returns:
+            合并后的文本字符串
+        """
+        logger.info(f"从 {len(cleaned_turns)} 个清洗turn构建文本")
+        
+        if cleaned_turns:
+            turn_text_map = {}
+            for ct in cleaned_turns:
+                tid = ct.get("turn_id")
+                ct_text = ct.get("corrected_text", "")
+                if tid is not None and ct_text:
+                    turn_text_map[tid] = ct_text
+            
+            lines = []
+            for turn in original_turns:
+                text = turn_text_map.get(turn.turn_index, turn.text)
+                speaker = turn.corrected_speaker or turn.speaker
+                if speaker and speaker not in ("unknown", "", "None"):
+                    lines.append(f"[#{turn.turn_index}] [{speaker}]: {text}")
+                else:
+                    lines.append(f"[#{turn.turn_index}] {text}")
+            
+            combined = "\n".join(lines)
+            logger.info(f"构建文本完成: {len(combined)} 字符, 使用了 {len(turn_text_map)} 个修正后的turn")
+            return combined
+        
+        lines = []
+        for turn in original_turns:
+            speaker = turn.speaker
+            if speaker and speaker not in ("unknown", "", "None"):
+                lines.append(f"[#{turn.turn_index}] [{speaker}]: {turn.text}")
+            else:
+                lines.append(f"[#{turn.turn_index}] {turn.text}")
+        
+        return "\n".join(lines)
+    
     def _process_segment(
         self,
         segment: List[TranscriptTurn],
@@ -418,11 +507,11 @@ class LLMPipelineService:
     ) -> Dict[str, Any]:
         transcript_text = self._format_segment(segment)
         
-        prompt = self._build_role_annotation_prompt(transcript_text)
+        prompt = self._build_cleaning_prompt(transcript_text)
         
         if self.debug_mode:
             response_text = self._debug_interact(
-                stage="role_annotation",
+                stage="turn_cleaning",
                 segment_index=segment_index,
                 prompt=prompt,
                 transcript_text=transcript_text
@@ -439,7 +528,12 @@ class LLMPipelineService:
                 logger.error(f"LLM调用失败: {e}")
                 return self._fallback_role_annotation(segment)
         
-        return self._parse_role_annotation_response(response_text, segment)
+        cleaning_result = self._parse_cleaning_response(response_text, segment)
+        
+        if "turns" in cleaning_result:
+            self._apply_asr_corrections(cleaning_result, segment)
+        
+        return cleaning_result
     
     def _format_segment(self, segment: List[TranscriptTurn]) -> str:
         """
@@ -466,6 +560,7 @@ class LLMPipelineService:
         
         return "\n".join(lines)
     
+    # DEPRECATED: replaced by _build_cleaning_prompt()
     def _build_role_annotation_prompt(self, transcript: str) -> str:
         return f"""你是一个医疗对话分析专家。请分析以下医患对话，完成三个任务：
 
@@ -544,6 +639,25 @@ class LLMPipelineService:
 7. **必须保留所有原始对话内容，不能删除任何对话**
 8. **轮次索引[#N]是证据溯源的关键，必须完整保留**"""
     
+    def _build_cleaning_prompt(self, transcript: str) -> str:
+        """
+        构建阶段1转写清洗与角色纠错提示词。
+        
+        使用 prompt_manager 中的 turn_cleaning 模板，仅包含角色纠错和ASR清洗，
+        不再包含证据标注（证据标注已移至阶段2）。
+        
+        Args:
+            transcript: 格式化的对话文本
+        
+        Returns:
+            渲染后的提示词字符串
+        """
+        logger.info("构建转写清洗提示词")
+        prompt = self.prompt_manager.render("turn_cleaning", transcript=transcript)
+        logger.debug(f"转写清洗提示词长度: {len(prompt)} 字符")
+        return prompt
+    
+    # DEPRECATED: replaced by _parse_cleaning_response()
     def _parse_role_annotation_response(
         self,
         response_text: str,
@@ -579,6 +693,271 @@ class LLMPipelineService:
             }
         
         return self._fallback_role_annotation(segment)
+    
+    def _parse_cleaning_response(
+        self,
+        response_text: str,
+        segment: List[TranscriptTurn]
+    ) -> Dict[str, Any]:
+        """
+        解析阶段1的转写清洗LLM响应。
+        
+        解析LLM返回的turn JSON列表，提取角色映射和清理后的turn数据。
+        如果JSON解析失败，回退到 _fallback_role_annotation()。
+        
+        Args:
+            response_text: LLM返回的原始文本
+            segment: 对话轮次列表
+        
+        Returns:
+            {
+                "turns": [...],           # 清洗后的turn JSON列表
+                "role_mapping": {...},     # 角色映射
+                "speaker_corrections": [...] # 说话人纠正记录
+            }
+        """
+        logger.info("解析转写清洗响应")
+        
+        result = self._extract_json_from_response(response_text, "转写清洗")
+        
+        if result:
+            turns_data = result.get("turns", [])
+            logger.info(f"解析到 {len(turns_data)} 个清洗后的turn")
+            
+            role_mapping = {}
+            speaker_corrections = []
+            
+            turn_by_index = {turn.turn_index: turn for turn in segment}
+            
+            for turn_json in turns_data:
+                turn_id = turn_json.get("turn_id")
+                speaker_role = turn_json.get("speaker_role")
+                
+                if turn_id is None or speaker_role is None:
+                    logger.warning(f"turn JSON缺少必要字段: turn_id={turn_id}, speaker_role={speaker_role}")
+                    continue
+                
+                role_mapping[str(turn_id)] = speaker_role
+                
+                turn = turn_by_index.get(turn_id)
+                if turn:
+                    original_speaker = turn.speaker
+                    if original_speaker and original_speaker not in ("unknown", "", "None"):
+                        if speaker_role == "doctor":
+                            expected_label = "spk0" if original_speaker != "spk0" else original_speaker
+                        else:
+                            expected_label = "spk1" if original_speaker != "spk1" else original_speaker
+                    else:
+                        expected_label = f"spk_{turn_id}"
+                    
+                    if original_speaker and original_speaker != speaker_role and original_speaker not in ("unknown", "", "None"):
+                        speaker_corrections.append({
+                            "turn_index": turn_id,
+                            "original_speaker": original_speaker,
+                            "corrected_speaker": speaker_role,
+                            "reason": turn_json.get("reason", "")
+                        })
+                
+                turn.corrected_speaker = speaker_role
+            
+            if speaker_corrections:
+                self._apply_speaker_corrections(speaker_corrections, segment)
+            
+            for turn in segment:
+                if turn.corrected_speaker:
+                    role_mapping[turn.speaker] = turn.corrected_speaker
+            
+            return {
+                "turns": turns_data,
+                "role_mapping": role_mapping,
+                "speaker_corrections": speaker_corrections
+            }
+        
+        logger.warning("转写清洗JSON解析失败，回退到规则推断")
+        return self._fallback_role_annotation(segment)
+    
+    def _apply_asr_corrections(
+        self,
+        cleaning_result: Dict[str, Any],
+        segment: List[TranscriptTurn]
+    ) -> Dict[int, str]:
+        """
+        将清洗结果中的ASR修正应用到数据库。
+        
+        遍历 cleaning_result 中的 turns 列表，对于每个 changed_spans 非空的turn，
+        将 corrected_text 更新到数据库的 TranscriptTurn.corrected_text 字段。
+        
+        Args:
+            cleaning_result: _parse_cleaning_response 的返回结果
+            segment: 对话轮次列表
+        
+        Returns:
+            {turn_index: corrected_text} 修正映射
+        """
+        logger.info("应用ASR修正结果")
+        
+        turns_data = cleaning_result.get("turns", [])
+        if not turns_data:
+            logger.info("没有需要应用的ASR修正")
+            return {}
+        
+        turn_by_index = {turn.turn_index: turn for turn in segment}
+        correction_map = {}
+        applied_count = 0
+        
+        for turn_json in turns_data:
+            turn_id = turn_json.get("turn_id")
+            corrected_text = turn_json.get("corrected_text", "")
+            changed_spans = turn_json.get("changed_spans", [])
+            
+            if turn_id is None:
+                continue
+            
+            turn = turn_by_index.get(turn_id)
+            if not turn:
+                logger.warning(f"ASR修正跳过: 找不到turn_index={turn_id}对应的turn")
+                continue
+            
+            if changed_spans and corrected_text:
+                turn.corrected_text = corrected_text
+                correction_map[turn_id] = corrected_text
+                applied_count += 1
+                logger.info(
+                    f"ASR修正: turn_index={turn_id}, "
+                    f"修改了 {len(changed_spans)} 处, "
+                    f"置信度: {turn_json.get('correction_confidence', 'N/A')}"
+                )
+        
+        if self.db and correction_map:
+            try:
+                self.db.commit()
+                logger.info(f"已保存 {applied_count} 条ASR修正记录到数据库")
+            except Exception as e:
+                self.db.rollback()
+                logger.error(f"保存ASR修正记录失败: {e}")
+        
+        logger.info(f"ASR修正完成: 共修正 {applied_count} 个turn")
+        return correction_map
+    
+    def _fact_extraction_stage(
+        self,
+        cleaned_turns: List[Dict],
+        role_mapping: Dict[str, str],
+        visit_id: str = None
+    ) -> Dict[str, Any]:
+        logger.info(">>> 阶段2: 事实抽取与证据绑定")
+        stage_start = time.time()
+        
+        turns_json = json.dumps(cleaned_turns, ensure_ascii=False, indent=2)
+        logger.info(f"清理后的turn数: {len(cleaned_turns)}")
+        
+        prompt = self.prompt_manager.render("fact_extraction", turns_json=turns_json)
+        logger.debug(f"事实抽取提示词长度: {len(prompt)} 字符")
+        
+        if self.debug_mode:
+            response_text = self._debug_interact(
+                stage="fact_extraction",
+                prompt=prompt,
+                clean_turns=cleaned_turns
+            )
+        else:
+            if not self.llm_service:
+                logger.warning("LLM服务不可用，事实抽取失败")
+                return {"facts": [], "fact_count": 0}
+            
+            try:
+                response = self.llm_service.generate(prompt)
+                response_text = response.text
+            except Exception as e:
+                logger.error(f"事实抽取LLM调用失败: {e}")
+                return {"facts": [], "fact_count": 0}
+        
+        result = self._extract_json_from_response(response_text, "事实抽取")
+        
+        facts = []
+        if result and "facts" in result:
+            raw_facts = result.get("facts", [])
+            logger.info(f"LLM返回 {len(raw_facts)} 条原始事实")
+            
+            facts = self._deduplicate_facts(raw_facts)
+            logger.info(f"去重后剩余 {len(facts)} 条事实")
+        
+        if facts and visit_id and self.db:
+            self._save_atomic_facts(facts, visit_id)
+        
+        stage_time = time.time() - stage_start
+        logger.info(f"事实抽取完成，共 {len(facts)} 条事实，耗时: {stage_time:.2f}秒")
+        
+        return {
+            "facts": facts,
+            "fact_count": len(facts)
+        }
+    
+    def _deduplicate_facts(self, facts: List[Dict]) -> List[Dict]:
+        logger.info("开始事实去重")
+        
+        merged = {}
+        for fact in facts:
+            mention = fact.get("mention", "").strip()
+            section = fact.get("section_candidate", "")
+            speaker = fact.get("speaker", "")
+            
+            key = f"{mention}|{section}|{speaker}"
+            
+            if key in merged:
+                existing = merged[key]
+                existing_turn_ids = set(existing.get("evidence_turn_ids", []))
+                new_turn_ids = set(fact.get("evidence_turn_ids", []))
+                existing_turn_ids.update(new_turn_ids)
+                existing["evidence_turn_ids"] = sorted(list(existing_turn_ids))
+                
+                existing_texts = existing.get("evidence_text", [])
+                new_texts = fact.get("evidence_text", [])
+                for text in new_texts:
+                    if text not in existing_texts:
+                        existing_texts.append(text)
+                existing["evidence_text"] = existing_texts
+                
+                if fact.get("certainty") == "explicit" and existing.get("certainty") != "explicit":
+                    existing["certainty"] = "explicit"
+                
+                logger.debug(f"合并事实: '{mention}' (section={section}), turn_ids={existing['evidence_turn_ids']}")
+            else:
+                merged[key] = dict(fact)
+        
+        logger.info(f"事实去重完成: {len(facts)} -> {len(merged)}")
+        return list(merged.values())
+    
+    def _save_atomic_facts(self, facts: List[Dict], visit_id: str):
+        try:
+            saved_count = 0
+            for fact_data in facts:
+                fact_id = f"fact_{visit_id}_{uuid.uuid4().hex[:12]}"
+                
+                atomic_fact = AtomicFact(
+                    fact_id=fact_id,
+                    visit_id=visit_id,
+                    section_candidate=fact_data.get("section_candidate", ""),
+                    concept_type=fact_data.get("concept_type", "other"),
+                    mention=fact_data.get("mention", ""),
+                    polarity=fact_data.get("polarity", "present"),
+                    temporality=fact_data.get("temporality", "unknown"),
+                    certainty=fact_data.get("certainty", "supported"),
+                    speaker=fact_data.get("speaker", "patient"),
+                    evidence_turn_ids=fact_data.get("evidence_turn_ids", []),
+                    evidence_text=fact_data.get("evidence_text", []),
+                    asr_risk="low",
+                    normalization_needed=True
+                )
+                
+                self.db.add(atomic_fact)
+                saved_count += 1
+            
+            self.db.commit()
+            logger.info(f"已保存 {saved_count} 条原子事实到数据库")
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"保存原子事实失败: {e}")
     
     def _assign_speakers_from_unlabeled(
         self,
@@ -707,6 +1086,8 @@ class LLMPipelineService:
         "other": None
     }
     
+    # DEPRECATED: 证据标注职责已移交给阶段2(fact_extraction)，此方法将在后续版本中移除。
+    # 当前仅保留以防兼容性需要，不再在新流程中使用。
     def _extract_evidence_traces(
         self,
         annotated_text: str,
@@ -981,14 +1362,18 @@ class LLMPipelineService:
         
         return role_mapping
     
-    def _normalize_terms_stage(
+    # DEPRECATED: _normalize_terms_stage() has been replaced by a new version that
+    # accepts AtomicFact records instead of full text. The old implementation is
+    # preserved as _normalize_terms_stage_legacy() for backward compatibility.
+    def _normalize_terms_stage_legacy(
         self,
         annotated_text: str,
         role_mapping: Dict[str, str],
         visit_id: str = None,
         save_to_db: bool = True
     ) -> Dict[str, Any]:
-        logger.info(">>> 阶段2: 术语规范化")
+        logger.warning("DEPRECATED: _normalize_terms_stage_legacy() is called. Use the new _normalize_terms_stage() with AtomicFact records instead.")
+        logger.info(">>> 阶段2(旧): 术语规范化（全文模式）")
         stage_start = time.time()
         
         identified_terms = self.terminology_service.identify_colloquial_terms(annotated_text)
@@ -1069,15 +1454,109 @@ class LLMPipelineService:
                 logger.error(f"保存规范化术语失败: {e}")
         
         stage_time = time.time() - stage_start
-        logger.info(f"术语规范化完成，共规范化 {len(normalized_terms)} 个术语，耗时: {stage_time:.2f}秒")
+        logger.info(f"术语规范化完成(旧)，共规范化 {len(normalized_terms)} 个术语，耗时: {stage_time:.2f}秒")
         
         return {
             "normalized_text": normalized_text,
             "terms": terms_for_result
         }
-    
+
+    def _normalize_terms_stage(
+        self,
+        fact_records: List[AtomicFact],
+        role_mapping: Dict[str, str],
+        visit_id: str = None,
+        save_to_db: bool = True
+    ) -> Dict[str, Any]:
+        logger.info(">>> 阶段3: 选择性术语规范化（基于事实表）")
+        stage_start = time.time()
+
+        qualifying_facts = [
+            f for f in fact_records
+            if f.normalization_needed and f.mention and f.mention.strip()
+        ]
+        logger.info(f"共 {len(fact_records)} 条事实，其中 {len(qualifying_facts)} 条需要规范化")
+
+        if not qualifying_facts:
+            logger.info("没有需要规范化的事实，跳过术语规范化阶段")
+            return {
+                "terms": [],
+                "processed_count": 0,
+                "skipped_count": len(fact_records),
+                "total_count": len(fact_records)
+            }
+
+        terms_for_result = []
+        processed_count = 0
+        skipped_count = 0
+
+        for fact in qualifying_facts:
+            try:
+                term_type = fact.concept_type or "unknown"
+                result = self.terminology_service.normalize_single_term(
+                    term=fact.mention,
+                    context="",
+                    term_type=term_type
+                )
+
+                logger.info(
+                    f"  事实规范化: fact_id={fact.fact_id}, "
+                    f"'{fact.mention}' -> '{result.normalized_term}' "
+                    f"(source: {result.source}, confidence: {result.confidence:.2f})"
+                )
+
+                terms_for_result.append({
+                    "fact_id": fact.fact_id,
+                    "original": fact.mention,
+                    "normalized": result.normalized_term,
+                    "category": term_type,
+                    "source": result.source,
+                    "confidence": result.confidence,
+                    "cui": result.cui,
+                    "code": result.code,
+                    "code_system": result.code_system,
+                    "section_candidate": fact.section_candidate
+                })
+
+                if save_to_db and self.db:
+                    fact.normalized_term = result.normalized_term
+                    fact.normalized_code = result.code
+                    fact.normalization_needed = False
+
+                processed_count += 1
+
+            except Exception as e:
+                logger.error(f"规范化事实 {fact.fact_id} (mention='{fact.mention}') 失败: {e}")
+                skipped_count += 1
+
+        if save_to_db and self.db:
+            try:
+                self.db.commit()
+                logger.info(f"已更新 {processed_count} 条原子事实的规范化结果到数据库")
+            except Exception as e:
+                self.db.rollback()
+                logger.error(f"保存原子事实规范化结果失败: {e}")
+
+        stage_time = time.time() - stage_start
+        logger.info(
+            f"选择性术语规范化完成: 处理 {processed_count} 条, "
+            f"跳过 {skipped_count} 条, 总事实 {len(fact_records)} 条, "
+            f"耗时: {stage_time:.2f}秒"
+        )
+
+        return {
+            "terms": terms_for_result,
+            "processed_count": processed_count,
+            "skipped_count": skipped_count,
+            "total_count": len(fact_records)
+        }
+
+    # DEPRECATED: _normalize_terms_serial() is part of the old full-text
+    # normalization pipeline. Preserved for backward compatibility, replaced
+    # by the selective per-fact approach in the new _normalize_terms_stage().
     def _normalize_terms_serial(self, unique_terms: List[Dict[str, Any]]) -> List[Any]:
-        """串行规范化术语"""
+        """串行规范化术语（旧版，已弃用）"""
+        logger.warning("DEPRECATED: _normalize_terms_serial() is called. Use the new _normalize_terms_stage() with AtomicFact records instead.")
         normalized_terms = []
         for term_info in unique_terms:
             term = term_info.get("term", "")
@@ -1090,7 +1569,8 @@ class LLMPipelineService:
         return normalized_terms
     
     async def _normalize_terms_parallel(self, unique_terms: List[Dict[str, Any]], context: str) -> List[Any]:
-        """并行规范化术语 - 优先使用中文术语搜索"""
+        """并行规范化术语（旧版，已弃用） - 优先使用中文术语搜索"""
+        logger.warning("DEPRECATED: _normalize_terms_parallel() is called. Use the new _normalize_terms_stage() with AtomicFact records instead.")
         terms = [t.get("term", "") for t in unique_terms]
         contexts = {t.get("term", ""): t.get("context", context) for t in unique_terms}
         term_types = {t.get("term", ""): t.get("term_type", "unknown") for t in unique_terms}
@@ -1232,7 +1712,11 @@ class LLMPipelineService:
         
         return normalized_terms
     
+    # DEPRECATED: _build_normalization_prompt() was used in the old full-text
+    # normalization pipeline. Now replaced by the selective per-fact approach
+    # in the new _normalize_terms_stage() which calls normalize_single_term().
     def _build_normalization_prompt(self, annotated_text: str) -> str:
+        logger.warning("DEPRECATED: _build_normalization_prompt() is called. Use normalize_single_term() instead.")
         return f"""你是一个医学术语规范化专家。请将以下标注文本中的口语化医学术语规范化为标准医学术语。
 
 ## 标注文本
@@ -1277,6 +1761,9 @@ class LLMPipelineService:
         
         return {"normalized_text": original_text, "terms": []}
     
+    # DEPRECATED: 阶段3字段抽取已被阶段2(fact_extraction)替代。
+    # 事实表本身已是结构化数据，不再需要从文本中抽取字段。
+    # 当前仅保留以防兼容性需要，不再在新流程中使用。
     def _extract_fields_stage(
         self,
         normalized_text: str,
@@ -1467,6 +1954,9 @@ class LLMPipelineService:
         
         return self._attach_evidence_traces(result, evidence_traces)
     
+    # DEPRECATED: _generate_emr_stage() has been replaced by _generate_so_stage() and _generate_ap_stage().
+    # The new approach splits SOAP generation into two steps: (4a) S+O first, then (4b) A+P based on S+O.
+    # This method is preserved for backward compatibility.
     def _generate_emr_stage(
         self,
         extraction_result: Dict[str, Any],
@@ -1476,6 +1966,7 @@ class LLMPipelineService:
         save_evidence: bool = True,
         dialogue_text: str = ""
     ) -> Dict[str, Any]:
+        logger.warning("DEPRECATED: _generate_emr_stage() is called. Use _generate_so_stage() and _generate_ap_stage() instead.")
         logger.info(">>> 阶段4: 病历生成")
         
         prompt = self._build_emr_generation_prompt(extraction_result, role_mapping, dialogue_text)
@@ -1500,12 +1991,16 @@ class LLMPipelineService:
         
         return self._parse_emr_response(response_text, extraction_result, visit_id, save_evidence)
     
+    # DEPRECATED: _build_emr_generation_prompt() has been replaced by the new prompt templates
+    # emr_generation_so, emr_generation_assessment, and emr_generation_plan.
+    # These new templates enable the three-level diagnosis strategy and structured plan.
     def _build_emr_generation_prompt(
         self,
         extraction_result: Dict[str, Any],
         role_mapping: Dict[str, str],
         dialogue_text: str = ""
     ) -> str:
+        logger.warning("DEPRECATED: _build_emr_generation_prompt() is called. Use emr_generation_so/assessment/plan templates instead.")
         extraction_json = json.dumps(extraction_result, ensure_ascii=False, indent=2)
         
         return f"""你是一个医疗病历撰写专家。请根据以下信息生成符合中国医疗病历书写规范的病历文本。
@@ -1728,6 +2223,311 @@ class LLMPipelineService:
             logger.error(f"保存病历记录失败: {e}")
             return None
     
+    def _normalize_emr_format(self, emr_result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        将分节生成的新格式归一化为前端兼容的旧格式。
+        
+        前端 displaySection() 期望每个子字段为 {value, evidence_traces} 格式。
+        新prompt输出的是直接字符串，需要包装。
+        Assessment 从 assessment_items 构建 diagnosis 字段。
+        Plan 从 plan_items 构建 treatment 和 advice 字段。
+        """
+        result = dict(emr_result)
+        
+        subject_section = dict(result.get("subjective", {}))
+        objective_section = dict(result.get("objective", {}))
+        assessment_section = dict(result.get("assessment", {}))
+        plan_section = dict(result.get("plan", {}))
+        
+        for section_data, section_name in [
+            (subject_section, "subjective"),
+            (objective_section, "objective")
+        ]:
+            for field, val in list(section_data.items()):
+                if field in ("text", "evidence_traces"):
+                    continue
+                if isinstance(val, str):
+                    section_data[field] = {"value": val or "", "evidence_traces": []}
+        
+        assessment_items = result.get("assessment_items", [])
+        if assessment_items:
+            explicit_diags = [item for item in assessment_items if item.get("diagnosis_type") == "explicit_diagnosis"]
+            suspected_diags = [item for item in assessment_items if item.get("diagnosis_type") == "suspected_diagnosis"]
+            symptom_assessments = [item for item in assessment_items if item.get("diagnosis_type") == "symptom_based_assessment"]
+            
+            diagnosis_parts = []
+            for diag in explicit_diags:
+                diagnosis_parts.append(diag.get("text", ""))
+            for diag in suspected_diags:
+                diagnosis_parts.append(diag.get("text", ""))
+            for diag in symptom_assessments:
+                diagnosis_parts.append(diag.get("text", ""))
+            
+            diagnosis_value = "；".join(filter(None, diagnosis_parts))
+            if diagnosis_value:
+                assessment_section["diagnosis"] = {"value": diagnosis_value, "evidence_traces": []}
+        
+        plan_items = result.get("plan_items", {})
+        if plan_items:
+            medications = plan_items.get("medications", [])
+            tests = plan_items.get("tests", [])
+            follow_up = plan_items.get("follow_up", {})
+            education = plan_items.get("education", {})
+            
+            treatment_parts = []
+            for med in medications:
+                if isinstance(med, dict):
+                    parts = [med.get("name", "")]
+                    dosage = med.get("dosage", "")
+                    freq = med.get("frequency", "")
+                    duration = med.get("duration", "")
+                    detail = " ".join(filter(None, [dosage, freq, duration]))
+                    if detail:
+                        parts.append(detail)
+                    treatment_parts.append(" ".join(filter(None, parts)))
+            for test in tests:
+                if isinstance(test, dict):
+                    name = test.get("name", "")
+                    reason = test.get("reason", "")
+                    if name:
+                        treatment_parts.append(f"{name}（{reason}）" if reason else name)
+            
+            treatment_value = "；".join(filter(None, treatment_parts))
+            if treatment_value:
+                plan_section["treatment"] = {"value": treatment_value, "evidence_traces": []}
+            
+            advice_parts = []
+            if isinstance(follow_up, dict) and follow_up.get("text"):
+                advice_parts.append(follow_up["text"])
+            if isinstance(education, dict) and education.get("text"):
+                advice_parts.append(education["text"])
+            
+            advice_value = "；".join(filter(None, advice_parts))
+            if advice_value:
+                plan_section["advice"] = {"value": advice_value, "evidence_traces": []}
+        
+        result["subjective"] = subject_section
+        result["objective"] = objective_section
+        result["assessment"] = assessment_section
+        result["plan"] = plan_section
+        
+        logger.info(f"EMR格式归一化完成"
+                    f", assessment_items={len(assessment_items)}"
+                    f", plan_medications={len(plan_items.get('medications', [])) if plan_items else 0}"
+                    f", plan_tests={len(plan_items.get('tests', [])) if plan_items else 0}")
+        return result
+
+    def _build_evidence_traces_from_fact_ids(
+        self,
+        fact_ids: set,
+        fact_by_id: Dict[str, AtomicFact],
+        turn_by_index: Dict[int, TranscriptTurn]
+    ) -> List[Dict[str, Any]]:
+        traces = []
+        seen_turn_ids = set()
+
+        for fid in fact_ids:
+            fact = fact_by_id.get(fid)
+            if not fact:
+                continue
+
+            turn_ids = fact.evidence_turn_ids or []
+            evidence_texts = fact.evidence_text or []
+
+            for i, tid in enumerate(turn_ids):
+                if tid in seen_turn_ids:
+                    continue
+                seen_turn_ids.add(tid)
+
+                turn = turn_by_index.get(tid)
+                if not turn:
+                    continue
+
+                trace = {
+                    "turn_id": turn.turn_id,
+                    "turn_index": turn.turn_index,
+                    "turn_text": turn.text,
+                    "speaker": turn.corrected_speaker or turn.speaker,
+                    "original_speaker": turn.speaker,
+                    "speaker_corrected": bool(
+                        turn.corrected_speaker
+                        and turn.corrected_speaker != turn.speaker
+                    ),
+                    "content": evidence_texts[i] if i < len(evidence_texts) else turn.text[:100],
+                    "confidence": 0.8
+                }
+                traces.append(trace)
+
+        logger.info(f"从 {len(fact_ids)} 个fact_id构建了 {len(traces)} 条证据溯源")
+        return traces
+
+    def _enrich_evidence_traces(
+        self,
+        emr_result: Dict[str, Any],
+        fact_records: List[AtomicFact],
+        turns: List[TranscriptTurn]
+    ) -> Dict[str, Any]:
+        logger.info("开始证据溯源富化")
+        enrichment_start = time.time()
+
+        fact_by_id = {f.fact_id: f for f in fact_records}
+        turn_by_index = {t.turn_index: t for t in turns}
+
+        so_used_fact_ids = emr_result.get("so_used_fact_ids", [])
+        assessment_items = emr_result.get("assessment_items", [])
+        plan_items = emr_result.get("plan_items", {})
+
+        logger.info(
+            f"证据溯源输入: so_fact_ids={len(so_used_fact_ids)}, "
+            f"assessment_items={len(assessment_items)}, "
+            f"plan_items_keys={list(plan_items.keys()) if plan_items else []}"
+        )
+
+        s_fact_ids = set()
+        o_fact_ids = set()
+        for fid in so_used_fact_ids:
+            fact = fact_by_id.get(fid)
+            if fact:
+                if fact.section_candidate == "S":
+                    s_fact_ids.add(fid)
+                elif fact.section_candidate == "O":
+                    o_fact_ids.add(fid)
+
+        s_evidence_traces = self._build_evidence_traces_from_fact_ids(
+            s_fact_ids, fact_by_id, turn_by_index
+        )
+        o_evidence_traces = self._build_evidence_traces_from_fact_ids(
+            o_fact_ids, fact_by_id, turn_by_index
+        )
+
+        subject_section = dict(emr_result.get("subjective", {}))
+        for field in ["chief_complaint", "history_present_illness", "past_history", "denied_symptoms"]:
+            if field in subject_section and isinstance(subject_section[field], dict):
+                subject_section[field]["evidence_traces"] = s_evidence_traces
+
+        objective_section = dict(emr_result.get("objective", {}))
+        for field in ["physical_examination", "auxiliary_examination"]:
+            if field in objective_section and isinstance(objective_section[field], dict):
+                objective_section[field]["evidence_traces"] = o_evidence_traces
+
+        diagnosis_fact_ids = set()
+        for item in assessment_items:
+            if isinstance(item, dict):
+                sids = item.get("supporting_fact_ids", [])
+                diagnosis_fact_ids.update(sids)
+        a_evidence_traces = self._build_evidence_traces_from_fact_ids(
+            diagnosis_fact_ids, fact_by_id, turn_by_index
+        )
+
+        assessment_section = dict(emr_result.get("assessment", {}))
+        if "diagnosis" in assessment_section and isinstance(assessment_section["diagnosis"], dict):
+            assessment_section["diagnosis"]["evidence_traces"] = a_evidence_traces
+
+        treatment_fact_ids = set()
+        advice_fact_ids = set()
+
+        if isinstance(plan_items, dict):
+            for med in plan_items.get("medications", []):
+                if isinstance(med, dict):
+                    treatment_fact_ids.update(med.get("used_fact_ids", []))
+            for test in plan_items.get("tests", []):
+                if isinstance(test, dict):
+                    treatment_fact_ids.update(test.get("used_fact_ids", []))
+            follow_up = plan_items.get("follow_up", {})
+            if isinstance(follow_up, dict):
+                advice_fact_ids.update(follow_up.get("used_fact_ids", []))
+            education = plan_items.get("education", {})
+            if isinstance(education, dict):
+                advice_fact_ids.update(education.get("used_fact_ids", []))
+
+        t_evidence_traces = self._build_evidence_traces_from_fact_ids(
+            treatment_fact_ids, fact_by_id, turn_by_index
+        )
+        adv_evidence_traces = self._build_evidence_traces_from_fact_ids(
+            advice_fact_ids, fact_by_id, turn_by_index
+        )
+
+        plan_section = dict(emr_result.get("plan", {}))
+        if "treatment" in plan_section and isinstance(plan_section["treatment"], dict):
+            plan_section["treatment"]["evidence_traces"] = t_evidence_traces
+        if "advice" in plan_section and isinstance(plan_section["advice"], dict):
+            plan_section["advice"]["evidence_traces"] = adv_evidence_traces
+
+        emr_result["subjective"] = subject_section
+        emr_result["objective"] = objective_section
+        emr_result["assessment"] = assessment_section
+        emr_result["plan"] = plan_section
+
+        total_traces = (
+            len(s_evidence_traces)
+            + len(o_evidence_traces)
+            + len(a_evidence_traces)
+            + len(t_evidence_traces)
+            + len(adv_evidence_traces)
+        )
+        logger.info(
+            f"证据溯源富化完成: S={len(s_evidence_traces)}, O={len(o_evidence_traces)}, "
+            f"A={len(a_evidence_traces)}, P_T={len(t_evidence_traces)}, P_Adv={len(adv_evidence_traces)}, "
+            f"总计={total_traces}, 耗时={time.time() - enrichment_start:.2f}秒"
+        )
+
+        return emr_result
+
+    def _save_evidence_spans_from_emr(
+        self,
+        emr_result: Dict[str, Any],
+        visit_id: str
+    ) -> int:
+        logger.info(f"保存证据溯源记录到EvidenceSpan表: visit_id={visit_id}")
+
+        self.db.query(EvidenceSpan).filter(
+            EvidenceSpan.visit_id == visit_id
+        ).delete()
+
+        saved_count = 0
+        field_to_section_name = {}
+        for section_name in ["subjective", "objective", "assessment", "plan"]:
+            section = emr_result.get(section_name, {})
+            for field_name in section.keys():
+                if field_name not in ("text", "evidence_traces"):
+                    field_to_section_name[field_name] = section_name
+
+        for section_name in ["subjective", "objective", "assessment", "plan"]:
+            section = emr_result.get(section_name, {})
+            for field_name, field_data in section.items():
+                if field_name in ("text", "evidence_traces"):
+                    continue
+                if not isinstance(field_data, dict):
+                    continue
+
+                traces = field_data.get("evidence_traces", [])
+                field_value = field_data.get("value", "")
+
+                for trace in traces:
+                    evidence = EvidenceSpan(
+                        visit_id=visit_id,
+                        turn_id=trace.get("turn_id"),
+                        field_type=field_name,
+                        field_value=field_value,
+                        content=trace.get("content", ""),
+                        turn_text=trace.get("turn_text", ""),
+                        confidence=trace.get("confidence", 0.8),
+                        score=trace.get("confidence", 0.8),
+                        reasoning=f"来源: {trace.get('speaker', 'unknown')}"
+                    )
+                    self.db.add(evidence)
+                    saved_count += 1
+
+        try:
+            self.db.commit()
+            logger.info(f"保存了 {saved_count} 条证据溯源记录到EvidenceSpan表")
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"保存证据溯源记录失败: {e}")
+            return 0
+
+        return saved_count
+
     def _template_emr_generation(
         self,
         extraction_result: Dict[str, Any],
@@ -1829,6 +2629,355 @@ class LLMPipelineService:
             self._save_emr_record(result, visit_id)
         
         return result
+
+    def _format_facts_for_prompt(self, fact_records: List[AtomicFact]) -> str:
+        """
+        将AtomicFact记录格式化为prompt用的JSON字符串。
+
+        Args:
+            fact_records: 原子事实列表
+
+        Returns:
+            JSON字符串
+        """
+        facts_data = []
+        for fact in fact_records:
+            facts_data.append({
+                "fact_id": fact.fact_id,
+                "section_candidate": fact.section_candidate,
+                "concept_type": fact.concept_type,
+                "mention": fact.mention,
+                "normalized_term": fact.normalized_term,
+                "polarity": fact.polarity,
+                "temporality": fact.temporality,
+                "certainty": fact.certainty,
+                "speaker": fact.speaker,
+                "evidence_turn_ids": fact.evidence_turn_ids or [],
+                "evidence_text": fact.evidence_text or []
+            })
+        return json.dumps(facts_data, ensure_ascii=False, indent=2)
+
+    def _filter_facts_by_section(
+        self,
+        fact_records: List[AtomicFact],
+        sections: List[str]
+    ) -> List[AtomicFact]:
+        """过滤指定section的事实"""
+        return [f for f in fact_records if f.section_candidate in sections]
+
+    def _build_compact_context(
+        self,
+        fact_records: List[AtomicFact],
+        max_items: int = 10
+    ) -> str:
+        """构建紧凑的上下文摘要，列出关键事实，用于减少后续阶段的输入长度"""
+        context_items = []
+        for f in fact_records:
+            label = f.normalized_term or f.mention
+            if not label:
+                continue
+            speaker = f.speaker or ""
+            context_items.append(f"[{speaker}][{f.section_candidate}] {label}")
+        if len(context_items) > max_items:
+            context_items = context_items[:max_items] + [f"... 共 {len(fact_records)} 条事实"]
+        return "\n".join(context_items)
+
+    def _lightweight_normalize(self, facts_data: List[Dict[str, Any]]) -> None:
+        """轻量术语规范化：使用ChineseTerm本地库快速匹配，为事实添加normalized_term"""
+        if not hasattr(self, 'terminology_service') or not self.terminology_service:
+            logger.info("术语服务不可用，跳过轻量规范化")
+            return
+        try:
+            normalized_count = 0
+            for fact in facts_data:
+                if fact.get("normalized_term"):
+                    continue
+                mention = fact.get("mention", "")
+                if not mention or not mention.strip():
+                    continue
+                result = self.terminology_service._normalize_by_chinese_term(
+                    mention,
+                    fact.get("concept_type")
+                )
+                if result:
+                    fact["normalized_term"] = result[0]
+                    normalized_count += 1
+            logger.info(f"轻量规范化完成: {normalized_count}/{len(facts_data)} 条事实匹配到标准术语")
+        except Exception as e:
+            logger.warning(f"轻量规范化失败: {e}")
+
+    def _generate_so_stage(
+        self,
+        fact_records: List[AtomicFact],
+        role_mapping: Dict[str, str]
+    ) -> Dict[str, Any]:
+        """
+        阶段4a：分节生成SO（主观数据 + 客观数据）。
+
+        使用 emr_generation_so 模板，只生成 S 和 O 部分，不生成诊断和计划。
+        仅传入 section_candidate 为 S 或 O 的事实。
+
+        Args:
+            fact_records: 规范化后的原子事实列表
+            role_mapping: 角色映射
+
+        Returns:
+            {"subjective": {...}, "objective": {...}, "used_fact_ids": [...]}
+        """
+        logger.info(">>> 阶段4a: 分节生成SO（主观+客观）")
+        stage_start = time.time()
+
+        so_facts = self._filter_facts_by_section(fact_records, ["S", "O"])
+        logger.info(f"SO生成输入: {len(fact_records)} 条事实，过滤后 {len(so_facts)} 条S/O事实")
+
+        facts_json = self._format_facts_for_prompt(so_facts)
+
+        dialogue_parts = []
+        for fact in so_facts:
+            mention = fact.normalized_term or fact.mention
+            speaker_label = fact.speaker or "unknown"
+            dialogue_parts.append(f"[{speaker_label}]: {mention}")
+        dialogue_summary = "\n".join(dialogue_parts)
+
+        prompt = self.prompt_manager.render(
+            "emr_generation_so",
+            facts_json=facts_json,
+            dialogue_summary=dialogue_summary
+        )
+        logger.debug(f"SO生成提示词长度: {len(prompt)} 字符")
+
+        if self.debug_mode:
+            response_text = self._debug_interact(
+                stage="emr_generation_so",
+                prompt=prompt,
+                facts_json=facts_json
+            )
+        else:
+            if not self.llm_service:
+                logger.warning("LLM服务不可用，SO生成失败")
+                return {"subjective": {}, "objective": {}, "used_fact_ids": []}
+
+            try:
+                response = self.llm_service.generate(prompt)
+                response_text = response.text
+            except Exception as e:
+                logger.error(f"SO生成LLM调用失败: {e}")
+                return {"subjective": {}, "objective": {}, "used_fact_ids": []}
+
+        result = self._extract_json_from_response(response_text, "SO生成")
+
+        if result:
+            stage_time = time.time() - stage_start
+            logger.info(f"SO生成完成: 使用 {len(result.get('used_fact_ids', []))} 条事实, 耗时: {stage_time:.2f}秒")
+            return result
+
+        logger.warning("SO生成JSON解析失败，返回空结果")
+        return {"subjective": {}, "objective": {}, "used_fact_ids": []}
+
+    def _generate_ap_stage(
+        self,
+        so_result: Dict[str, Any],
+        fact_records: List[AtomicFact],
+        role_mapping: Dict[str, str]
+    ) -> Dict[str, Any]:
+        """
+        阶段4b：分节生成AP（评估 + 计划）。
+
+        分两步：
+        (1) 基于 S+O 和事实表生成 Assessment（采用三层诊断策略）
+        (2) 基于 S+O+A 和事实表生成 Plan（拆分为4个子字段）
+
+        Args:
+            so_result: 阶段4a的输出，包含 subjective, objective, used_fact_ids
+            fact_records: 规范化后的原子事实列表
+            role_mapping: 角色映射
+
+        Returns:
+            {"assessment": {...}, "plan": {...}, "assessment_items": [...], "plan_items": {...}}
+        """
+        logger.info(">>> 阶段4b: 分节生成AP（评估+计划）")
+        stage_start = time.time()
+
+        a_facts = self._filter_facts_by_section(fact_records, ["A"])
+        p_facts = self._filter_facts_by_section(fact_records, ["P"])
+        logger.info(f"AP生成输入: {len(fact_records)} 条事实，A事实 {len(a_facts)} 条，P事实 {len(p_facts)} 条")
+
+        subjective_text = json.dumps(so_result.get("subjective", {}), ensure_ascii=False, indent=2)
+        objective_text = json.dumps(so_result.get("objective", {}), ensure_ascii=False, indent=2)
+
+        time.sleep(self.STAGE_DELAY)
+
+        logger.info(">>> 阶段4b-1: 生成评估(Assessment)")
+        assessment_facts_json = self._format_facts_for_prompt(a_facts)
+        assessment_prompt = self.prompt_manager.render(
+            "emr_generation_assessment",
+            subjective_text=subjective_text,
+            objective_text=objective_text,
+            facts_json=assessment_facts_json
+        )
+        logger.debug(f"Assessment生成提示词长度: {len(assessment_prompt)} 字符")
+
+        if self.debug_mode:
+            assessment_response_text = self._debug_interact(
+                stage="emr_generation_assessment",
+                prompt=assessment_prompt,
+                subjective_text=subjective_text,
+                objective_text=objective_text,
+                facts_json=facts_json
+            )
+        else:
+            if not self.llm_service:
+                logger.warning("LLM服务不可用，Assessment生成失败")
+                return {"assessment": {}, "plan": {}, "assessment_items": [], "plan_items": {}}
+
+            try:
+                response = self.llm_service.generate(assessment_prompt)
+                assessment_response_text = response.text
+            except Exception as e:
+                logger.error(f"Assessment生成LLM调用失败: {e}")
+                return {"assessment": {}, "plan": {}, "assessment_items": [], "plan_items": {}}
+
+        assessment_result = self._extract_json_from_response(assessment_response_text, "Assessment生成")
+
+        if not assessment_result:
+            logger.warning("Assessment JSON解析失败")
+            assessment_result = {}
+
+        assessment = assessment_result.get("assessment", {})
+        assessment_items = assessment_result.get("assessment_items", [])
+        assessment_text = json.dumps(assessment, ensure_ascii=False, indent=2)
+
+        logger.info(f"Assessment生成完成: {len(assessment_items)} 条评估项")
+
+        time.sleep(self.STAGE_DELAY)
+
+        logger.info(">>> 阶段4b-2: 生成计划(Plan)")
+        plan_facts_json = self._format_facts_for_prompt(p_facts)
+        plan_prompt = self.prompt_manager.render(
+            "emr_generation_plan",
+            subjective_text=subjective_text,
+            objective_text=objective_text,
+            assessment_text=assessment_text,
+            facts_json=plan_facts_json
+        )
+        logger.debug(f"Plan生成提示词长度: {len(plan_prompt)} 字符")
+
+        if self.debug_mode:
+            plan_response_text = self._debug_interact(
+                stage="emr_generation_plan",
+                prompt=plan_prompt,
+                subjective_text=subjective_text,
+                objective_text=objective_text,
+                assessment_text=assessment_text,
+                facts_json=facts_json
+            )
+        else:
+            if not self.llm_service:
+                logger.warning("LLM服务不可用，Plan生成失败")
+                return {"assessment": assessment, "plan": {}, "assessment_items": assessment_items, "plan_items": {}}
+
+            try:
+                response = self.llm_service.generate(plan_prompt)
+                plan_response_text = response.text
+            except Exception as e:
+                logger.error(f"Plan生成LLM调用失败: {e}")
+                return {"assessment": assessment, "plan": {}, "assessment_items": assessment_items, "plan_items": {}}
+
+        plan_result = self._extract_json_from_response(plan_response_text, "Plan生成")
+
+        if not plan_result:
+            logger.warning("Plan JSON解析失败")
+            plan_result = {}
+
+        plan = plan_result.get("plan", {})
+        plan_items = plan_result.get("plan_items", {})
+
+        stage_time = time.time() - stage_start
+        logger.info(f"AP生成完成，耗时: {stage_time:.2f}秒")
+
+        return {
+            "assessment": assessment,
+            "plan": plan,
+            "assessment_items": assessment_items,
+            "plan_items": plan_items
+        }
+
+    def _verification_stage(
+        self,
+        draft_emr: Dict[str, Any],
+        fact_records: List[AtomicFact],
+        role_mapping: Dict[str, str]
+    ) -> Dict[str, Any]:
+        logger.info(">>> 阶段5: 核查与修订")
+        stage_start = time.time()
+
+        draft_emr_json = json.dumps(draft_emr, ensure_ascii=False, indent=2)
+
+        fact_table_json = self._format_facts_for_prompt(fact_records)
+        fact_table_count = len(fact_records)
+
+        role_mapping_json = json.dumps(role_mapping, ensure_ascii=False, indent=2)
+
+        logger.info(f"核查输入: 事实表 {fact_table_count} 条, 角色映射 {len(role_mapping)} 个")
+
+        prompt = self.prompt_manager.render(
+            "soap_verification",
+            draft_emr=draft_emr_json,
+            fact_table=fact_table_json,
+            role_mapping=role_mapping_json
+        )
+        logger.debug(f"核查提示词长度: {len(prompt)} 字符")
+
+        if self.debug_mode:
+            response_text = self._debug_interact(
+                stage="verification",
+                prompt=prompt,
+                draft_emr=draft_emr,
+                fact_count=fact_table_count
+            )
+        else:
+            if not self.llm_service:
+                logger.warning("LLM服务不可用，跳过核查修订阶段，使用原始草稿")
+                return {"issues": {}, "soap_final": draft_emr}
+
+            try:
+                response = self.llm_service.generate(prompt)
+                response_text = response.text
+            except Exception as e:
+                logger.error(f"核查修订LLM调用失败: {e}")
+                return {"issues": {}, "soap_final": draft_emr}
+
+        result = self._extract_json_from_response(response_text, "核查修订")
+
+        if result and "soap_final" in result:
+            issues = result.get("issues", {})
+            soap_final = result["soap_final"]
+
+            unsupported_count = len(issues.get("unsupported_claims", []))
+            missing_count = len(issues.get("missing_critical_facts", []))
+            conflict_count = len(issues.get("internal_conflicts", []))
+            certainty_error_count = len(issues.get("certainty_errors", []))
+
+            logger.info(
+                f"核查完成: "
+                f"无证据声明={unsupported_count}, "
+                f"关键遗漏={missing_count}, "
+                f"内部冲突={conflict_count}, "
+                f"确定性错误={certainty_error_count}"
+            )
+
+            stage_time = time.time() - stage_start
+            logger.info(f"核查修订阶段完成，耗时: {stage_time:.2f}秒")
+
+            return {
+                "issues": issues,
+                "soap_final": soap_final
+            }
+
+        logger.warning("核查修订JSON解析失败，使用原始草稿作为最终版本")
+        stage_time = time.time() - stage_start
+        logger.info(f"核查修订阶段完成（回退），耗时: {stage_time:.2f}秒")
+        return {"issues": {}, "soap_final": draft_emr}
     
     def _debug_interact(
         self,
@@ -1879,40 +3028,180 @@ class LLMPipelineService:
                 print(f"\n阶段: {stage}")
                 print("\n指导步骤：")
                 
-                if stage == "role_annotation":
+                if stage == "turn_cleaning":
                     print("""
-1. 分析对话内容，判断每个说话人(spk0, spk1等)是医生还是患者
-2. 用XML标签标注证据字段：
-   - <主诉>...</主诉>
-   - <现病史>...</现病史>
-   - <既往史>...</既往史>
-   - <体格检查>...</体格检查>
-   - <辅助检查>...</辅助检查>
-   - <诊断>...</诊断>
-   - <治疗>...</治疗>
-   - <医嘱>...</医嘱>
-3. 按JSON格式输出结果
+1. 判断每个turn的说话人角色（doctor/patient），纠正ASR角色分配错误
+2. 修正明显的ASR文本错误（同音字、医学术语拼写错误）
+3. 不确定则保留原文，correction_confidence设为"low"
+4. 严禁添加原文没有的信息
+
+按JSON格式输出：
+{
+  "turns": [{
+    "turn_id": 0,
+    "speaker_role": "doctor或patient",
+    "corrected_text": "修正后文本",
+    "changed_spans": [{"original": "原词", "corrected": "修正词", "position": "位置"}],
+    "correction_confidence": "high|medium|low",
+    "reason": "理由"
+  }]
+}
+""")
+                elif stage == "fact_extraction":
+                    print("""
+从对话轮次中抽取原子级临床事实。每条事实是不可再分的独立陈述。
+
+字段说明：
+- section_candidate: S / O / A / P
+- concept_type: symptom / disease / test / drug / plan / other
+- mention: 对话中的原始口语表述
+- polarity: present / absent / possible / planned / recommended
+- temporality: current / past / unknown
+- certainty: explicit / supported / weak
+- speaker: patient / doctor
+- evidence_turn_ids: 支撑事实的turn_id列表
+- evidence_text: 对应的原文片段列表
+
+严禁编造事实。同一事实在多轮提及则合并。
+
+按JSON格式输出：
+{
+  "facts": [{
+    "section_candidate": "S",
+    "concept_type": "symptom",
+    "mention": "原文",
+    "polarity": "present",
+    "temporality": "current",
+    "certainty": "supported",
+    "speaker": "patient",
+    "evidence_turn_ids": [0],
+    "evidence_text": ["原文"]
+  }]
+}
+""")
+                elif stage == "emr_generation_so":
+                    print("""
+根据事实表生成病历的S(主观)和O(客观)部分，不可生成诊断和计划。
+
+S部分（仅患者角度）：
+- chief_complaint: 主诉
+- history_present_illness: 现病史
+- denied_symptoms: 否认症状
+- past_history: 既往史
+
+O部分（仅医方检查结果）：
+- physical_examination: 体格检查
+- auxiliary_examination: 辅助检查
+
+规则：每句话必须对应事实表fact_id；优先用normalized_term；无证据则留空。
+
+按JSON格式输出：
+{
+  "subjective": {
+    "text": "主诉：...",
+    "chief_complaint": {"value": "...", "evidence_traces": []},
+    "history_present_illness": {"value": "...", "evidence_traces": []},
+    "denied_symptoms": {"value": "...", "evidence_traces": []},
+    "past_history": {"value": "...", "evidence_traces": []}
+  },
+  "objective": {
+    "text": "体格检查：...",
+    "physical_examination": {"value": "...", "evidence_traces": []},
+    "auxiliary_examination": {"value": "...", "evidence_traces": []}
+  },
+  "used_fact_ids": ["fact_id_1"]
+}
+""")
+                elif stage == "emr_generation_assessment":
+                    print("""
+按三层诊断策略生成评估(A)：
+
+1. 明确诊断(explicit_diagnosis)：certainty=explicit,disease,doctor → 直接写疾病名
+2. 倾向性诊断(suspected_diagnosis)：仅有supported证据 → 用"考虑XXX""XXX待排"
+3. 症状性评估(symptom_based)：仅有症状 → 只描述症状，禁止发明疾病名
+
+assessment_items每项含：text, certainty_level(high/medium/low), supporting_fact_ids, diagnosis_type
+
+严禁编造诊断。无诊断级事实时只做症状性评估。
+
+按JSON格式输出：
+{
+  "assessment": {
+    "text": "诊断：...",
+    "diagnosis": {"value": "...", "evidence_traces": []}
+  },
+  "assessment_items": [{
+    "text": "...",
+    "certainty_level": "high",
+    "supporting_fact_ids": ["fact_id_1"],
+    "diagnosis_type": "explicit_diagnosis"
+  }]
+}
+""")
+                elif stage == "emr_generation_plan":
+                    print("""
+生成病历的计划(P)，拆分为4个子字段：
+
+1. medications（用药方案）：name, dosage, frequency, duration, used_fact_ids
+2. tests（检查建议）：name, reason, used_fact_ids
+3. follow_up（复诊）：text, used_fact_ids
+4. education（健康教育）：text, used_fact_ids
+
+每条计划必须有事实依据。无证据则留空。优先用normalized_term。
+
+按JSON格式输出：
+{
+  "plan": {
+    "text": "治疗方案：...",
+    "treatment": {"value": "...", "evidence_traces": []},
+    "advice": {"value": "...", "evidence_traces": []}
+  },
+  "plan_items": {
+    "medications": [{"name": "", "dosage": "", "frequency": "", "duration": "", "used_fact_ids": []}],
+    "tests": [{"name": "", "reason": "", "used_fact_ids": []}],
+    "follow_up": {"text": "", "used_fact_ids": []},
+    "education": {"text": "", "used_fact_ids": []}
+  }
+}
+""")
+                elif stage == "verification":
+                    print("""
+对SOAP草稿进行四个维度核查并修订：
+
+1. 无证据声明(unsupported_claims)：标记病历中无事实支撑的声明
+2. 遗漏关键事实(missing_critical_facts)：标记高重要性事实是否被遗漏
+3. 内部冲突(internal_conflicts)：检查age/gender/body_part/time/negation/drug_name矛盾
+4. 确定性错误(certainty_errors)：检查疑似诊断是否被写成明确诊断
+
+修订优先级：删除无证据声明 → 补充遗漏事实 → 修正矛盾和确定性错误
+
+按JSON格式输出：
+{
+  "issues": {
+    "unsupported_claims": [{"claim_text": "", "soap_location": "", "reason": ""}],
+    "missing_critical_facts": [{"fact_id": "", "fact_content": "", "importance_reason": ""}],
+    "internal_conflicts": [{"conflict_type": "", "location_1": "", "content_1": "", "location_2": "", "content_2": ""}],
+    "certainty_errors": [{"soap_text": "", "correct_certainty": "", "reason": ""}]
+  },
+  "soap_final": {"subjective": {...}, "objective": {...}, "assessment": {...}, "plan": {...}}
+}
+如果某维度无问题，对应数组为空。
+""")
+                elif stage == "role_annotation":
+                    print("""
+[DEPRECATED] 该阶段已废弃。新版流程使用 turn_cleaning + fact_extraction 替代。
 """)
                 elif stage == "term_normalization":
                     print("""
-1. 识别文本中的口语化医学术语
-2. 将口语化术语替换为标准医学术语
-3. 保持XML标签和对话格式不变
-4. 按JSON格式输出结果
+[DEPRECATED] 全文本术语规范化已废弃。新版使用基于事实表的逐条规范化(阶段3)，不需要手动输入。
 """)
                 elif stage == "field_extraction":
                     print("""
-1. 从XML标签中提取对应字段的内容
-2. 合并相同字段的内容（去重）
-3. 处理可能的冲突
-4. 按JSON格式输出结果
+[DEPRECATED] 字段抽取阶段已废弃。新版流程中事实表本身已是结构化数据。
 """)
                 elif stage == "emr_generation":
                     print("""
-1. 根据结构化数据生成病历文本
-2. 符合SOAP格式
-3. 使用规范的医学术语
-4. 按JSON格式输出结果
+[DEPRECATED] 旧版单体病历生成已废弃。新版使用分节生成(emr_generation_so + emr_generation_assessment + emr_generation_plan)。
 """)
                 
                 print("\n请输入大模型的返回结果（JSON格式）：")
@@ -1938,93 +3227,85 @@ class LLMPipelineService:
     
     def get_all_prompts(self, turns: List[TranscriptTurn]) -> List[Dict[str, Any]]:
         stages = []
-        
+
         segments = self._segment_turns(turns)
         total_segments = len(segments)
-        
+
         for i, segment in enumerate(segments):
             transcript_text = self._format_segment(segment)
-            prompt = self._build_role_annotation_prompt(transcript_text)
-            
+            prompt = self.prompt_manager.render("turn_cleaning", transcript=transcript_text)
+
             stages.append({
-                "stage": "role_annotation",
+                "stage": "turn_cleaning",
                 "segment_index": i,
                 "total_segments": total_segments,
                 "prompt": prompt,
-                "description": f"阶段1.{i+1}/{total_segments}: 角色识别与证据标注",
+                "description": f"阶段1.{i+1}/{total_segments}: 转写清洗与角色纠错",
                 "instructions": """
-1. 分析对话内容，判断每个说话人(spk0, spk1等)是医生还是患者
-2. 用XML标签标注证据字段：
-   - <主诉>...</主诉>
-   - <现病史>...</现病史>
-   - <既往史>...</既往史>
-   - <体格检查>...</体格检查>
-   - <辅助检查>...</辅助检查>
-   - <诊断>...</诊断>
-   - <治疗>...</治疗>
-   - <医嘱>...</医嘱>
-3. 按JSON格式输出结果：
-{
-  "role_mapping": {"spk0": "doctor", "spk1": "patient"},
-  "annotated_text": "标注后的对话文本..."
-}
+判断每个turn角色(doctor/patient)、修正ASR错误。
+输出turns数组，每项含turn_id、speaker_role、corrected_text、changed_spans、correction_confidence。
+详见 turn_cleaning 模板。
 """
             })
-        
+
         stages.append({
-            "stage": "term_normalization",
-            "prompt": "[待阶段1全部完成后生成]",
-            "description": "阶段2: 术语规范化",
+            "stage": "fact_extraction",
+            "prompt": "[待阶段1完成后生成]",
+            "description": "阶段2: 事实抽取与证据绑定",
             "instructions": """
-1. 识别文本中的口语化医学术语
-2. 将口语化术语替换为标准医学术语
-3. 保持XML标签和对话格式不变
-4. 按JSON格式输出结果：
-{
-  "normalized_text": "规范化后的完整文本",
-  "terms": [{"original": "原术语", "normalized": "标准术语", "category": "类别"}]
-}
+从清洗后的对话轮次中抽取原子临床事实。
+每条事实含：section_candidate(S/O/A/P)、concept_type、mention、polarity、temporality、certainty、speaker、evidence_turn_ids、evidence_text。
+详见 fact_extraction 模板。
 """,
             "pending": True
         })
-        
+
         stages.append({
-            "stage": "field_extraction",
+            "stage": "emr_generation_so",
             "prompt": "[待阶段2完成后生成]",
-            "description": "阶段3: 字段抽取",
+            "description": "阶段3: 分节生成SO（主观+客观）",
             "instructions": """
-1. 从XML标签中提取对应字段的内容
-2. 合并相同字段的内容（去重）
-3. 处理可能的冲突
-4. 按JSON格式输出结果：
-{
-  "subjective": {"chief_complaint": {"value": "...", "speaker": "...", "confidence": 0.9}, ...},
-  "objective": {...},
-  "assessment": {...},
-  "plan": {...}
-}
+根据S/O事实表生成Subjective和Objective两部分。
+S: chief_complaint、history_present_illness、denied_symptoms、past_history
+O: physical_examination、auxiliary_examination
+禁止生成诊断和计划。详见 emr_generation_so 模板。
 """,
             "pending": True
         })
-        
+
         stages.append({
-            "stage": "emr_generation",
+            "stage": "emr_generation_assessment",
             "prompt": "[待阶段3完成后生成]",
-            "description": "阶段4: 病历生成",
+            "description": "阶段4-1: 生成评估(Assessment)",
             "instructions": """
-1. 根据结构化数据生成病历文本
-2. 符合SOAP格式
-3. 按JSON格式输出结果：
-{
-  "subjective": {"text": "主观数据段落", "chief_complaint": "...", ...},
-  "objective": {"text": "客观数据段落", ...},
-  "assessment": {"text": "评估段落", ...},
-  "plan": {"text": "计划段落", ...}
-}
+按三层诊断策略生成评估：explicit_diagnosis / suspected_diagnosis / symptom_based_assessment。
+输出assessment_items数组。详见 emr_generation_assessment 模板。
 """,
             "pending": True
         })
-        
+
+        stages.append({
+            "stage": "emr_generation_plan",
+            "prompt": "[待阶段4-1完成后生成]",
+            "description": "阶段4-2: 生成计划(Plan)",
+            "instructions": """
+拆分为4个子字段：medications、tests、follow_up、education。
+每条必须有fact_id依据。详见 emr_generation_plan 模板。
+""",
+            "pending": True
+        })
+
+        stages.append({
+            "stage": "verification",
+            "prompt": "[待阶段4-2完成后生成]",
+            "description": "阶段5: 核查与修订",
+            "instructions": """
+四维度核查：unsupported_claims、missing_critical_facts、internal_conflicts、certainty_errors。
+输出issues问题清单和修订后的soap_final。详见 soap_verification 模板。
+""",
+            "pending": True
+        })
+
         return stages
     
     def process_stage_with_user_input(
@@ -2044,19 +3325,17 @@ class LLMPipelineService:
         segments = self._segment_turns(turns)
         total_segments = len(segments)
         
-        if stage == "role_annotation":
+        if stage == "turn_cleaning":
             segment_index = context.get("segment_index", 0)
             segment = segments[segment_index] if segment_index < len(segments) else segments[0]
             
-            result = self._parse_role_annotation_response(user_response, segment)
+            cleaning_result = self._parse_cleaning_response(user_response, segment)
             
-            all_annotated_texts = context.get("all_annotated_texts", [])
-            all_evidence_traces = context.get("all_evidence_traces", [])
+            if "turns" in cleaning_result:
+                self._apply_asr_corrections(cleaning_result, segment)
             
-            if result.get("annotated_text"):
-                all_annotated_texts.append(result["annotated_text"])
-            if result.get("evidence_traces"):
-                all_evidence_traces.extend(result["evidence_traces"])
+            all_cleaned_turns = context.get("all_cleaned_turns", [])
+            all_cleaned_turns.extend(cleaning_result.get("turns", []))
             
             next_stage = None
             next_prompt = None
@@ -2064,78 +3343,298 @@ class LLMPipelineService:
             next_description = None
             
             if segment_index + 1 < total_segments:
-                next_stage = "role_annotation"
+                next_stage = "turn_cleaning"
                 next_segment_index = segment_index + 1
-                next_prompt = self._build_role_annotation_prompt(
-                    self._format_segment(segments[next_segment_index])
+                next_segment = segments[next_segment_index]
+                next_prompt = self.prompt_manager.render(
+                    "turn_cleaning",
+                    transcript=self._format_segment(next_segment)
                 )
-                next_description = f"阶段1.{next_segment_index + 1}/{total_segments}: 角色识别与证据标注"
+                next_description = f"阶段1.{next_segment_index + 1}/{total_segments}: 转写清洗与角色纠错"
             else:
-                next_stage = "term_normalization"
-                combined_annotated_text = "\n\n".join(all_annotated_texts)
-                next_prompt = self._build_normalization_prompt(combined_annotated_text)
-                next_description = "阶段2: 术语规范化"
+                next_stage = "fact_extraction"
+                compact_turns = self._build_compact_turns(all_cleaned_turns)
+                turns_json = json.dumps(compact_turns, ensure_ascii=False, indent=2)
+                next_prompt = self.prompt_manager.render(
+                    "fact_extraction",
+                    turns_json=turns_json
+                )
+                logger.info(f"阶段1完成，共{len(all_cleaned_turns)}个清洗后轮次")
+                next_description = f"阶段2: 事实抽取与证据绑定 (共{len(all_cleaned_turns)}个轮次，{total_segments}段)"
             
             return {
-                "result": result,
+                "result": cleaning_result,
                 "next_stage": next_stage,
                 "next_prompt": next_prompt,
                 "next_segment_index": next_segment_index,
                 "next_description": next_description,
                 "context_update": {
-                    "all_annotated_texts": all_annotated_texts,
-                    "all_evidence_traces": all_evidence_traces,
-                    "role_mapping": {**context.get("role_mapping", {}), **result.get("role_mapping", {})}
+                    "all_cleaned_turns": all_cleaned_turns,
+                    "role_mapping": {**context.get("role_mapping", {}), **cleaning_result.get("role_mapping", {})}
                 }
             }
         
-        elif stage == "term_normalization":
-            all_annotated_texts = context.get("all_annotated_texts", [])
-            combined_annotated_text = "\n\n".join(all_annotated_texts) if all_annotated_texts else "\n\n".join([self._format_segment(s) for s in segments])
+        elif stage == "fact_extraction":
+            all_cleaned_turns = context.get("all_cleaned_turns", [])
+            logger.info(f"收到用户输入的事实抽取结果，处理 {len(all_cleaned_turns)} 个轮次")
             
-            result = self._parse_normalization_response(user_response, combined_annotated_text)
+            parsed = self._extract_json_from_response(user_response, "事实抽取")
+            facts_data = parsed.get("facts", []) if parsed else []
+            logger.info(f"手动提取到 {len(facts_data)} 条事实")
             
-            normalized_text = result.get("normalized_text", combined_annotated_text)
+            if not facts_data:
+                return {
+                    "result": {"error": "未能从输入中提取事实JSON"},
+                    "next_stage": "fact_extraction",
+                    "next_prompt": self.prompt_manager.render(
+                        "fact_extraction",
+                        turns_json=json.dumps(all_cleaned_turns, ensure_ascii=False, indent=2)
+                    ),
+                    "next_description": "请重新输入: 阶段2: 事实抽取与证据绑定"
+                }
+            
+            so_facts = [f for f in facts_data if f.get("section_candidate") in ("S", "O")]
+            a_facts = [f for f in facts_data if f.get("section_candidate") == "A"]
+            p_facts = [f for f in facts_data if f.get("section_candidate") == "P"]
+            logger.info(f"事实分类: S+O={len(so_facts)}, A={len(a_facts)}, P={len(p_facts)}")
+            
+            self._lightweight_normalize(facts_data)
+            
+            dialogue_parts = []
+            for fact in so_facts:
+                mention = fact.get("normalized_term") or fact.get("mention", "")
+                speaker = fact.get("speaker", "unknown")
+                dialogue_parts.append(f"[{speaker}]: {mention}")
+            dialogue_summary = "\n".join(dialogue_parts)
+            
+            next_prompt_so = self.prompt_manager.render(
+                "emr_generation_so",
+                facts_json=json.dumps(so_facts, ensure_ascii=False, indent=2),
+                dialogue_summary=dialogue_summary
+            )
             
             return {
-                "result": result,
-                "next_stage": "field_extraction",
-                "next_prompt": self._build_extraction_prompt(normalized_text, context.get("role_mapping", {})),
-                "next_description": "阶段3: 字段抽取",
+                "result": {"facts_count": len(facts_data), "facts": facts_data},
+                "next_stage": "emr_generation_so",
+                "next_prompt": next_prompt_so,
+                "next_description": f"阶段3: 分节生成SO（共{len(so_facts)}条S/O事实）",
                 "context_update": {
-                    "normalized_text": normalized_text
+                    "facts": facts_data,
+                    "so_facts": so_facts,
+                    "a_facts": a_facts,
+                    "p_facts": p_facts
                 }
             }
         
-        elif stage == "field_extraction":
-            normalized_text = context.get("normalized_text", "")
-            if not normalized_text:
-                all_annotated_texts = context.get("all_annotated_texts", [])
-                normalized_text = "\n\n".join(all_annotated_texts) if all_annotated_texts else "\n\n".join([self._format_segment(s) for s in segments])
+        elif stage == "emr_generation_so":
+            facts = context.get("facts", [])
+            logger.info("收到用户输入的SO生成结果")
             
-            all_evidence_traces = context.get("all_evidence_traces", [])
-            result = self._parse_extraction_response(user_response, all_evidence_traces)
+            parsed = self._extract_json_from_response(user_response, "SO生成")
+            
+            subjective = parsed.get("subjective", {}) if parsed else {}
+            objective = parsed.get("objective", {}) if parsed else {}
+            so_result = {"subjective": subjective, "objective": objective}
+            
+            a_facts = context.get("a_facts", [])
+            subjective_text = json.dumps(subjective, ensure_ascii=False, indent=2)
+            objective_text = json.dumps(objective, ensure_ascii=False, indent=2)
+            
+            next_prompt_assessment = self.prompt_manager.render(
+                "emr_generation_assessment",
+                subjective_text=subjective_text,
+                objective_text=objective_text,
+                facts_json=json.dumps(a_facts, ensure_ascii=False, indent=2)
+            )
             
             return {
-                "result": result,
-                "next_stage": "emr_generation",
-                "next_prompt": self._build_emr_generation_prompt(result, context.get("role_mapping", {})),
-                "next_description": "阶段4: 病历生成",
+                "result": so_result,
+                "next_stage": "emr_generation_assessment",
+                "next_prompt": next_prompt_assessment,
+                "next_description": f"阶段4-1: 生成评估（共{len(a_facts)}条A事实）",
                 "context_update": {
-                    "extraction_result": result
+                    "subjective": subjective,
+                    "objective": objective,
+                    "subjective_text": subjective_text,
+                    "objective_text": objective_text,
+                    "so_result": so_result
                 }
             }
         
-        elif stage == "emr_generation":
-            extraction_result = context.get("extraction_result", {})
-            result = self._parse_emr_response(user_response, extraction_result, visit_id, True)
+        elif stage == "emr_generation_assessment":
+            logger.info("收到用户输入的评估生成结果")
+            
+            parsed = self._extract_json_from_response(user_response, "评估生成")
+            assessment = parsed.get("assessment", {}) if parsed else {}
+            assessment_items = parsed.get("assessment_items", []) if parsed else []
+            assessment_text = json.dumps(assessment, ensure_ascii=False, indent=2)
+            
+            p_facts = context.get("p_facts", [])
+            subjective_text = context.get("subjective_text", "{}")
+            objective_text = context.get("objective_text", "{}")
+            
+            next_prompt_plan = self.prompt_manager.render(
+                "emr_generation_plan",
+                subjective_text=subjective_text,
+                objective_text=objective_text,
+                assessment_text=assessment_text,
+                facts_json=json.dumps(p_facts, ensure_ascii=False, indent=2)
+            )
             
             return {
-                "result": result,
+                "result": {"assessment": assessment, "assessment_items": assessment_items},
+                "next_stage": "emr_generation_plan",
+                "next_prompt": next_prompt_plan,
+                "next_description": f"阶段4-2: 生成计划（共{len(p_facts)}条P事实）",
+                "context_update": {
+                    "assessment": assessment,
+                    "assessment_items": assessment_items,
+                    "assessment_text": assessment_text
+                }
+            }
+        
+        elif stage == "emr_generation_plan":
+            logger.info("收到用户输入的计划生成结果")
+            
+            parsed = self._extract_json_from_response(user_response, "计划生成")
+            plan = parsed.get("plan", {}) if parsed else {}
+            plan_items = parsed.get("plan_items", {}) if parsed else {}
+            
+            subjective = context.get("subjective", {})
+            objective = context.get("objective", {})
+            assessment = context.get("assessment", {})
+            
+            draft_emr = json.dumps({
+                "subjective": subjective,
+                "objective": objective,
+                "assessment": assessment,
+                "plan": plan
+            }, ensure_ascii=False, indent=2)
+            
+            facts = context.get("facts", [])
+            facts_table = json.dumps(facts, ensure_ascii=False, indent=2)
+            role_mapping = json.dumps(context.get("role_mapping", {}), ensure_ascii=False, indent=2)
+            
+            next_prompt_verify = self.prompt_manager.render(
+                "soap_verification",
+                draft_emr=draft_emr,
+                fact_table=facts_table,
+                role_mapping=role_mapping
+            )
+            
+            return {
+                "result": {"plan": plan, "plan_items": plan_items},
+                "next_stage": "verification",
+                "next_prompt": next_prompt_verify,
+                "next_description": f"阶段5: 核查与修订（共{len(facts)}条事实）",
+                "context_update": {
+                    "plan": plan,
+                    "plan_items": plan_items,
+                    "draft_emr": draft_emr
+                }
+            }
+        
+        elif stage == "verification":
+            logger.info("收到用户输入的核查结果，处理完成")
+            
+            parsed = self._extract_json_from_response(user_response, "SOAP核查")
+            soap_final = parsed.get("soap_final", {}) if parsed else {}
+            issues = parsed.get("issues", {}) if parsed else {}
+            
+            logger.info(f"核查完成: unsupported={len(issues.get('unsupported_claims',[]))}, missing={len(issues.get('missing_critical_facts',[]))}, conflicts={len(issues.get('internal_conflicts',[]))}")
+            
+            return {
+                "result": {"soap_final": soap_final, "issues": issues},
                 "next_stage": None,
                 "next_prompt": None,
                 "next_description": None,
-                "completed": True
+                "completed": True,
+                "context_update": {
+                    "soap_final": soap_final,
+                    "issues": issues
+                }
             }
         
+        elif stage == "role_annotation":
+            return self._legacy_role_annotation_stage(stage, user_response, context, segments, total_segments)
+        elif stage == "term_normalization":
+            return self._legacy_term_normalization_stage(stage, user_response, context, segments)        
+        elif stage == "field_extraction":
+            return self._legacy_field_extraction_stage(stage, user_response, context, segments)
+        elif stage == "emr_generation":
+            return self._legacy_emr_generation_stage(stage, user_response, context, segments)
+        
         return {"error": f"未知阶段: {stage}"}
+
+    def _build_compact_turns(self, all_cleaned_turns):
+        compact = []
+        for turn in all_cleaned_turns:
+            compact.append({
+                "turn_id": turn.get("turn_id"),
+                "speaker_role": turn.get("speaker_role"),
+                "corrected_text": turn.get("corrected_text", "")
+            })
+        return compact
+
+    def _legacy_role_annotation_stage(self, stage, user_response, context, segments, total_segments):
+        segment_index = context.get("segment_index", 0)
+        segment = segments[segment_index] if segment_index < len(segments) else segments[0]
+        result = self._parse_role_annotation_response(user_response, segment)
+        all_annotated_texts = context.get("all_annotated_texts", [])
+        if result.get("annotated_text"):
+            all_annotated_texts.append(result["annotated_text"])
+        if segment_index + 1 < total_segments:
+            next_stage = "role_annotation"
+            next_segment_index = segment_index + 1
+            next_prompt = self._build_role_annotation_prompt(self._format_segment(segments[next_segment_index]))
+            next_description = f"阶段1.{next_segment_index + 1}/{total_segments}: 角色识别与证据标注"
+        else:
+            next_stage = "term_normalization"
+            next_prompt = self._build_normalization_prompt("\n\n".join(all_annotated_texts))
+            next_description = "阶段2: 术语规范化"
+        return {
+            "result": result,
+            "next_stage": next_stage,
+            "next_prompt": next_prompt,
+            "next_segment_index": next_segment_index if segment_index + 1 < total_segments else None,
+            "next_description": next_description,
+            "context_update": {
+                "all_annotated_texts": all_annotated_texts,
+                "role_mapping": {**context.get("role_mapping", {}), **result.get("role_mapping", {})}
+            }
+        }
+
+    def _legacy_term_normalization_stage(self, stage, user_response, context, segments):
+        all_annotated_texts = context.get("all_annotated_texts", [])
+        combined = "\n\n".join(all_annotated_texts) if all_annotated_texts else "\n\n".join([self._format_segment(s) for s in segments])
+        result = self._parse_normalization_response(user_response, combined)
+        normalized_text = result.get("normalized_text", combined)
+        return {
+            "result": result,
+            "next_stage": "field_extraction",
+            "next_prompt": self._build_extraction_prompt(normalized_text, context.get("role_mapping", {})),
+            "next_description": "阶段3: 字段抽取",
+            "context_update": {"normalized_text": normalized_text}
+        }
+
+    def _legacy_field_extraction_stage(self, stage, user_response, context, segments):
+        normalized_text = context.get("normalized_text", "")
+        result = self._parse_extraction_response(user_response, context.get("all_evidence_traces", []))
+        return {
+            "result": result,
+            "next_stage": "emr_generation",
+            "next_prompt": self._build_emr_generation_prompt(result, context.get("role_mapping", {})),
+            "next_description": "阶段4: 病历生成",
+            "context_update": {"extraction_result": result}
+        }
+
+    def _legacy_emr_generation_stage(self, stage, user_response, context, segments):
+        extraction_result = context.get("extraction_result", {})
+        result = self._parse_emr_response(user_response, extraction_result, context.get("visit_id", ""), True)
+        return {
+            "result": result,
+            "next_stage": None,
+            "next_prompt": None,
+            "next_description": None,
+            "completed": True
+        }

@@ -25,3 +25,4 @@ class Visit(Base):
     normalized_terms = relationship("NormalizedTerm", back_populates="visit", cascade="all, delete-orphan")
     extracted_items = relationship("ExtractedItem", back_populates="visit", cascade="all, delete-orphan")
     emr_records = relationship("EMRRecord", back_populates="visit", cascade="all, delete-orphan")
+    atomic_facts = relationship("AtomicFact", back_populates="visit", cascade="all, delete-orphan")

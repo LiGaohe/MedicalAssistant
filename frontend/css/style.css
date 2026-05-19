@@ -1064,6 +1064,50 @@ h3 {
     font-size: 16px;
 }
 
+.debug-prompt {
+    position: relative;
+}
+
+.debug-prompt-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.debug-prompt-header h4 {
+    color: var(--text-primary);
+    font-size: 16px;
+    margin-bottom: 0;
+}
+
+.btn-copy {
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+    padding: 4px 12px;
+    border-radius: var(--border-radius-sm);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.btn-copy:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border-color: var(--primary-color);
+}
+
+.btn-copy:active {
+    transform: scale(0.98);
+}
+
+.btn-copy.copied {
+    background: var(--success-color);
+    color: white;
+    border-color: var(--success-color);
+}
+
 .debug-prompt pre,
 .debug-instructions pre,
 #resultContent {

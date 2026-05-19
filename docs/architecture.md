@@ -72,6 +72,7 @@ MedicalAssisstant/
 │   │   ├── term.py            # 规范化术语模型（含UMLS编码）
 │   │   ├── extracted_item.py  # 抽取要素模型
 │   │   ├── emr_record.py      # 病历记录模型
+│   │   ├── atomic_fact.py     # 原子事实模型（阶段2核心中间表示）
 │   │   └── evaluation_record.py # 评估记录模型
 │   ├── services/              # 业务服务
 │   │   ├── __init__.py
@@ -97,6 +98,7 @@ MedicalAssisstant/
 │   │   ├── extraction_service.py # 病历要素抽取服务
 │   │   ├── emr_generation_service.py # 病历生成服务
 │   │   ├── medical_record_pipeline.py # 病历生成流水线（支持并行处理）
+│   │   ├── fact_service.py    # 原子事实CRUD服务（阶段2输出）
 │   │   ├── evaluation/         # 病历质量评估模块
 │   │   │   ├── __init__.py     # 模块入口
 │   │   │   ├── base.py         # 评估器基类
@@ -1031,6 +1033,7 @@ graph TB
 | NormalizedTerm | normalized_terms | 规范化术语 | backend/models/term.py |
 | ExtractedItem | extracted_items | 抽取的病历要素 | backend/models/extracted_item.py |
 | EMRRecord | emr_records | 病历记录 | backend/models/emr_record.py |
+| AtomicFact | atomic_facts | 原子临床事实（阶段2输出，核心中间表示） | backend/models/atomic_fact.py |
 | LLMConfig | llm_configs | LLM配置（含JSON模式、思考模式） | backend/models/llm_config.py |
 
 #### LLMConfig 字段说明
@@ -1077,12 +1080,13 @@ graph TB
 | TranscriptNormalizer | 文本标准化，说话人映射 | backend/services/normalizer.py |
 | SpeakerRoleClassifier | 说话人角色识别，基于语义分析识别医生/患者 | backend/services/speaker_role_classifier.py |
 | EvidenceService | 证据选择，基于触发词、置信度和LLM筛选相关片段 | backend/services/evidence_service.py |
-| TerminologyService | 术语规范化，LLM识别术语+UMLS检索+LLM候选选择，支持并行处理 | backend/services/terminology_service.py |
+| TerminologyService | 术语规范化，LLM识别术语+UMLS检索+LLM候选选择，支持并行处理，新增 normalize_single_term() 方法用于选择性规范化(阶段3) | backend/services/terminology_service.py |
 | TranslationService | 中英文翻译，使用专门翻译小模型提升翻译速度 | backend/services/translation_service.py |
+| FactService | 原子事实CRUD服务，封装AtomicFact的增删改查操作 | backend/services/fact_service.py |
 | ExtractionService | 病历要素抽取，从证据中抽取SOAP要素 | backend/services/extraction_service.py |
 | EMRGenerationService | 病历生成，基于模板和LLM生成结构化病历 | backend/services/emr_generation_service.py |
 | MedicalRecordPipeline | 整合服务，串联所有处理步骤，支持并行处理 | backend/services/medical_record_pipeline.py |
-| LLMPipelineService | 多阶段LLM处理，支持调试模式和并行优化 | backend/services/llm_pipeline_service.py |
+| LLMPipelineService | 多阶段LLM处理，阶段1:转写清洗与角色纠错(turn JSON输出)，阶段2:事实抽取与证据绑定(AtomicFact输出)，阶段3:选择性术语规范化(基于事实表)，阶段4a:分节生成SO(仅S/O事实)，阶段4b:分节生成AP(A/P事实过滤，三层诊断+四子字段计划)，阶段5:核查与修订(全量事实)；提示词已精简50-60%，事实按section过滤减少传输量 | backend/services/llm_pipeline_service.py |
 | LLMPipelineServiceEnglish | 英文多阶段LLM处理，跳过翻译步骤优化 | backend/services/llm_pipeline_service_en.py |
 | LLMService | LLM服务，支持多适配器、模板渲染、JSON模式和思考模式 | backend/services/llm/llm_service.py |
 
@@ -1223,12 +1227,14 @@ def run_async(coro):
 graph LR
     A[音频输入] --> B[ASR转写]
     B --> C[说话人分离]
-    C --> D[角色识别]
-    D --> E[证据选择]
-    E --> F[术语规范化]
-    F --> G[要素抽取]
-    G --> H[病历生成]
-    H --> I[病历输出]
+    C --> D[阶段1: 转写清洗与角色纠错]
+    D --> E[阶段2: 事实抽取与证据绑定]
+    E --> F[阶段3: 选择性术语规范化]
+    F --> G[阶段4a: 分节生成SO]
+    G --> H[阶段4b: 分节生成AP<br/>三层诊断+四子字段计划]
+    H --> I[阶段5: 核查与修订]
+    I --> J[病历输出]
+    style F fill:#fff3e0
 ```
 
 ### 并行处理流程

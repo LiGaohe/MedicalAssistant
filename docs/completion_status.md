@@ -1,5 +1,558 @@
 # 完成状态记录
 
+## 2026-05-19 性能优化：提示词精简与事实过滤
+
+### 问题分析
+
+实际运行日志显示，从阶段2开始提示词显著增长，总处理时间超过8分钟（496s）：
+
+| 阶段 | 优化前提示词长度 | 优化前耗时 |
+|------|-----------------|-----------|
+| 阶段2（事实抽取） | 8,391 chars | 149.55s |
+| 阶段4a（SO生成） | 12,152 chars | 47.50s |
+| 阶段4b-1（评估） | 13,640 chars | ~21s |
+| 阶段4b-2（计划） | 14,344 chars | ~14s |
+| 阶段5（核查） | 20,128 chars | 64.17s |
+
+**根因**：
+1. 提示词模板过度冗长，包含大量冗余指令和详细示例
+2. 所有阶段（SO/评估/计划/核查）都传入**全部事实的完整JSON**，而每个阶段实际只需特定 section 的事实
+
+### 优化方案
+
+**优化1：精简提示词模板**
+
+将6个核心模板大幅缩减（每个减少50-60%），保留关键指令和输出格式，去除冗余描述和示例。
+
+| 模板 | 优化前 | 优化后 | 缩减 |
+|------|--------|--------|------|
+| turn_cleaning | ~1300 chars | 496 chars | -62% |
+| fact_extraction | ~2100 chars | 950 chars | -55% |
+| emr_generation_so | ~2100 chars | 1039 chars | -50% |
+| emr_generation_assessment | ~1800 chars | 848 chars | -53% |
+| emr_generation_plan | ~2400 chars | 877 chars | -63% |
+| soap_verification | ~2200 chars | 1128 chars | -49% |
+
+**优化2：按 section_candidate 过滤事实**
+
+新增 `_filter_facts_by_section()` 方法，各阶段仅传入相关 section 的事实：
+- 阶段4a（SO生成）：仅传入 S+O 事实（减少约40%事实数据）
+- 阶段4b-1（评估）：仅传入 A 事实（减少约88%事实数据）
+- 阶段4b-2（计划）：仅传入 P 事实（减少约52%事实数据）
+- 阶段5（核查）：保持全部事实（需全面核查）
+- 新增 `_build_compact_context()` 方法用于紧凑上下文摘要
+
+### 修改文件
+
+1. **backend/services/llm/prompts.py**
+   - 精简 `turn_cleaning` 模板（52行 → 23行）
+   - 精简 `fact_extraction` 模板（80行 → 40行）
+   - 精简 `emr_generation_so` 模板（53行 → 37行）
+   - 精简 `emr_generation_assessment` 模板（73行 → 31行）
+   - 精简 `emr_generation_plan` 模板（90行 → 33行）
+   - 精简 `soap_verification` 模板（103行 → 38行）
+
+2. **backend/services/llm_pipeline_service.py**
+   - 新增 `_filter_facts_by_section(fact_records, sections)` 方法
+   - 新增 `_build_compact_context(fact_records, max_items)` 方法
+   - 新增 `_build_compact_turns(all_cleaned_turns)` 方法（用于调试模式构建紧凑轮次JSON）
+   - 修改 `_generate_so_stage()`：使用 `_filter_facts_by_section(fact_records, ["S", "O"])`
+   - 修改 `_generate_ap_stage()`：评估使用 A 事实，计划使用 P 事实
+   - 重写 `process_stage_with_user_input()`：全部改为新版阶段名称（turn_cleaning → fact_extraction → emr_generation_so → emr_generation_assessment → emr_generation_plan → verification），使用 prompt_manager 构建提示词；跳过自动执行的 normalize_terms 阶段
+   - 新增 `_legacy_role_annotation_stage/term_normalization/field_extraction/emr_generation` 兼容旧阶段名称
+   - 新增 `_lightweight_normalize()` 方法：在 fact_extraction 后自动使用 ChineseTerm 本地库进行轻量术语规范化
+   - 更新 `_debug_interact()` 手动输入提示为新版简洁模板
+   - 更新 `get_all_prompts()` 移除 normalize_terms 阶段（自动执行），调整阶段编号（1→6）
+
+### 预期效果
+
+- 提示词模板总长度缩减约 **50-60%**
+- 各阶段事实数据量缩减 **40-88%**（根据 section 分布）
+- 预计总提示词长度从 ~68K chars 降至 ~35K chars（约 **48% 缩减**）
+- 预计处理时间缩短约 **30-50%**
+
+---
+
+## 2026-05-19 BugFix 3: 证据溯源数据填充
+
+### 变更内容
+
+修复 `evidence_traces` 始终为空数组的问题，实现从 `AtomicFact` → `TranscriptTurn` 的证据溯源链路，前端可清晰展示每条病历内容对应的原始转写文本来源。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| `_build_evidence_traces_from_fact_ids()` | ✅ 完成 | 从 fact_id 集合反查 AtomicFact → TranscriptTurn，构建 evidence_trace 条目 |
+| `_enrich_evidence_traces()` | ✅ 完成 | 按 SO/A/P 分节填充各字段 evidence_traces，S/O 按 section_candidate 分组，A 来自 assessment_items，P 来自 plan_items 子项 |
+| `_save_evidence_spans_from_emr()` | ✅ 完成 | 遍历富化后的 EMR，写入 EvidenceSpan 表，供 `/api/emr/evidence/{visit_id}` 查询 |
+| `process_transcript()` 流程调整 | ✅ 完成 | 移除冗余的 `_normalize_emr_format()`；核查后保留 fact_id 引用；依次调用 normalize → enrich → save_spans → save_emr |
+
+### 修改文件
+
+1. **backend/services/llm_pipeline_service.py**
+   - 新增 `_build_evidence_traces_from_fact_ids(fact_ids, fact_by_id, turn_by_index)` 方法
+   - 新增 `_enrich_evidence_traces(emr_result, fact_records, turns)` 方法
+   - 新增 `_save_evidence_spans_from_emr(emr_result, visit_id)` 方法
+   - 修改 `process_transcript()`：将 `emr_result` 变量重命名为 `emr_draft`；移除第一处 `_normalize_emr_format()`；核查后注入 `so_used_fact_ids`/`assessment_items`/`plan_items`；调用富化和保存方法
+
+2. **backend/services/llm/prompts.py**
+   - 无需修改（已有 `used_fact_ids` 和 `supporting_fact_ids` 输出要求）
+
+### 证据溯源链路
+
+```
+LLM 生成 SOAP → 返回 used_fact_ids / supporting_fact_ids
+                              ↓
+_enrich_evidence_traces() → 反查 AtomicFact.evidence_turn_ids
+                              ↓
+_build_evidence_traces_from_fact_ids() → 反查 TranscriptTurn
+                              ↓
+填充 emr_json.{section}.{field}.evidence_traces = [{speaker, turn_text, turn_index, content}, ...]
+                              ↓
+_save_evidence_spans_from_emr() → 写入 EvidenceSpan 表
+                              ↓
+前端 buildEvidenceHtml() → 展示"证据来源"内联面板
+showEvidence() → 展示"证据溯源"表格面板
+```
+
+---
+
+## 2026-05-18 阶段5实现：核查与修订
+
+### 变更内容
+
+在 LLM Pipeline 中新增阶段5核查与修订，在 SOAP 病历生成后自动执行结构化核查，产出的问题清单包括四个核查维度，并基于问题清单输出修订后的 `soap_final`。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 新增 soap_verification 提示模板 | ✅ 完成 | `prompts.py` 新增模板，定义四个核查维度的详细指令和输出格式 |
+| 新增 _verification_stage() | ✅ 完成 | `llm_pipeline_service.py` 新增方法，实现完整的核查与修订流程 |
+| 核查规则实现 | ✅ 完成 | 四个维度：unsupported_claims、missing_critical_facts、internal_conflicts、certainty_errors |
+| 修订逻辑实现 | ✅ 完成 | 优先级：删除无证据声明 → 补充遗漏事实 → 修正措辞 |
+| 集成到 process_transcript() | ✅ 完成 | 在阶段4之后调用阶段5，输出使用修订后的 soap_final |
+| API 层适配 | ✅ 完成 | `PipelineProcessResponse` 新增 `fact_result` 和 `verification_result` 字段 |
+
+### 修改文件
+
+1. **backend/services/llm/prompts.py**
+   - 在 `_load_chinese_templates()` 中新增 `PromptTemplate`：
+     - `soap_verification`：输入 `draft_emr`（草稿 SOAP）、`fact_table`（事实表 JSON）、`role_mapping`（角色映射）。四个核查维度：`unsupported_claims`（无证据声明）、`missing_critical_facts`（遗漏关键事实）、`internal_conflicts`（内部冲突）、`certainty_errors`（确定性错误）。输出 JSON 包含 `issues`（四个数组）和 `soap_final`（修订后的完整 SOAP）
+
+2. **backend/services/llm/prompts.py**（重构）
+   - 复用已有 `_format_facts_for_prompt()` 辅助方法，避免内联序列化逻辑重复
+
+3. **backend/services/llm_pipeline_service.py**
+   - 新增 `_verification_stage(draft_emr, fact_records, role_mapping)` 方法：
+     - 将 `draft_emr` 序列化为 JSON
+     - 使用 `_format_facts_for_prompt()` 将 AtomicFact 列表转换为 JSON
+     - 渲染 `soap_verification` 模板
+     - 调用 LLM（支持 debug_mode）
+     - 解析 JSON 响应获取 `issues` 和 `soap_final`
+     - 记录各维度问题数量到日志
+     - 失败时回退到使用原始草稿
+   - `process_transcript()` 阶段5调用：
+     - 在阶段4之后调用 `_verification_stage(emr_result, fact_records, all_role_mappings)`
+     - 返回字典中 `emr_result` 使用修订后的 `soap_final`
+
+4. **backend/api/emr.py**
+   - `PipelineProcessResponse` 新增 `fact_result` 和 `verification_result` 字段
+   - `process_with_pipeline()` 返回结果填充新增字段
+
+### 核查维度详解
+
+| 维度 | 字段名 | 检测内容 | 修订策略 |
+|------|--------|----------|----------|
+| 无证据声明 | `unsupported_claims` | 病历中无法在事实表找到对应证据的陈述 | **优先删除**（最高优先级） |
+| 遗漏关键事实 | `missing_critical_facts` | 事实表中高重要度、但在病历中被遗漏的事实 | 补充到对应 SOAP 节 |
+| 内部冲突 | `internal_conflicts` | SOAP 各节之间信息不一致 | 修正冲突内容 |
+| 确定性错误 | `certainty_errors` | suspected 诊断被写成明确诊断等措辞问题 | 调整措辞 |
+
+### 修订优先级
+
+```
+1. 删除无证据声明（unsupported_claims）    — 最高优先级，防止幻觉
+2. 补充遗漏关键事实（missing_critical_facts）— 确保完整性
+3. 修正措辞（certainty_errors + internal_conflicts）— 确保准确性
+```
+
+### 数据流变更
+
+```
+旧流程（阶段4→完成）：
+阶段4 → emr_result → 返回
+
+新流程（阶段4→阶段5→完成）：
+阶段4 → emr_result（草稿）→ 阶段5 _verification_stage()
+  ↓                              ↓
+  输入：draft_emr + fact_table   issues（问题清单）+ soap_final（修订版）
+                                    ↓
+                               返回 soap_final 替代 emr_result
+```
+
+### 返回数据结构变更
+
+| 字段 | 位置 | 说明 |
+|------|------|------|
+| `emr_result` | `PipelineProcessResponse.emr_result` | 修订后的最终 SOAP（来自 `soap_final`） |
+| `emr_draft` | 内部返回字典 | 阶段4原始草稿，保留供调试参考 |
+| `verification_result` | `PipelineProcessResponse.verification_result` | 完整的核查结果，含 `issues` 和 `soap_final` |
+| `fact_result` | `PipelineProcessResponse.fact_result` | 阶段2事实抽取结果 |
+
+### 保持未变更的方法
+
+- `_generate_so_stage()` — 不变，上游消费者保持兼容
+- `_generate_ap_stage()` — 不变
+- `_run_evaluation()` — 不变
+- 旧 prompt 模板 — 保留，向后兼容
+
+---
+
+## 2026-05-18 阶段4重构：分节生成SOAP + 三层诊断
+
+### 变更内容
+
+将 LLM Pipeline 的阶段4从"单次SOAP生成"重构为"分节生成 + 三层诊断策略"，将原来的一个 LLM 调用拆分为三个独立的子阶段调用：SO生成、Assessment生成、Plan生成。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 新增 emr_generation_so 提示模板 | ✅ 完成 | `prompts.py` 新增模板，输入事实表+对话摘要，输出 S+O+used_fact_ids |
+| 新增 emr_generation_assessment 提示模板 | ✅ 完成 | `prompts.py` 新增模板，要求三层诊断策略输出 |
+| 新增 emr_generation_plan 提示模板 | ✅ 完成 | `prompts.py` 新增模板，要求四子字段结构化 |
+| 新增 _format_facts_for_prompt() | ✅ 完成 | 将 AtomicFact ORM 列表格式化为 prompt 用的 JSON 字符串 |
+| 新增 _generate_so_stage() | ✅ 完成 | 阶段4a，调用 emr_generation_so 模板，只生成 Subjective + Objective |
+| 新增 _generate_ap_stage() | ✅ 完成 | 阶段4b，分两步：先生成 Assessment（三层诊断），再生成 Plan（四子字段） |
+| 标记旧方法为 DEPRECATED | ✅ 完成 | `_generate_emr_stage()`、`_build_emr_generation_prompt()` 标记弃用但保留 |
+| 修改 process_transcript() | ✅ 完成 | 阶段4调用改为 `_generate_so_stage()` + `_generate_ap_stage()`，合并结果为 emr_result |
+
+### 修改文件
+
+1. **backend/services/llm/prompts.py**
+   - 在 `_load_chinese_templates()` 中新增 3 个 `PromptTemplate`：
+     - `emr_generation_so`：输入 `facts_json` 和 `dialogue_summary`，输出 `subjective`、`objective`、`used_fact_ids`。核心规则：禁止生成诊断和计划，每条描述必须有事实依据，每条描述引用对应 `fact_id`
+     - `emr_generation_assessment`：输入 `subjective_text`、`objective_text`、`facts_json`，输出 `assessment` 和 `assessment_items`。每条 assessment_item 包含 `certainty_level`、`supporting_fact_ids`、`diagnosis_type`。硬规则：只有 `certainty=explicit` 且 `concept_type=disease` 的事实才能输出 `explicit_diagnosis`
+     - `emr_generation_plan`：输入 `subjective_text`、`objective_text`、`assessment_text`、`facts_json`，输出 `plan` 和 `plan_items`。plan_items 包含 `medications`、`tests`、`follow_up`、`education` 四个子字段
+
+2. **backend/services/llm_pipeline_service.py**
+   - 新增 `_format_facts_for_prompt(fact_records)`：将 AtomicFact ORM 对象列表转换为 JSON 字符串，包含 `fact_id`、`section_candidate`、`concept_type`、`mention`、`normalized_term`、`polarity`、`temporality`、`certainty`、`speaker`、`evidence_turn_ids`、`evidence_text` 字段
+   - 新增 `_generate_so_stage(fact_records, role_mapping)`：
+     - 构建对话摘要（从 fact_records 的 mention 提取）
+     - 渲染 `emr_generation_so` 模板
+     - 调用 LLM → JSON 解析
+     - 返回 `{"subjective": {...}, "objective": {...}, "used_fact_ids": [...]}`
+   - 新增 `_generate_ap_stage(so_result, fact_records, role_mapping)`：
+     - 步骤1：渲染 `emr_generation_assessment` 模板 → 调用 LLM → JSON 解析 → 获取 `assessment` 和 `assessment_items`
+     - 步骤2（延迟 `STAGE_DELAY` 秒后）：渲染 `emr_generation_plan` 模板 → 调用 LLM → JSON 解析 → 获取 `plan` 和 `plan_items`
+     - 返回 `{"assessment": {...}, "plan": {...}, "assessment_items": [...], "plan_items": {...}}`
+   - `_generate_emr_stage()`：添加 DEPRECATED 注释块和 `logger.warning`
+   - `_build_emr_generation_prompt()`：添加 DEPRECATED 注释块和 `logger.warning`
+   - `process_transcript()` 阶段4调用：
+     - 旧：`emr_result = self._generate_emr_stage(extraction_result, ...)`
+     - 新：`so_result = self._generate_so_stage(...)` → `ap_result = self._generate_ap_stage(so_result, ...)` → 合并为 `emr_result` 字典
+
+### 三层诊断策略
+
+| 诊断层次 | diagnosis_type | 触发条件 | 输出约束 |
+|----------|---------------|----------|----------|
+| 明确诊断 | `explicit_diagnosis` | `certainty=explicit` + `concept_type=disease` | 仅可输出1个 |
+| 倾向性诊断 | `suspected_diagnosis` | `certainty=supported` + `concept_type=disease` | 可输出多个 |
+| 症状性评估 | `symptom_based_assessment` | 无明确诊断指向 | 描述症状模式 |
+
+### Plan四子字段结构
+
+| 子字段 | 字段名 | 内容 |
+|--------|--------|------|
+| 药物治疗 | `medications` | 药品名称、用法用量、疗程 |
+| 检查建议 | `tests` | 建议的辅助检查项目 |
+| 随访建议 | `follow_up` | 复诊时间、随访计划 |
+| 健康教育 | `education` | 生活方式指导、注意事项 |
+
+### 数据流变更
+
+```
+旧流程（阶段4→阶段5）：
+阶段4 → _generate_emr_stage(extraction_result, ...)
+         → 单次LLM调用，生成完整SOAP（含S+O+A+P）
+    ↓
+阶段5 → _verification_stage(emr_result, ...)
+
+新流程（阶段4→阶段5）：
+阶段4a → _generate_so_stage(fact_records, role_mapping)
+          → LLM调用1：生成 S（主观数据）+ O（客观数据）
+    ↓
+阶段4b → _generate_ap_stage(so_result, fact_records, role_mapping)
+          → LLM调用2：基于 S+O 生成 Assessment（三层诊断）
+          → LLM调用3：基于 S+O+A 生成 Plan（四子字段结构化）
+    ↓
+阶段5 → _verification_stage(emr_result, ...)
+```
+
+### emr_result 结构变更
+
+| 字段 | 旧版 | 新版 |
+|------|------|------|
+| `subjective` | ✅ 保留 | ✅ 保留 |
+| `objective` | ✅ 保留 | ✅ 保留 |
+| `assessment` | ✅ 保留 | ✅ 保留 |
+| `plan` | ✅ 保留 | ✅ 保留 |
+| `so_used_fact_ids` | — | ✅ 新增，SO生成使用的事实ID列表 |
+| `assessment_items` | — | ✅ 新增，评估项列表（含 diagnosis_type） |
+| `plan_items` | — | ✅ 新增，计划项（含 medications/tests/follow_up/education） |
+
+### 保持未变更的方法
+
+- `_verification_stage()` — 不变，下游消费者保持兼容
+- `_run_evaluation()` — 不变
+- 旧 prompt 模板（`emr_generation`、`emr_generation_with_role`）— 保留，向后兼容
+- `_generate_emr_stage()` — 保留但标记 DEPRECATED
+- `_build_emr_generation_prompt()` — 保留但标记 DEPRECATED
+
+---
+
+## 2026-05-18 阶段3重构：选择性术语规范化
+
+### 变更内容
+
+将 LLM Pipeline 的阶段3从"全文术语规范化"重构为"选择性术语规范化"，不再对全文文本做术语规范化，改为只对阶段2事实表中 `normalization_needed=True` 的 `mention` 字段做规范化。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 新增 normalize_single_term() | ✅ 完成 | `terminology_service.py` 新增薄包装方法，直接调用 `normalize_term()` |
+| 重构 _normalize_terms_stage() | ✅ 完成 | 新签名接受 `fact_records: List[AtomicFact]`，不再接受 `annotated_text` |
+| 更新 process_transcript() | ✅ 完成 | 阶段3调用改为通过 FactService 查询事实表后传入 |
+| 标记旧方法为 DEPRECATED | ✅ 完成 | `_build_normalization_prompt()`、`_normalize_terms_serial()`、`_normalize_terms_parallel()` 标记弃用 |
+| 保留旧 _normalize_terms_stage() | ✅ 完成 | 重命名为 `_normalize_terms_stage_legacy()`，保留兼容 |
+
+### 修改文件
+
+1. **backend/services/terminology_service.py**
+   - 新增 `normalize_single_term(term, context, term_type)` 方法
+   - 作为 `normalize_term()` 的薄包装，语义化命名
+   - 不调用 `identify_colloquial_terms()`，直接规范化单个术语
+
+2. **backend/services/llm_pipeline_service.py**
+   - 导入 `FactService`
+   - 新增 `_normalize_terms_stage(fact_records, role_mapping, visit_id, save_to_db)` 新方法：
+     - 遍历 `fact_records`，筛选 `normalization_needed=True` 且 `mention` 非空的记录
+     - 对每条符合条件的 fact 调用 `terminology_service.normalize_single_term(fact.mention, context="", term_type=fact.concept_type)`
+     - 更新 `fact.normalized_term`、`fact.normalized_code`、`fact.normalization_needed=False`
+     - 提交到数据库
+     - 返回包含 `terms`、`processed_count`、`skipped_count`、`total_count` 的字典
+   - 旧 `_normalize_terms_stage()` 重命名为 `_normalize_terms_stage_legacy()` 并标记 DEPRECATED
+   - `_build_normalization_prompt()` 标记 DEPRECATED
+   - `_normalize_terms_serial()` 标记 DEPRECATED
+   - `_normalize_terms_parallel()` 标记 DEPRECATED
+   - `process_transcript()` 阶段3调用：
+     - 创建 `FactService(self.db)`，查询 `get_facts_by_visit(visit_id)`
+     - 传入 `fact_records` 调用新的 `_normalize_terms_stage()`
+
+### 数据流变更
+
+```
+旧流程（阶段2→阶段3）：
+阶段2 → _fact_extraction_stage()
+    ↓
+阶段3 → _normalize_terms_stage(combined_text, role_mapping, visit_id)
+         → identify_colloquial_terms(annotated_text)  ← 全文扫描
+         → normalize_term(term, context, term_type)   ← 每个术语
+         → normalized_text.replace(original, normalized) ← 全文替换
+         → save_normalized_terms()                    ← 保存 NormalizedTerm 记录
+
+新流程（阶段2→阶段3）：
+阶段2 → _fact_extraction_stage()
+         → _save_atomic_facts() 将事实写入 DB
+    ↓
+阶段3 → FactService.get_facts_by_visit(visit_id)  ← 从 DB 读取事实
+         → _normalize_terms_stage(fact_records, role_mapping, visit_id)
+         → 仅处理 normalization_needed=True 的 fact
+         → normalize_single_term(fact.mention)  ← 不扫描全文
+         → 直接更新 fact.normalized_term、fact.normalized_code  ← 更新 AtomicFact 记录
+         → 不再替换全文文本
+```
+
+### 保持未变更的方法
+
+- `normalize_term()` — 不变（`normalize_single_term()` 的底层实现）
+- `identify_colloquial_terms()` — 保留，旧版 legacy 方法仍需使用
+- `save_normalized_terms()` — 保留，旧版 legacy 方法仍需使用
+- `_normalize_terms_stage_legacy()` — 保留，向后兼容
+- `_normalize_terms_serial()` — 保留但标记 DEPRECATED
+- `_normalize_terms_parallel()` — 保留但标记 DEPRECATED
+- `_build_normalization_prompt()` — 保留但标记 DEPRECATED
+- `_parse_normalization_response()` — 不变
+
+### normalized_result 返回结构变更
+
+| 字段 | 旧版 | 新版 |
+|------|------|------|
+| `normalized_text` | 替换后的全文 | **已移除** |
+| `terms` | `[{original, normalized, category, source, confidence, cui, code, code_system, is_colloquial}]` | `[{fact_id, original, normalized, category, source, confidence, cui, code, code_system, section_candidate}]` |
+| `processed_count` | 无 | 成功处理的 fact 数 |
+| `skipped_count` | 无 | 处理失败的 fact 数 |
+| `total_count` | 无 | 总 fact 数 |
+
+---
+
+## 2026-05-18 阶段2实现：事实抽取与证据绑定
+
+### 变更内容
+
+在 LLM Pipeline 中新增阶段2，从阶段1输出的 turn JSON 中抽取原子临床事实，绑定证据来源，输出结构化事实表。原有的 `_extract_fields_stage()` 标记为 DEPRECATED。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 新增 fact_extraction 提示模板 | ✅ 完成 | `backend/services/llm/prompts.py` 新增 template key |
+| 新增 _fact_extraction_stage() | ✅ 完成 | 从 cleaned_turns 中通过 LLM 抽取原子事实 |
+| 新增 _deduplicate_facts() | ✅ 完成 | 按 mention+section+speaker 去重，合并 evidence_turn_ids |
+| 新增 _save_atomic_facts() | ✅ 完成 | 将事实保存为 AtomicFact 记录到数据库 |
+| 创建 FactService | ✅ 完成 | `backend/services/fact_service.py` 封装 AtomicFact CRUD |
+| 修改 process_transcript() | ✅ 完成 | 在阶段1之后插入阶段2调用 |
+| 标记 _extract_fields_stage() 为 DEPRECATED | ✅ 完成 | 添加 DEPRECATED 注释，调用代码注释掉 |
+| 标记 _extract_evidence_traces() 为 DEPRECATED | ✅ 完成 | 添加 DEPRECATED 注释 |
+| 返回字典新增 fact_result | ✅ 完成 | process_transcript() 响应中包含 fact_result |
+
+### 修改文件
+
+1. **backend/services/llm/prompts.py**
+   - 在 `_load_chinese_templates()` 中新增 `fact_extraction` 模板
+   - 模板要求 LLM 从 cleaned_turns JSON 中抽取原子临床事实
+   - 每条事实包含：section_candidate, concept_type, mention, polarity, temporality, certainty, speaker, evidence_turn_ids, evidence_text
+   - 包含去重规则：同一事实多 turn 提及则合并
+
+2. **backend/services/llm_pipeline_service.py**
+   - 导入 `uuid` 和 `AtomicFact`
+   - 新增 `_fact_extraction_stage()`：构建提示词→调用LLM→解析JSON→去重→保存数据库
+   - 新增 `_deduplicate_facts()`：按 mention+section_candidate+speaker 组合键去重，合并 evidence_turn_ids 和 evidence_text
+   - 新增 `_save_atomic_facts()`：将事实列表保存为 AtomicFact 记录
+   - 修改 `process_transcript()`：
+     - 在阶段1完成后插入 `_fact_extraction_stage()` 调用
+     - `_extract_fields_stage()` 调用注释掉，`extraction_result` 直接来自 `fact_result`
+     - 返回字典新增 `fact_result` 字段
+   - `_extract_fields_stage()` 添加 DEPRECATED 注释
+   - `_extract_evidence_traces()` 添加 DEPRECATED 注释
+
+3. **backend/services/fact_service.py**（新增）
+   - `FactService` 类：封装 AtomicFact 的 CRUD 操作
+   - `save_facts(facts, visit_id)`：批量保存事实
+   - `get_facts_by_visit(visit_id)`：按 visit_id 查询事实
+   - `get_facts_needing_normalization(visit_id)`：查询需要规范化的记录
+   - `update_normalized_term(fact_id, normalized_term, normalized_code)`：更新单条事实的规范化术语
+
+### 保持未变更的方法
+
+- `_extract_fields_stage()` — 保留但标记为 DEPRECATED
+- `_extract_evidence_traces()` — 保留但标记为 DEPRECATED
+- `_build_extraction_prompt()` — 不变
+- `_parse_extraction_response()` — 不变
+- `_fallback_extraction()` — 不变
+
+### 数据流变更
+
+```
+旧流程（阶段1→阶段3→阶段4）：
+阶段1 → cleaned_turns + combined_text
+    ↓
+阶段3 → _normalize_terms_stage(combined_text)
+阶段4 → _extract_fields_stage(normalized_text, [])
+阶段5 → _generate_emr_stage(extraction_result, ...)
+
+新流程（阶段1→阶段2→阶段3→阶段5）：
+阶段1 → cleaned_turns + combined_text
+    ↓
+阶段2 → _fact_extraction_stage(cleaned_turns, role_mapping, visit_id)
+         → AtomicFact 列表（结构化事实表）
+    ↓
+阶段3 → _normalize_terms_stage(combined_text)  [后续重构为选择性规范化]
+阶段5 → _generate_emr_stage(fact_result, ...)
+```
+
+### FactService API
+
+| 方法 | 参数 | 返回值 | 说明 |
+|------|------|--------|------|
+| `save_facts()` | `facts: List[Dict]`, `visit_id: str` | `List[AtomicFact]` | 批量保存原子事实 |
+| `get_facts_by_visit()` | `visit_id: str` | `List[AtomicFact]` | 按就诊ID查询所有事实 |
+| `get_facts_needing_normalization()` | `visit_id: str` | `List[AtomicFact]` | 查询需要规范化的记录 |
+| `update_normalized_term()` | `fact_id, normalized_term, normalized_code` | None | 更新单条事实的规范化术语 |
+
+---
+
+## 2026-05-18 阶段1重构：转写清洗与角色纠错
+
+### 变更内容
+
+将 LLM Pipeline 的阶段1从"角色标注+XML证据标注"重构为独立的"转写清洗与角色纠错"，输出 turn JSON 而非 XML 标注文本。证据标注职责移交给未来的阶段2（事实抽取）。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 新增 turn_cleaning 提示模板 | ✅ 完成 | `backend/services/llm/prompts.py` 新增 template key |
+| 新增 _build_cleaning_prompt() | ✅ 完成 | 使用 PromptManager 渲染 turn_cleaning 模板 |
+| 新增 _parse_cleaning_response() | ✅ 完成 | 解析 turn JSON 列表，JSON解析失败时回退到 _fallback_role_annotation() |
+| 新增 _apply_asr_corrections() | ✅ 完成 | 将 corrected_text 和 changed_spans 写入数据库 |
+| 新增 _build_text_from_cleaned_turns() | ✅ 完成 | 从清洗后的 turn JSON 构建合并文本供后续阶段使用 |
+| 修改 _process_segment() | ✅ 完成 | 调用 _build_cleaning_prompt() + _parse_cleaning_response() + _apply_asr_corrections() |
+| 修改 process_transcript() | ✅ 完成 | 收集 cleaned_turns 替代 annotated_texts 和 evidence_traces |
+| 标记旧方法为 DEPRECATED | ✅ 完成 | _build_role_annotation_prompt()、_parse_role_annotation_response() 标记为 DEPRECATED |
+| 更新 _debug_interact() | ✅ 完成 | 新增 turn_cleaning 阶段的手动输入指引 |
+
+### 修改文件
+
+1. **backend/services/llm/prompts.py**
+   - 在 `_load_chinese_templates()` 中新增 `turn_cleaning` 模板
+   - 模板要求 LLM 执行：(a) 角色纠错 (b) ASR 转写错误修正
+   - 输出格式：turn JSON（含 turn_id、speaker_role、corrected_text、changed_spans、correction_confidence、reason）
+   - 不含任何 XML 标签指令或证据标注要求
+
+2. **backend/services/llm_pipeline_service.py**
+   - 新增 `_build_cleaning_prompt()`：使用 PromptManager 加载 turn_cleaning 模板
+   - 新增 `_parse_cleaning_response()`：解析 LLM 返回的 turn JSON 列表，提取角色映射和说话人纠正记录
+   - 新增 `_apply_asr_corrections()`：将 changed_spans 非空的 turn 的 corrected_text 写入数据库
+   - 新增 `_build_text_from_cleaned_turns()`：从清洗后的 turn JSON 构建合并文本（优先使用 corrected_text）
+   - 修改 `_process_segment()`：调用新的 cleaning 方法替代旧的 role_annotation 方法
+   - 修改 `process_transcript()`：收集 `all_cleaned_turns` 替代 `all_annotated_texts` 和 `all_evidence_traces`
+   - 返回字典中 `annotated_text` → `cleaned_turns` + `combined_text`，移除 `evidence_traces`
+   - `_extract_fields_stage()` 传入空列表作为 evidence_traces（证据溯源现在来自阶段2）
+   - `_build_role_annotation_prompt()` 和 `_parse_role_annotation_response()` 标记为 DEPRECATED
+   - `_debug_interact()` 新增 `turn_cleaning` 阶段的手动输入指引
+
+### 保持未变更的方法
+
+- `_format_segment()` — 不变
+- `_fallback_role_annotation()` — 不变
+- `_infer_roles_by_rules()` — 不变
+- `_apply_speaker_corrections()` — 不变
+- `_assign_speakers_from_unlabeled()` — 不变
+- `_segment_turns()` — 不变
+- `_extract_evidence_traces()` — 保留标记为 DEPRECATED
+
+### 数据流变更
+
+```
+旧流程：
+阶段1 → annotated_text (XML标注文本) + evidence_traces
+    ↓
+阶段2 → _normalize_terms_stage(annotated_text)
+阶段3 → _extract_fields_stage(normalized_text, evidence_traces)
+
+新流程：
+阶段1 → cleaned_turns (turn JSON列表) + combined_text
+    ↓
+阶段2 → _normalize_terms_stage(combined_text)  [暂未重构]
+阶段3 → _extract_fields_stage(normalized_text, [])  [证据溯源移入阶段2]
+```
+
+---
+
 ## 2026-05-18 诊断推断优化 - 结合上下文综合判断
 
 ### 问题

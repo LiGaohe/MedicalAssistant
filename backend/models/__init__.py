@@ -9,6 +9,7 @@ from .extracted_item import ExtractedItem
 from .emr_record import EMRRecord
 from .evaluation_record import EvaluationRecord
 from .chinese_term import ChineseTerm, ChineseSearchResult
+from .atomic_fact import AtomicFact
 
 __all__ = [
     "Visit",
@@ -22,5 +23,6 @@ __all__ = [
     "EMRRecord",
     "EvaluationRecord",
     "ChineseTerm",
-    "ChineseSearchResult"
+    "ChineseSearchResult",
+    "AtomicFact"
 ]

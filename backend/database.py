@@ -97,14 +97,16 @@ def _sqlalchemy_type_to_sql(col_type) -> str:
 def init_db():
     from .models import (
         Visit, TranscriptTurn, Task, ASRCorrection, LLMConfig,
-        EvidenceSpan, NormalizedTerm, ExtractedItem, EMRRecord, EvaluationRecord
+        EvidenceSpan, NormalizedTerm, ExtractedItem, EMRRecord, EvaluationRecord,
+        AtomicFact
     )
     
     Base.metadata.create_all(bind=engine)
     
     models = [
         Visit, TranscriptTurn, Task, ASRCorrection, LLMConfig,
-        EvidenceSpan, NormalizedTerm, ExtractedItem, EMRRecord, EvaluationRecord
+        EvidenceSpan, NormalizedTerm, ExtractedItem, EMRRecord, EvaluationRecord,
+        AtomicFact
     ]
     
     for model in models:

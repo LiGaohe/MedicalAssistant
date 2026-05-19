@@ -189,6 +189,247 @@ $template_requirements
             required_vars=["extracted_data", "transcript", "template_requirements"]
         )
         
+        self.templates["turn_cleaning"] = PromptTemplate(
+            template="""你是一个医疗对话分析专家。请对以下医患对话进行角色纠错和ASR修正。
+
+## 对话
+$transcript
+
+## 任务
+1. 判断每个turn的说话人角色（doctor/patient），纠正ASR角色分配错误
+2. 修正明显的ASR文本错误（同音字、医学术语拼写错误）
+3. 不确定则保留原文，correction_confidence设为"low"
+
+## 约束
+- 严禁添加原文没有的信息
+- 修正后保持原意和语气
+
+## 输出格式
+{
+  "turns": [{
+    "turn_id": 0,
+    "speaker_role": "doctor或patient",
+    "corrected_text": "修正后文本（未修正则与原文一致）",
+    "changed_spans": [{"original": "原词", "corrected": "修正词", "position": "位置描述"}],
+    "correction_confidence": "high|medium|low",
+    "reason": "修正或保留理由"
+  }]
+}""",
+            required_vars=["transcript"]
+        )
+        
+        self.templates["fact_extraction"] = PromptTemplate(
+            template="""你是一个医疗临床事实抽取专家。从以下医患对话中抽取原子级临床事实。
+
+## 对话轮次（JSON）
+$turns_json
+
+## 抽取规则
+每条事实是一个不可再分的独立临床陈述，包含以下字段：
+
+- **section_candidate**: S（主诉/现病史/既往史）/ O（体格检查/辅助检查）/ A（诊断/评估）/ P（用药/检查建议/复诊/健康指导）
+- **concept_type**: symptom / disease / test / drug / plan / other
+- **mention**: 对话中的原始口语表述文本
+- **polarity**: present（肯定）/ absent（否认）/ possible（可能）/ planned（计划）/ recommended（建议）
+- **temporality**: current / past / unknown
+- **certainty**: explicit（医生明确陈述）/ supported（有充分证据）/ weak（模糊表述）
+- **speaker**: patient（患者陈述）/ doctor（医生判断）
+- **evidence_turn_ids**: 支撑该事实的turn_id列表
+- **evidence_text**: 与evidence_turn_ids对应的原文片段列表
+
+## 约束
+- 严禁编造事实
+- 同一事实在多轮提及则合并，合并evidence_turn_ids和evidence_text
+
+## 输出格式
+{
+  "facts": [{
+    "section_candidate": "S",
+    "concept_type": "symptom",
+    "mention": "原文",
+    "polarity": "present",
+    "temporality": "current",
+    "certainty": "supported",
+    "speaker": "patient",
+    "evidence_turn_ids": [0],
+    "evidence_text": ["原文"]
+  }]
+}""",
+            required_vars=["turns_json"]
+        )
+
+        self.templates["soap_verification"] = PromptTemplate(
+            template="""对以下SOAP病历草稿进行结构化核查与修订。
+
+## 病历草稿
+$draft_emr
+
+## 事实表
+$fact_table
+
+## 角色映射
+$role_mapping
+
+## 核查维度
+
+### 1. 无证据声明(unsupported_claims)
+检查病历每句话是否有事实表支撑。无支撑则标记：claim_text、soap_location、reason
+
+### 2. 遗漏关键事实(missing_critical_facts)
+检查高重要性事实(certainty=explicit, polarity=present, speaker=doctor)是否已在病历中体现：fact_id、fact_content、importance_reason
+
+### 3. 内部冲突(internal_conflicts)
+检查病历内部矛盾：age/gender/body_part/time/negation/drug_name，标记conflict_type、location_1/content_1、location_2/content_2
+
+### 4. 确定性错误(certainty_errors)
+检查疑似诊断是否被表述为明确诊断：soap_text、correct_certainty、reason
+
+## 修订规则
+1. 第一优先：删除无证据声明
+2. 第二优先：补充遗漏事实
+3. 第三优先：修正矛盾和确定性错误
+
+## 输出格式
+{
+  "issues": {
+    "unsupported_claims": [{"claim_text": "", "soap_location": "", "reason": ""}],
+    "missing_critical_facts": [{"fact_id": "", "fact_content": "", "importance_reason": ""}],
+    "internal_conflicts": [{"conflict_type": "", "location_1": "", "content_1": "", "location_2": "", "content_2": ""}],
+    "certainty_errors": [{"soap_text": "", "correct_certainty": "", "reason": ""}]
+  },
+  "soap_final": {"subjective": {...}, "objective": {...}, "assessment": {...}, "plan": {...}}
+}""",
+            required_vars=["draft_emr", "fact_table", "role_mapping"]
+        )
+
+        self.templates["emr_generation_so"] = PromptTemplate(
+            template="""根据以下事实表生成病历的主观数据(S)和客观数据(O)部分，不可生成诊断和计划。
+
+## 事实表
+$facts_json
+
+## 对话摘要
+$dialogue_summary
+
+## 任务
+### 主观数据(S) — 仅患者角度
+1. 主诉(chief_complaint)：主要症状、持续时间、就诊原因
+2. 现病史(history_present_illness)：症状发展过程、伴随症状、诊疗经过
+3. 否认症状(denied_symptoms)：患者明确否认的相关症状
+4. 相关既往史(past_history)：相关既往疾病史、手术史、过敏史
+
+### 客观数据(O) — 仅医方完成的检查和量化结果
+1. 体格检查(physical_examination)：检查项目及量化结果
+2. 辅助检查(auxiliary_examination)：已完成的实验室/影像学检查及量化结果
+
+## 规则
+- 禁止生成任何诊断结论或计划内容
+- 每句话必须能对应事实表中至少一条fact_id
+- 优先使用normalized_term，若无则使用mention
+- 无证据则留空
+
+## 输出格式
+{
+  "subjective": {
+    "text": "主诉：...",
+    "chief_complaint": {"value": "...", "evidence_traces": []},
+    "history_present_illness": {"value": "...", "evidence_traces": []},
+    "denied_symptoms": {"value": "...", "evidence_traces": []},
+    "past_history": {"value": "...", "evidence_traces": []}
+  },
+  "objective": {
+    "text": "体格检查：...",
+    "physical_examination": {"value": "...", "evidence_traces": []},
+    "auxiliary_examination": {"value": "...", "evidence_traces": []}
+  },
+  "used_fact_ids": ["fact_id_1", "fact_id_2"]
+}""",
+            required_vars=["facts_json", "dialogue_summary"]
+        )
+
+        self.templates["emr_generation_assessment"] = PromptTemplate(
+            template="""根据已生成的S/O文本和事实表，按三层诊断策略生成评估(A)部分。
+
+## 主观数据(S)
+$subjective_text
+
+## 客观数据(O)
+$objective_text
+
+## 事实表
+$facts_json
+
+## 三层诊断策略
+1. **明确诊断(explicit_diagnosis)**：certainty=explicit，concept_type=disease，speaker=doctor → 直接写明疾病名称
+2. **倾向性诊断(suspected_diagnosis)**：仅有supported级别证据，或医生有倾向未确诊 → 使用"考虑XXX""XXX待排"等措辞
+3. **症状性评估(symptom_based_assessment)**：仅有症状无诊断 → 只描述症状，禁止发明疾病名称
+
+### assessment_items
+每项含：text, certainty_level(high/medium/low), supporting_fact_ids, diagnosis_type(explicit_diagnosis/suspected_diagnosis/symptom_based_assessment)
+
+## 约束
+- 严禁编造诊断结论
+- 无诊断级事实时，只做症状性评估
+
+## 输出格式
+{
+  "assessment": {
+    "text": "诊断：...",
+    "diagnosis": {"value": "...", "evidence_traces": []}
+  },
+  "assessment_items": [{
+    "text": "...",
+    "certainty_level": "high",
+    "supporting_fact_ids": ["fact_id_1"],
+    "diagnosis_type": "explicit_diagnosis"
+  }]
+}""",
+            required_vars=["subjective_text", "objective_text", "facts_json"]
+        )
+
+        self.templates["emr_generation_plan"] = PromptTemplate(
+            template="""根据已生成的S/O/A文本和事实表，生成病历的计划(P)部分，拆分为4个子字段。
+
+## 主观数据(S)
+$subjective_text
+
+## 客观数据(O)
+$objective_text
+
+## 评估(A)
+$assessment_text
+
+## 事实表
+$facts_json
+
+## 子字段
+1. **medications（用药方案）**：药物名称、剂量、频次、疗程，每条含used_fact_ids
+2. **tests（检查建议）**：检查项目、建议原因，每条含used_fact_ids
+3. **follow_up（复诊）**：复诊时间/条件，含used_fact_ids
+4. **education（健康教育）**：生活方式指导、饮食建议、注意事项，含used_fact_ids
+
+## 约束
+- 每条计划必须有事实依据，对应至少一条fact_id
+- 无证据则留空
+- 优先使用normalized_term
+
+## 输出格式
+{
+  "plan": {
+    "text": "治疗方案：...",
+    "treatment": {"value": "...", "evidence_traces": []},
+    "advice": {"value": "...", "evidence_traces": []}
+  },
+  "plan_items": {
+    "medications": [{"name": "", "dosage": "", "frequency": "", "duration": "", "used_fact_ids": []}],
+    "tests": [{"name": "", "reason": "", "used_fact_ids": []}],
+    "follow_up": {"text": "", "used_fact_ids": []},
+    "education": {"text": "", "used_fact_ids": []}
+  }
+}""",
+            required_vars=["subjective_text", "objective_text", "assessment_text", "facts_json"]
+        )
+
         self._load_chinese_evaluation_templates()
     
     def _load_chinese_evaluation_templates(self):

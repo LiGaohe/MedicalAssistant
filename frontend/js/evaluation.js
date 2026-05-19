@@ -78,6 +78,7 @@ document.addEventListener('DOMContentLoaded', async function() {
     const skipStage = document.getElementById('skipStage');
     const debugResult = document.getElementById('debugResult');
     const resultContent = document.getElementById('resultContent');
+    const copyPromptBtn = document.getElementById('copyPrompt');
     
     let debugStages = [];
     let currentStageIndex = 0;
@@ -86,6 +87,43 @@ document.addEventListener('DOMContentLoaded', async function() {
     debugBtn.addEventListener('click', async () => {
         debugModal.style.display = 'block';
         await loadDebugPrompts();
+    });
+    
+    copyPromptBtn.addEventListener('click', async () => {
+        const text = promptContent.textContent;
+        if (!text || text === '无提示词') {
+            alert('没有可复制的内容');
+            return;
+        }
+        
+        try {
+            await navigator.clipboard.writeText(text);
+            copyPromptBtn.textContent = '已复制';
+            copyPromptBtn.classList.add('copied');
+            setTimeout(() => {
+                copyPromptBtn.textContent = '复制';
+                copyPromptBtn.classList.remove('copied');
+            }, 1500);
+        } catch (err) {
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.select();
+            try {
+                document.execCommand('copy');
+                copyPromptBtn.textContent = '已复制';
+                copyPromptBtn.classList.add('copied');
+                setTimeout(() => {
+                    copyPromptBtn.textContent = '复制';
+                    copyPromptBtn.classList.remove('copied');
+                }, 1500);
+            } catch (e) {
+                alert('复制失败，请手动复制');
+            }
+            document.body.removeChild(textarea);
+        }
     });
     
     closeDebugModal.addEventListener('click', () => {
@@ -104,14 +142,18 @@ document.addEventListener('DOMContentLoaded', async function() {
     });
     
     submitStage.addEventListener('click', async () => {
+        const stage = debugStages[currentStageIndex];
         const response = userResponse.value.trim();
-        if (!response) {
+        
+        // 检查是否是自动执行阶段
+        if (stage.auto_process) {
+            // 自动执行阶段不需要用户输入
+        } else if (!response) {
             alert('请输入大模型返回结果');
             return;
         }
         
         try {
-            const stage = debugStages[currentStageIndex];
             const contextToSend = { ...debugContext, record_id: parseInt(recordId) };
             
             const result = await fetch('/api/evaluation/debug/process-stage', {

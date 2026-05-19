@@ -28,6 +28,8 @@ class ProcessResponse(BaseModel):
     evidence_count: int
     normalized_terms_count: int
     extracted_items_count: int
+    fact_count: int = 0
+    verification_issues: Optional[Dict[str, Any]] = None
     emr_record: Optional[Dict[str, Any]]
     errors: list
 
@@ -65,8 +67,11 @@ async def process_visit(
                 pipeline = LLMPipelineService(db, llm_service)
             result = pipeline.process_transcript(request.visit_id)
             
-            evidence_count = len(result.get("evidence_traces", []))
+            fact_result = result.get("fact_result", {})
+            fact_count = fact_result.get("fact_count", 0) if isinstance(fact_result, dict) else 0
             normalized_terms_count = len(result.get("normalized_result", {}).get("terms", []))
+            verification_result = result.get("verification_result", {})
+            verification_issues = verification_result.get("issues") if isinstance(verification_result, dict) else None
             
             emr_result = result.get("emr_result", {})
             
@@ -89,9 +94,11 @@ async def process_visit(
             return ProcessResponse(
                 visit_id=request.visit_id,
                 status=result.get("status", "completed"),
-                evidence_count=evidence_count,
+                evidence_count=fact_count,
                 normalized_terms_count=normalized_terms_count,
-                extracted_items_count=evidence_count,
+                extracted_items_count=fact_count,
+                fact_count=fact_count,
+                verification_issues=verification_issues,
                 emr_record=emr_record,
                 errors=[]
             )
@@ -256,9 +263,14 @@ class PipelineProcessResponse(BaseModel):
     status: str
     role_mapping: Optional[Dict[str, str]] = None
     annotated_text: Optional[str] = None
+    cleaned_turns: Optional[list] = None
+    combined_text: Optional[str] = None
     normalized_result: Optional[Dict[str, Any]] = None
     extraction_result: Optional[Dict[str, Any]] = None
     emr_result: Optional[Dict[str, Any]] = None
+    emr_draft: Optional[Dict[str, Any]] = None
+    fact_result: Optional[Dict[str, Any]] = None
+    verification_result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
 
 
@@ -297,9 +309,14 @@ async def process_with_pipeline(
             status=result.get("status", "completed"),
             role_mapping=result.get("role_mapping"),
             annotated_text=result.get("annotated_text"),
+            cleaned_turns=result.get("cleaned_turns"),
+            combined_text=result.get("combined_text"),
             normalized_result=result.get("normalized_result"),
             extraction_result=result.get("extraction_result"),
-            emr_result=result.get("emr_result")
+            emr_result=result.get("emr_result"),
+            emr_draft=result.get("emr_draft"),
+            fact_result=result.get("fact_result"),
+            verification_result=result.get("verification_result")
         )
         
     except RuntimeError as e:

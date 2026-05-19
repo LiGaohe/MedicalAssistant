@@ -347,6 +347,30 @@ Note: Only output JSON, no other content."""
         logger.debug("所有JSON修复尝试均失败")
         return None
     
+    def normalize_single_term(
+        self,
+        term: str,
+        context: str = "",
+        term_type: str = "unknown"
+    ) -> NormalizedTerm:
+        """
+        Normalize a single term (mention) without scanning full text.
+
+        This is a convenience wrapper around normalize_term() for the
+        selective normalization pipeline (Stage 3). It does not call
+        identify_colloquial_terms() and directly normalizes the given term.
+
+        Args:
+            term: The term (mention) to normalize
+            context: Optional context string
+            term_type: Type of the term (symptom, drug, diagnosis, etc.)
+
+        Returns:
+            NormalizedTerm with normalization results
+        """
+        logger.info(f"Normalizing single term: '{term}' (type: {term_type})")
+        return self.normalize_term(term, context=context, term_type=term_type)
+
     def normalize_term(
         self, 
         term: str, 

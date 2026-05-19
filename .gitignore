@@ -22,3 +22,7 @@
 /backend/models/__pycache__
 /data/database
 /backend/services/evaluation/__pycache__
+/data/logs
+backend/__pycache__/
+backend/api/__pycache__/
+docs/completion_status.md
