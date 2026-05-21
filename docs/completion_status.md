@@ -1,5 +1,116 @@
 # 完成状态记录
 
+## 2026-05-21 IDE界面图标统一：去除Emoji，统一为SVG
+
+### 变更说明
+
+将IDE界面及评估页面中所有emoji图标替换为统一的lucide SVG图标，确保界面风格一致。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| app.js添加icon()函数 | ✅ 完成 | 添加App.icon(name, size)统一图标辅助函数，支持18种图标 |
+| emr.html emoji替换 | ✅ 完成 | 标题栏、按钮、消息图标、关闭按钮等12处emoji替换为inline SVG |
+| agent.js emoji替换 | ✅ 完成 | 消息图标、阶段状态、按钮文字等21处emoji替换为App.icon()调用 |
+| editor.js emoji替换 | ✅ 完成 | 证据溯源按钮2处emoji替换为App.icon()调用 |
+| evaluation.js emoji替换 | ✅ 完成 | 添加本地evalIcon()辅助函数，替换事实状态、覆盖率、安全图标等7处 |
+| ide.css样式更新 | ✅ 完成 | 按钮SVG对齐样式、icon-spin旋转动画 |
+
+### 修改文件
+
+1. `frontend/js/app.js` — 添加 `App.icon()` 图标辅助函数
+2. `frontend/emr.html` — 所有emoji替换为inline SVG
+3. `frontend/js/agent.js` — 所有emoji替换为App.icon()调用
+4. `frontend/js/editor.js` — 按钮文字emoji替换
+5. `frontend/js/evaluation.js` — 添加本地图标函数，替换emoji
+6. `frontend/css/ide.css` — 新增按钮SVG图标对齐样式、旋转动画
+7. `docs/completion_status.md` — 本文件
+
+### 图标映射
+
+| 旧emoji | 新SVG | 用途 |
+|---------|-------|------|
+| ⚕ | stethoscope | 医疗/系统图标 |
+| 🖨 | printer | 打印按钮 |
+| 📊 | barChart | 评估按钮 |
+| ⚡✨ | sparkles | 生成/魔法 |
+| 🤖 | bot | Agent/机器人 |
+| 👤 | user | 用户 |
+| 📝✏ | pencil | 编辑/文本调试 |
+| 💾 | save | 保存 |
+| 📎 | paperclip | 证据溯源 |
+| ⬆ | upload | 上传 |
+| 🎤 | mic | 语音转写 |
+| ✅✓ | checkCircle | 成功/完成 |
+| ❌✗ | xCircle/x | 失败/错误 |
+| ⏳ | loader | 加载中(带旋转动画) |
+| ⏸ | circlePause | 暂停 |
+| 🔄 | refreshCw | 重试/刷新 |
+| ⚠ | alertTriangle | 警告 |
+
+---
+
+## 2026-05-21 前端重构：VS Code IDE风格界面
+
+### 变更说明
+
+将前端多页面架构重构为 VS Code 风格的 IDE 单页应用界面。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| IDE布局HTML | ✅ 完成 | 重写 emr.html，使用CSS Grid实现三栏IDE布局 |
+| IDE布局CSS | ✅ 完成 | 新增 ide.css，VS Code暗色主题，Grid布局样式 |
+| 主控制器 | ✅ 完成 | app.js：全局状态管理、活动栏切换、事件总线、状态栏 |
+| Agent侧边栏 | ✅ 完成 | agent.js：对话式消息展示、音频上传、ASR转写流程、病历生成流程 |
+| 病历编辑器 | ✅ 完成 | editor.js：SOAP四部分折叠面板、编辑/保存、版本切换、证据溯源、打印 |
+| 调试侧边栏 | ✅ 完成 | debug.js：LLM多阶段调试面板（从模态框迁移到侧边栏） |
+| 配置侧边栏 | ✅ 完成 | config-sidebar.js：LLM配置表单和配置列表管理 |
+| 文本调试模式 | ✅ 完成 | 保留在IDE界面的模态框中 |
+
+### 新增/修改文件
+
+**新增文件**：
+
+1. `frontend/css/ide.css` — IDE布局专用样式（VS Code暗色主题）
+2. `frontend/js/app.js` — IDE主控制器
+3. `frontend/js/agent.js` — Agent侧边栏模块
+4. `frontend/js/editor.js` — 病历编辑器模块
+5. `frontend/js/debug.js` — 调试侧边栏模块
+6. `frontend/js/config-sidebar.js` — 配置侧边栏模块
+
+**修改文件**：
+
+1. `frontend/emr.html` — 重写为IDE布局页面
+2. `docs/architecture.md` — 更新前端界面章节
+3. `docs/completion_status.md` — 本文件
+
+**保留不变**：
+
+- `frontend/index.html` / `frontend/result.html` / `frontend/evaluation.html` / `frontend/config.html`
+- `frontend/css/style.css` — 保留原有样式
+- `frontend/js/upload.js` / `frontend/js/result.js` / `frontend/js/evaluation.js` / `frontend/js/config.js`
+- 所有后端 API
+
+### IDE 布局结构
+
+```
+Activity Bar (48px) | Sidebar (340px) | Editor Area (flex)
+     4 icons        | Agent/Debug/    | SOAP病历 + 工具栏
+                    | Config panels   |
+```
+
+### 键盘快捷键
+
+- Ctrl+1: 切换到病历编辑器
+- Ctrl+2: 切换到 Agent 助手
+- Ctrl+3: 切换到调试模式
+- Ctrl+4: 切换到大模型配置
+
+---
+
 ## 2026-05-21 BugFix: 并行处理时LLM配置线程安全与fallback结果丢失
 
 ### 问题描述

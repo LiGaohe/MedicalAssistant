@@ -1,0 +1,480 @@
+window.AgentModule = (function() {
+    var state = App.getState();
+    var selectedFile = null;
+    var isProcessing = false;
+    var uploadInProgress = false;
+
+    function addMessage(type, content, details) {
+        var container = document.getElementById('agentMessages');
+        if (!container) return;
+
+        var msgDiv = document.createElement('div');
+        msgDiv.className = 'agent-message ' + type;
+
+        var icon = '';
+        if (type === 'system') icon = App.icon('stethoscope', 16);
+        else if (type === 'user') icon = App.icon('user', 16);
+        else if (type === 'agent' || type === 'success') icon = App.icon('bot', 16);
+        else if (type === 'progress') icon = App.icon('loader', 16);
+        else if (type === 'error') icon = App.icon('xCircle', 16);
+
+        msgDiv.innerHTML = '<div class="agent-message-icon">' + icon + '</div>' +
+            '<div class="agent-message-content">' + content + '</div>';
+
+        container.appendChild(msgDiv);
+        container.scrollTop = container.scrollHeight;
+        return msgDiv;
+    }
+
+    function updateLastMessage(type, content) {
+        var container = document.getElementById('agentMessages');
+        if (!container) return;
+        var messages = container.querySelectorAll('.agent-message.' + type);
+        if (messages.length > 0) {
+            var last = messages[messages.length - 1];
+            var contentEl = last.querySelector('.agent-message-content');
+            if (contentEl) contentEl.innerHTML = content;
+            container.scrollTop = container.scrollHeight;
+        } else {
+            addMessage(type, content);
+        }
+    }
+
+    function addStageMessage(stageNum, stageName, status, detail) {
+        var type = 'progress';
+        if (status === 'completed') type = 'success';
+        else if (status === 'failed') type = 'error';
+
+        var icon = status === 'running' ? App.icon('loader', 14) :
+                   status === 'completed' ? App.icon('checkCircle', 14) :
+                   status === 'failed' ? App.icon('xCircle', 14) : App.icon('circlePause', 14);
+
+        var content = '<div class="stage-name">' + icon + ' 阶段' + stageNum + '/5: ' + stageName + '</div>';
+        if (detail) {
+            content += '<div class="stage-detail">' + detail + '</div>';
+        }
+        if (status === 'running') {
+            content += '<div class="stage-progress"><div class="stage-progress-bar" style="width:60%"></div></div>';
+        }
+
+        addMessage(type, content);
+    }
+
+    function initAgent() {
+        var dropZone = document.getElementById('agentDropZone');
+        var audioFile = document.getElementById('agentAudioFile');
+        var processBtn = document.getElementById('agentProcess');
+        var textDebugBtn = document.getElementById('agentTextDebug');
+        var languageSelect = document.getElementById('agentLanguage');
+
+        if (dropZone && audioFile) {
+            dropZone.addEventListener('click', function() { audioFile.click(); });
+
+            dropZone.addEventListener('dragover', function(e) {
+                e.preventDefault();
+                dropZone.classList.add('drag-over');
+            });
+
+            dropZone.addEventListener('dragleave', function() {
+                dropZone.classList.remove('drag-over');
+            });
+
+            dropZone.addEventListener('drop', function(e) {
+                e.preventDefault();
+                dropZone.style.borderColor = '';
+                var files = e.dataTransfer.files;
+                if (files.length > 0) handleFileSelect(files[0]);
+            });
+
+            audioFile.addEventListener('change', function(e) {
+                if (e.target.files.length > 0) handleFileSelect(e.target.files[0]);
+            });
+        }
+
+        function handleFileSelect(file) {
+            var ext = file.name.split('.').pop().toLowerCase();
+            if (ext !== 'wav' && ext !== 'mp3') {
+                addMessage('error', '<p>仅支持 wav 和 mp3 格式</p>');
+                return;
+            }
+            selectedFile = file;
+            dropZone.classList.add('selected');
+            var contentEl = dropZone.querySelector('.agent-upload-content');
+            if (contentEl) {
+                contentEl.innerHTML = '<span style="color:var(--ide-success);font-size:13px;">已选择: ' +
+                    App.escapeHtml(file.name) + '</span>' +
+                    '<span class="agent-upload-hint">点击重新选择</span>';
+            }
+
+            if (!state.visitId) {
+                processBtn.innerHTML = App.icon('upload', 14) + ' 上传音频';
+                processBtn.disabled = false;
+            }
+        }
+
+        if (processBtn) {
+            processBtn.addEventListener('click', function() {
+                if (isProcessing) return;
+                if (!state.visitId && selectedFile) {
+                    uploadAndTranscribe();
+                } else if (state.hasTranscription || state.visitId) {
+                    processEMR();
+                }
+            });
+        }
+
+        if (languageSelect) {
+            languageSelect.addEventListener('change', function() {
+                state.language = this.value;
+            });
+        }
+
+        if (textDebugBtn) {
+            textDebugBtn.addEventListener('click', function() {
+                var modal = document.getElementById('textDebugModal');
+                if (modal) modal.style.display = 'flex';
+            });
+        }
+
+        initTextDebugModal();
+
+        App.on('visitIdSet', function(data) {
+            if (processBtn) {
+                processBtn.innerHTML = App.icon('sparkles', 14) + ' 生成病历';
+                processBtn.disabled = false;
+            }
+        });
+
+        App.on('transcriptionLoaded', function(data) {
+            state.hasTranscription = true;
+            if (processBtn) {
+                processBtn.innerHTML = App.icon('sparkles', 14) + ' 生成病历';
+                processBtn.disabled = false;
+            }
+            if (data.turns) {
+                addMessage('success',
+                    '<p>' + App.icon('mic', 14) + ' 语音转写已完成，共识别 <strong>' + data.turns.length + '</strong> 个对话轮次</p>' +
+                    '<p class="agent-hint">点击「生成病历」开始处理</p>'
+                );
+            }
+        });
+
+        App.on('emrStatusLoaded', function(data) {
+            if (processBtn) {
+                processBtn.innerHTML = App.icon('refreshCw', 14) + ' 重新生成';
+                processBtn.disabled = false;
+            }
+        });
+
+        if (state.visitId) {
+            addMessage('system',
+                '<p>已加载就诊记录</p>' +
+                '<p class="agent-hint">就诊ID: ' + App.escapeHtml(state.visitId) + '</p>'
+            );
+            if (state.hasTranscription) {
+                if (processBtn) {
+                    processBtn.innerHTML = App.icon('sparkles', 14) + ' 生成病历';
+                    processBtn.disabled = false;
+                }
+            } else {
+                if (processBtn) {
+                    processBtn.innerHTML = App.icon('mic', 14) + ' 开始转写';
+                    processBtn.disabled = false;
+                }
+            }
+        }
+    }
+
+    function initTextDebugModal() {
+        var modal = document.getElementById('textDebugModal');
+        if (!modal) return;
+
+        document.getElementById('closeTextDebugModal').addEventListener('click', function() {
+            modal.style.display = 'none';
+        });
+
+        document.getElementById('cancelTextDebug').addEventListener('click', function() {
+            modal.style.display = 'none';
+        });
+
+        modal.querySelector('.ide-modal-backdrop').addEventListener('click', function() {
+            modal.style.display = 'none';
+        });
+
+        document.getElementById('startTextDebug').addEventListener('click', async function() {
+            var text = document.getElementById('dialogTextInput').value.trim();
+            var language = document.getElementById('debugLanguageSelect').value;
+
+            if (!text) {
+                alert('请输入对话文本');
+                return;
+            }
+
+            var btn = document.getElementById('startTextDebug');
+            btn.disabled = true;
+            btn.textContent = '创建中...';
+
+            try {
+                var response = await fetch('/api/emr/debug/create-from-text', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ dialog_text: text, language: language })
+                });
+                var result = await response.json();
+
+                if (result.status === 'success') {
+                    modal.style.display = 'none';
+                    state.visitId = result.visit_id;
+                    App.setState({ visitId: result.visit_id });
+                    App.updateTitlebar(result.visit_id, false);
+
+                    addMessage('success',
+                        '<p>' + App.icon('pencil', 14) + ' 文本调试模式已创建</p>' +
+                        '<p class="agent-hint">就诊ID: ' + App.escapeHtml(result.visit_id) + '</p>'
+                    );
+
+                    App.updateStatusBar('文本调试模式就绪');
+                    App.emit('visitIdSet', { visitId: result.visit_id });
+
+                    var processBtn = document.getElementById('agentProcess');
+                    if (processBtn) {
+                        processBtn.innerHTML = App.icon('sparkles', 14) + ' 生成病历';
+                        processBtn.disabled = false;
+                    }
+                } else {
+                    addMessage('error', '<p>创建失败: ' + (result.error || '未知错误') + '</p>');
+                }
+            } catch (error) {
+                addMessage('error', '<p>请求失败: ' + error.message + '</p>');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '开始调试';
+            }
+        });
+    }
+
+    async function uploadAndTranscribe() {
+        if (!selectedFile) return;
+        isProcessing = true;
+        var processBtn = document.getElementById('agentProcess');
+        if (processBtn) processBtn.disabled = true;
+
+        addMessage('user', '<p>' + App.icon('upload', 14) + ' 上传音频: ' + App.escapeHtml(selectedFile.name) + '</p>');
+
+        var formData = new FormData();
+        formData.append('audio_file', selectedFile);
+        formData.append('language', state.language);
+
+        try {
+            var response = await fetch('/api/upload', {
+                method: 'POST',
+                body: formData
+            });
+            var result = await response.json();
+
+            if (result.success) {
+                state.visitId = result.visit_id;
+                App.setState({ visitId: result.visit_id });
+                App.updateTitlebar(result.visit_id, false);
+
+                addMessage('success',
+                    '<p>' + App.icon('checkCircle', 14) + ' 音频上传成功</p>' +
+                    '<p class="agent-hint">就诊ID: ' + App.escapeHtml(result.visit_id) + '</p>'
+                );
+
+                App.updateStatusBar('上传成功，开始转写...');
+                App.emit('visitIdSet', { visitId: result.visit_id });
+
+                await startTranscription(result.visit_id);
+            } else {
+                addMessage('error', '<p>上传失败: ' + (result.message || '未知错误') + '</p>');
+                App.updateStatusBar('上传失败', 'error');
+                isProcessing = false;
+                if (processBtn) processBtn.disabled = false;
+            }
+        } catch (error) {
+            addMessage('error', '<p>上传失败: ' + error.message + '</p>');
+            App.updateStatusBar('上传失败', 'error');
+            isProcessing = false;
+            if (processBtn) processBtn.disabled = false;
+        }
+    }
+
+    async function startTranscription(visitId) {
+        addMessage('progress', '<p>' + App.icon('mic', 14) + ' 开始语音转写...</p>');
+
+        try {
+            var response = await fetch('/api/asr/transcribe/' + visitId, { method: 'POST' });
+            var result = await response.json();
+
+            if (result.success) {
+                await pollTranscription(result.task_id, visitId);
+            } else {
+                addMessage('error', '<p>转写启动失败: ' + (result.message || '未知错误') + '</p>');
+                isProcessing = false;
+                var processBtn = document.getElementById('agentProcess');
+                if (processBtn) processBtn.disabled = false;
+            }
+        } catch (error) {
+            addMessage('error', '<p>转写请求失败: ' + error.message + '</p>');
+            isProcessing = false;
+            var processBtn = document.getElementById('agentProcess');
+            if (processBtn) processBtn.disabled = false;
+        }
+    }
+
+    function pollTranscription(taskId, visitId) {
+        var maxAttempts = 60;
+        var attempts = 0;
+
+        function poll() {
+            fetch('/api/task/' + taskId)
+                .then(function(r) { return r.json(); })
+                .then(function(result) {
+                    if (result.status === 'completed') {
+                        App.updateStatusBar('转写完成');
+
+                        fetch('/api/asr/transcript/' + visitId)
+                            .then(function(r) { return r.json(); })
+                            .then(function(transcriptData) {
+                                state.hasTranscription = true;
+                                App.setState({ hasTranscription: true });
+                                if (transcriptData.audio_duration) {
+                                    state.audioDuration = transcriptData.audio_duration;
+                                }
+                                if (transcriptData.language) {
+                                    state.language = transcriptData.language;
+                                    App.updateStatusBarInfo({ language: transcriptData.language });
+                                }
+
+                                var turnCount = transcriptData.turns ? transcriptData.turns.length : 0;
+                                App.updateStatusBarInfo({ speaker: turnCount + ' 轮次' });
+
+                                updateLastMessage('progress',
+                                    '<p>' + App.icon('mic', 14) + ' 语音转写完成，共识别 <strong>' + turnCount + '</strong> 个对话轮次</p>' +
+                                    '<p class="agent-hint">时长: ' + App.formatDuration(state.audioDuration) + '</p>'
+                                );
+
+                                isProcessing = false;
+                                var processBtn = document.getElementById('agentProcess');
+                                if (processBtn) {
+                                    processBtn.innerHTML = App.icon('sparkles', 14) + ' 生成病历';
+                                    processBtn.disabled = false;
+                                }
+
+                                App.emit('transcriptionLoaded', transcriptData);
+                            });
+                    } else if (result.status === 'failed') {
+                        updateLastMessage('error',
+                            '<p>转写失败: ' + (result.error_message || '未知错误') + '</p>'
+                        );
+                        App.updateStatusBar('转写失败', 'error');
+                        isProcessing = false;
+                        var processBtn = document.getElementById('agentProcess');
+                        if (processBtn) {
+                            processBtn.innerHTML = App.icon('refreshCw', 14) + ' 重试转写';
+                            processBtn.disabled = false;
+                        }
+                    } else if (attempts < maxAttempts) {
+                        attempts++;
+                        if (attempts % 3 === 0) {
+                            updateLastMessage('progress',
+                                '<p>' + App.icon('mic', 14) + ' 语音转写中... (' + attempts + '/' + maxAttempts + ')</p>' +
+                                '<div class="stage-progress"><div class="stage-progress-bar" style="width:' +
+                                (attempts / maxAttempts * 100) + '%"></div></div>'
+                            );
+                        }
+                        setTimeout(poll, 2000);
+                    } else {
+                        updateLastMessage('error', '<p>转写超时，请刷新页面查看结果</p>');
+                        App.updateStatusBar('转写超时', 'error');
+                        isProcessing = false;
+                    }
+                })
+                .catch(function(err) {
+                    console.error('轮询失败:', err);
+                    if (attempts < maxAttempts) {
+                        attempts++;
+                        setTimeout(poll, 2000);
+                    }
+                });
+        }
+
+        poll();
+    }
+
+    async function processEMR() {
+        if (!state.visitId) {
+            addMessage('error', '<p>请先上传音频并完成转写</p>');
+            return;
+        }
+        isProcessing = true;
+        var processBtn = document.getElementById('agentProcess');
+        if (processBtn) processBtn.disabled = true;
+
+        addMessage('agent', '<p>' + App.icon('bot', 14) + ' 开始生成SOAP病历...</p>');
+        App.updateStatusBar('正在生成病历...');
+
+        try {
+            var response = await fetch('/api/emr/process', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    visit_id: state.visitId,
+                    use_llm: true,
+                    save_intermediate: true
+                })
+            });
+            var result = await response.json();
+
+            if (result.status === 'completed') {
+                state.emrRecord = result.emr_record;
+                state.currentRecordId = result.emr_record.record_id;
+                App.setState({
+                    emrRecord: result.emr_record,
+                    currentRecordId: result.emr_record.record_id
+                });
+
+                result.stages = result.stages || [];
+                result.stages.forEach(function(stage, idx) {
+                    addStageMessage(idx + 1, stage.name || ('阶段' + (idx + 1)),
+                        stage.status || 'completed', stage.detail || '');
+                });
+
+                addMessage('success',
+                    '<p>' + App.icon('sparkles', 14) + ' 病历生成完毕！</p>' +
+                    '<p class="agent-hint">请在主编辑区查看病历内容</p>'
+                );
+
+                App.updateTitlebar(state.visitId, true);
+                App.updateStatusBar('病历生成完成', 'success');
+                App.emit('emrGenerated', { emrRecord: result.emr_record });
+            } else {
+                addMessage('error',
+                    '<p>病历生成失败</p>' +
+                    '<p class="agent-hint">' + App.escapeHtml(result.errors ? result.errors.join(', ') : '未知错误') + '</p>'
+                );
+                App.updateStatusBar('病历生成失败', 'error');
+            }
+        } catch (error) {
+            addMessage('error', '<p>病历生成失败: ' + error.message + '</p>');
+            App.updateStatusBar('病历生成失败', 'error');
+        } finally {
+            isProcessing = false;
+            if (processBtn) {
+                processBtn.innerHTML = App.icon('refreshCw', 14) + ' 重新生成';
+                processBtn.disabled = false;
+            }
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+        initAgent();
+    });
+
+    return {
+        addMessage: addMessage,
+        addStageMessage: addStageMessage,
+        updateLastMessage: updateLastMessage
+    };
+})();

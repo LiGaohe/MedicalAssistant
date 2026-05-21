@@ -1,4 +1,17 @@
 document.addEventListener('DOMContentLoaded', async function() {
+    var evalIcon = (function() {
+        var attrs = 'xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+        return function(name) {
+            var icons = {
+                check: '<svg ' + attrs + '><path d="M20 6L9 17l-5-5"/></svg>',
+                x: '<svg ' + attrs + '><path d="M18 6L6 18M6 6l12 12"/></svg>',
+                checkCircle: '<svg ' + attrs + '><path d="M21.801 10A10 10 0 1 1 17 3.335"/><path d="m9 11l3 3L22 4"/></svg>',
+                alertTriangle: '<svg ' + attrs + '><path d="m21.73 18l-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3M12 9v4m0 4h.01"/></svg>',
+                partialCircle: '<svg ' + attrs + '><circle cx="12" cy="12" r="10" stroke-dasharray="40 20"/></svg>'
+            };
+            return icons[name] || '';
+        };
+    })();
     const urlParams = new URLSearchParams(window.location.search);
     const recordId = urlParams.get('record_id');
     const visitId = urlParams.get('visit_id');
@@ -338,7 +351,7 @@ function displayConsistencyResult(consistencyResult) {
         
         factItem.innerHTML = `
             <div class="fact-header">
-                <span class="fact-status">${fact.is_supported ? '✓' : '✗'}</span>
+                <span class="fact-status">${fact.is_supported ? evalIcon('checkCircle') : evalIcon('x')}</span>
                 <span class="fact-text">${fact.fact || fact.fact_text || fact.claim || '未知事实'}</span>
             </div>
             <div class="fact-evidence">
@@ -399,8 +412,8 @@ function displayCompletenessResult(completenessResult) {
         item.innerHTML = `
             <div class="coverage-header">
                 <span class="coverage-status">${
-                    coverage === 'full' ? '✓ 完全覆盖' :
-                    coverage === 'partial' ? '◐ 部分覆盖' : '✗ 未覆盖'
+                    coverage === 'full' ? evalIcon('checkCircle') + ' 完全覆盖' :
+                    coverage === 'partial' ? evalIcon('partialCircle') + ' 部分覆盖' : evalIcon('x') + ' 未覆盖'
                 }</span>
                 <span class="coverage-fact">${fact.fact || fact.fact_text}</span>
             </div>
@@ -463,11 +476,11 @@ function displaySafetyResult(safetyResult) {
     const safetyStatus = document.getElementById('safetyStatus');
     
     if (hasHighRisk) {
-        safetyIcon.textContent = '⚠';
+        safetyIcon.innerHTML = evalIcon('alertTriangle');
         safetyText.textContent = `发现 ${safetyResult.high_risk_count || 0} 个高风险问题`;
         safetyStatus.className = 'safety-status has-risk';
     } else {
-        safetyIcon.textContent = '✓';
+        safetyIcon.innerHTML = evalIcon('checkCircle');
         safetyText.textContent = '未发现高风险错误';
         safetyStatus.className = 'safety-status no-risk';
     }

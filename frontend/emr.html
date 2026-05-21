@@ -3,118 +3,377 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>病历生成 - 中文门诊病历生成系统</title>
+    <title>门诊病历生成系统</title>
     <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/ide.css">
 </head>
 <body>
-    <div class="container">
-        <h1>病历生成</h1>
-        
-        <div class="info-section">
-            <p><strong>就诊记录:</strong> <span id="visitId"></span></p>
-            <p><strong>状态:</strong> <span id="status"></span></p>
-        </div>
-        
-        <div class="actions">
-            <button id="generateEMR" class="btn-primary">生成病历</button>
-            <button id="debugEMR" class="btn-warning">调试模式</button>
-            <button id="viewEMR" class="btn-success" style="display: none;">查看病历</button>
-            <button id="evaluateEMR" class="btn-info" style="display: none;">质量评估</button>
-            <button id="backToResult" class="btn-secondary">返回转写结果</button>
-        </div>
-        
-        <div class="loading" id="loadingSection" style="display: none;">
-            <p>正在生成病历，请稍候...</p>
-            <div class="progress-bar">
-                <div class="progress-fill" id="progressFill"></div>
+    <div id="app">
+        <div id="titlebar">
+            <div class="titlebar-left">
+                <svg class="titlebar-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 2v2M5 2v2m0-1H4a2 2 0 0 0-2 2v4a6 6 0 0 0 12 0V5a2 2 0 0 0-2-2h-1"/><path d="M8 15a6 6 0 0 0 12 0v-3"/><circle cx="20" cy="10" r="2"/></svg>
+                <span class="titlebar-title">门诊病历生成系统</span>
+            </div>
+            <div class="titlebar-center">
+                <span class="titlebar-visit" id="titlebarVisitId">就诊ID: --</span>
+                <span class="titlebar-status" id="titlebarStatus">未生成病历</span>
+            </div>
+            <div class="titlebar-right">
+                <button id="titlebarPrint" class="titlebar-btn" title="打印病历" disabled>
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 9V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6"/><rect width="12" height="8" x="6" y="14" rx="1"/></svg>
+                    打印
+                </button>
+                <button id="titlebarEvaluate" class="titlebar-btn" title="病历质量评估" disabled>
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18m-3-4V9m-5 8V5M8 17v-3"/></svg>
+                    评估
+                </button>
             </div>
         </div>
-        
-        <div id="debugModal" class="modal" style="display: none;">
-            <div class="modal-content modal-large">
-                <div class="modal-header">
-                    <h2>调试模式 - 手动输入大模型结果</h2>
-                    <span class="close" id="closeDebugModal">&times;</span>
-                </div>
-                <div class="modal-body">
-                    <div id="debugStages">
-                        <div class="debug-stage-selector">
-                            <label>选择阶段：</label>
-                            <select id="stageSelect"></select>
-                        </div>
-                        <div class="debug-prompt">
-                            <div class="debug-prompt-header">
-                                <h4>提示词：</h4>
-                                <button id="copyPrompt" class="btn-copy" title="复制提示词">复制</button>
+
+        <div id="main-layout">
+            <div id="activity-bar">
+                <button class="activity-btn" data-panel="editor" title="病历编辑器 (Ctrl+1)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                        <polyline points="14 2 14 8 20 8"></polyline>
+                        <line x1="16" y1="13" x2="8" y2="13"></line>
+                        <line x1="16" y1="17" x2="8" y2="17"></line>
+                        <polyline points="10 9 9 9 8 9"></polyline>
+                    </svg>
+                </button>
+                <button class="activity-btn active" data-panel="agent" title="Agent 助手 (Ctrl+2)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                        <line x1="9" y1="10" x2="15" y2="10"></line>
+                        <line x1="12" y1="7" x2="12" y2="13"></line>
+                    </svg>
+                </button>
+                <button class="activity-btn" data-panel="debug" title="调试模式 (Ctrl+3)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 20h9"></path>
+                        <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+                    </svg>
+                </button>
+                <button class="activity-btn" data-panel="config" title="大模型配置 (Ctrl+4)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                    </svg>
+                </button>
+            </div>
+
+            <div id="sidebar">
+                <div id="sidebar-panel-agent" class="sidebar-panel active">
+                    <div class="sidebar-header">
+                        <h3>Agent 助手</h3>
+                    </div>
+                    <div class="agent-messages" id="agentMessages">
+                        <div class="agent-message system">
+                            <div class="agent-message-icon">
+                                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2m16 0h2m-7-1v2m-6-2v2"/></svg>
                             </div>
-                            <pre id="promptContent"></pre>
+                            <div class="agent-message-content">
+                                <p>欢迎使用门诊病历生成系统</p>
+                                <p class="agent-hint">请上传音频文件开始，或使用文本调试模式输入对话内容</p>
+                            </div>
                         </div>
-                        <div class="debug-instructions">
-                            <h4>指导步骤：</h4>
-                            <pre id="instructionsContent"></pre>
+                    </div>
+                    <div class="agent-input-area">
+                        <div class="agent-upload-zone" id="agentDropZone">
+                            <div class="agent-upload-content">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="agent-upload-icon">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                    <polyline points="17 8 12 3 7 8"></polyline>
+                                    <line x1="12" y1="3" x2="12" y2="15"></line>
+                                </svg>
+                                <span>拖拽音频文件或点击上传</span>
+                                <span class="agent-upload-hint">支持 wav, mp3</span>
+                                <input type="file" id="agentAudioFile" accept=".wav,.mp3" hidden>
+                            </div>
                         </div>
-                        <div class="debug-input">
-                            <h4>请输入大模型返回结果：</h4>
-                            <textarea id="userResponse" rows="15" placeholder="请输入JSON格式的返回结果..."></textarea>
+                        <div class="agent-input-row">
+                            <select id="agentLanguage" class="agent-select">
+                                <option value="zh">中文</option>
+                                <option value="en">English</option>
+                            </select>
+                            <button id="agentTextDebug" class="agent-btn-secondary">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497zM15 5l4 4"/></svg>
+                                文本调试
+                            </button>
+                            <button id="agentProcess" class="agent-btn-primary" disabled>
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594zM20 2v4m2-2h-4"/><circle cx="4" cy="20" r="2"/></svg>
+                                生成病历
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="sidebar-panel-debug" class="sidebar-panel">
+                    <div class="sidebar-header">
+                        <h3>调试模式</h3>
+                        <button id="closeDebugPanel" class="sidebar-header-close" title="关闭调试面板">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                    </button>
+                    </div>
+                    <div class="debug-content">
+                        <div class="debug-stage-selector">
+                            <label>选择阶段</label>
+                            <select id="debugStageSelect"></select>
+                        </div>
+                        <div class="debug-section">
+                            <div class="debug-section-header">
+                                <h4>提示词</h4>
+                                <button id="debugCopyPrompt" class="debug-copy-btn" title="复制提示词">复制</button>
+                            </div>
+                            <pre id="debugPromptContent" class="debug-pre"></pre>
+                        </div>
+                        <div class="debug-section">
+                            <h4>指导步骤</h4>
+                            <pre id="debugInstructionsContent" class="debug-pre"></pre>
+                        </div>
+                        <div class="debug-section">
+                            <h4>请输入大模型返回结果</h4>
+                            <textarea id="debugUserResponse" rows="10" placeholder="请输入JSON格式的返回结果..."></textarea>
                         </div>
                         <div class="debug-actions">
-                            <button id="submitStage" class="btn-primary">提交并继续</button>
-                            <button id="skipStage" class="btn-secondary">跳过此阶段</button>
+                            <button id="debugSubmitStage" class="agent-btn-primary">提交并继续</button>
+                            <button id="debugSkipStage" class="agent-btn-secondary">跳过此阶段</button>
+                        </div>
+                        <div id="debugResultSection" class="debug-section" style="display: none;">
+                            <h4>处理结果</h4>
+                            <pre id="debugResultContent" class="debug-pre"></pre>
                         </div>
                     </div>
-                    <div id="debugResult" style="display: none;">
-                        <h4>处理结果：</h4>
-                        <pre id="resultContent"></pre>
+                </div>
+
+                <div id="sidebar-panel-config" class="sidebar-panel">
+                    <div class="sidebar-header">
+                        <h3>大模型配置</h3>
+                    </div>
+                    <div class="config-content">
+                        <div class="config-tabs">
+                            <button class="config-tab active" data-config-tab="form">新建配置</button>
+                            <button class="config-tab" data-config-tab="list">已保存配置</button>
+                        </div>
+                        <div id="configTabForm" class="config-tab-content active">
+                            <form id="llmConfigForm" class="config-form">
+                                <input type="hidden" id="editingConfigId" name="editing_config_id" value="">
+                                <div class="config-field">
+                                    <label for="configName">配置名称 *</label>
+                                    <input type="text" id="configName" name="config_name" required placeholder="例如：qwen">
+                                </div>
+                                <div class="config-field">
+                                    <label for="provider">服务商 *</label>
+                                    <select id="provider" name="provider" required>
+                                        <option value="openai_compatible">OpenAI兼容接口</option>
+                                        <option value="openai">OpenAI</option>
+                                        <option value="anthropic">Anthropic</option>
+                                        <option value="sense-deepseek">Sense-DeepSeek</option>
+                                        <option value="custom">自定义</option>
+                                    </select>
+                                </div>
+                                <div class="config-field">
+                                    <label for="modelName">模型名称 *</label>
+                                    <input type="text" id="modelName" name="model_name" required placeholder="例如：qwen-plus">
+                                </div>
+                                <div class="config-field">
+                                    <label for="apiKey">API Key *</label>
+                                    <input type="password" id="apiKey" name="api_key" required placeholder="输入您的API Key">
+                                </div>
+                                <div class="config-field">
+                                    <label for="apiEndpoint">API Endpoint</label>
+                                    <input type="text" id="apiEndpoint" name="api_endpoint" placeholder="例如：https://api-inference.modelscope.cn/v1">
+                                </div>
+                                <div class="config-field-half">
+                                    <div class="config-field">
+                                        <label for="maxTokens">最大Token数</label>
+                                        <input type="number" id="maxTokens" name="max_tokens" value="2048" min="100" max="8192">
+                                    </div>
+                                    <div class="config-field">
+                                        <label for="temperature">Temperature</label>
+                                        <input type="number" id="temperature" name="temperature" value="0.7" min="0" max="2" step="0.1">
+                                    </div>
+                                </div>
+                                <div class="config-field">
+                                    <label class="config-checkbox">
+                                        <input type="checkbox" id="isActive" name="is_active" checked>
+                                        <span>启用此配置</span>
+                                    </label>
+                                </div>
+                                <div class="config-field">
+                                    <label class="config-checkbox">
+                                        <input type="checkbox" id="jsonMode" name="json_mode">
+                                        <span>JSON输出模式</span>
+                                    </label>
+                                </div>
+                                <div class="config-field">
+                                    <label class="config-checkbox">
+                                        <input type="checkbox" id="thinkingEnabled" name="thinking_enabled">
+                                        <span>启用思考模式</span>
+                                    </label>
+                                </div>
+                                <div class="config-field" id="thinkingEffortGroup" style="display:none;">
+                                    <label for="thinkingEffort">思考强度</label>
+                                    <select id="thinkingEffort" name="thinking_effort">
+                                        <option value="high">高（更深入思考）</option>
+                                        <option value="low">低（快速响应）</option>
+                                    </select>
+                                </div>
+                                <div class="config-form-actions">
+                                    <button type="submit" class="agent-btn-primary" id="configSubmitBtn">保存配置</button>
+                                    <button type="button" class="agent-btn-secondary" id="configCancelEditBtn" style="display:none;">取消编辑</button>
+                                </div>
+                            </form>
+                        </div>
+                        <div id="configTabList" class="config-tab-content">
+                            <div id="configsList"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="editor-area">
+                <div id="editor-welcome" class="editor-welcome">
+                    <div class="editor-welcome-content">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="editor-welcome-icon">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                            <polyline points="14 2 14 8 20 8"></polyline>
+                        </svg>
+                        <h2>SOAP 病历</h2>
+                        <p>请点击 <span class="welcome-link" id="welcomeAgentLink">
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                                <line x1="9" y1="10" x2="15" y2="10"></line>
+                                <line x1="12" y1="7" x2="12" y2="13"></line>
+                            </svg>
+                            Agent 助手
+                        </span> 上传音频来生成病历</p>
+                    </div>
+                </div>
+
+                <div id="editor-content" style="display: none;">
+                    <div class="editor-toolbar">
+                        <div class="editor-toolbar-left">
+                            <label>版本</label>
+                            <select id="versionSelect"></select>
+                        </div>
+                        <div class="editor-toolbar-right">
+                            <button id="toggleEvidence" class="editor-btn">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 6l-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551"/></svg>
+                            证据溯源
+                        </button>
+                            <button id="editEMR" class="editor-btn editor-btn-warning">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497zM15 5l4 4"/></svg>
+                            编辑
+                        </button>
+                            <button id="saveEMR" class="editor-btn editor-btn-success" style="display: none;">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7M7 3v4a1 1 0 0 0 1 1h7"/></svg>
+                            保存
+                        </button>
+                            <button id="cancelEdit" class="editor-btn" style="display: none;">取消</button>
+                        </div>
+                    </div>
+
+                    <div id="evidencePanel" class="editor-evidence-panel" style="display: none;">
+                        <div class="editor-evidence-header">
+                            <h3>证据溯源</h3>
+                        </div>
+                        <div id="evidenceList"></div>
+                    </div>
+
+                    <div class="editor-soap-content" id="emrContent">
+                        <div class="soap-section">
+                            <div class="soap-section-header" data-section="subjective">
+                                <span class="soap-section-arrow">▼</span>
+                                <h3>主观数据 (Subjective)</h3>
+                            </div>
+                            <div class="soap-section-body" id="subjectiveContent"></div>
+                        </div>
+                        <div class="soap-section">
+                            <div class="soap-section-header" data-section="objective">
+                                <span class="soap-section-arrow">▼</span>
+                                <h3>客观数据 (Objective)</h3>
+                            </div>
+                            <div class="soap-section-body" id="objectiveContent"></div>
+                        </div>
+                        <div class="soap-section">
+                            <div class="soap-section-header" data-section="assessment">
+                                <span class="soap-section-arrow">▼</span>
+                                <h3>评估 (Assessment)</h3>
+                            </div>
+                            <div class="soap-section-body" id="assessmentContent"></div>
+                        </div>
+                        <div class="soap-section">
+                            <div class="soap-section-header" data-section="plan">
+                                <span class="soap-section-arrow">▼</span>
+                                <h3>计划 (Plan)</h3>
+                            </div>
+                            <div class="soap-section-body" id="planContent"></div>
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
-        
-        <div class="emr-section" id="emrSection" style="display: none;">
-            <h2>病历内容</h2>
-            <div class="emr-toolbar">
-                <div class="emr-version">
-                    <label>版本：</label>
-                    <select id="versionSelect"></select>
-                </div>
-                <div class="emr-actions">
-                    <button id="editEMR" class="btn-warning">编辑病历</button>
-                    <button id="saveEMR" class="btn-success" style="display: none;">保存修改</button>
-                    <button id="cancelEdit" class="btn-secondary" style="display: none;">取消编辑</button>
-                    <button id="printEMR" class="btn-primary">打印病历</button>
-                    <button id="toggleEvidence" class="btn-secondary">显示证据溯源</button>
-                </div>
+
+        <div id="statusbar">
+            <span class="statusbar-item" id="statusbarVersion">版本: --</span>
+            <span class="statusbar-item" id="statusbarLanguage">语言: --</span>
+            <span class="statusbar-item" id="statusbarSpeaker">说话人: --</span>
+            <span class="statusbar-spacer"></span>
+            <span class="statusbar-item" id="statusbarMessage">就绪</span>
+        </div>
+    </div>
+
+    <div id="textDebugModal" class="ide-modal" style="display: none;">
+        <div class="ide-modal-backdrop"></div>
+        <div class="ide-modal-content">
+            <div class="ide-modal-header">
+                <h2>文本调试模式</h2>
+                <button class="ide-modal-close" id="closeTextDebugModal">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
             </div>
-            
-            <div id="evidencePanel" class="evidence-panel" style="display: none;">
-                <h3>证据溯源</h3>
-                <div id="evidenceList"></div>
-            </div>
-            
-            <div class="emr-content" id="emrContent">
-                <div class="emr-part">
-                    <h3>主观数据 (Subjective)</h3>
-                    <div id="subjectiveContent"></div>
+            <div class="ide-modal-body">
+                <div class="config-field">
+                    <label for="debugLanguageSelect">对话语言</label>
+                    <select id="debugLanguageSelect">
+                        <option value="zh">中文</option>
+                        <option value="en">English</option>
+                    </select>
                 </div>
-                
-                <div class="emr-part">
-                    <h3>客观数据 (Objective)</h3>
-                    <div id="objectiveContent"></div>
+                <div class="config-field">
+                    <label for="dialogTextInput">输入对话文本</label>
+                    <textarea id="dialogTextInput" rows="12" placeholder="示例：
+[spk0]: 我最近头痛三天了
+[spk1]: 请问头痛的位置在哪里？
+[spk0]: 主要是前额和太阳穴
+[spk1]: 是持续性的还是阵发性的？
+
+或无标签格式：
+我最近头痛三天了
+请问头痛的位置在哪里？
+主要是前额和太阳穴
+是持续性的还是阵发性的？"></textarea>
                 </div>
-                
-                <div class="emr-part">
-                    <h3>评估 (Assessment)</h3>
-                    <div id="assessmentContent"></div>
+                <div class="ide-modal-format-hint">
+                    <p><strong>支持的格式</strong></p>
+                    <ul>
+                        <li><strong>有说话人标签</strong><code>[spk0]: 对话内容</code> 或 <code>[医生]: 对话内容</code></li>
+                        <li><strong>无标签</strong>每行一句话，系统会自动识别说话人</li>
+                    </ul>
                 </div>
-                
-                <div class="emr-part">
-                    <h3>计划 (Plan)</h3>
-                    <div id="planContent"></div>
+                <div class="ide-modal-actions">
+                    <button id="startTextDebug" class="agent-btn-primary">开始调试</button>
+                    <button id="cancelTextDebug" class="agent-btn-secondary">取消</button>
                 </div>
             </div>
         </div>
     </div>
-    
-    <script src="/static/js/emr.js"></script>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/agent.js"></script>
+    <script src="/static/js/editor.js"></script>
+    <script src="/static/js/debug.js"></script>
+    <script src="/static/js/config-sidebar.js"></script>
 </body>
 </html>
