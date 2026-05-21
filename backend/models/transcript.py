@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
@@ -16,6 +16,7 @@ class TranscriptTurn(Base):
     text = Column(String, nullable=False)
     original_text = Column(String, nullable=True)
     corrected_text = Column(String, nullable=True)
+    section_hint = Column(JSON, nullable=True)
     start_ms = Column(Integer, nullable=False)
     end_ms = Column(Integer, nullable=False)
     confidence = Column(Float, nullable=True, default=1.0)

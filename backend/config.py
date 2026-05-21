@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     LLM_DEBUG_MODE: bool = False
     LLM_SEGMENT_TURNS: int = 10
     
+    LLM_THINKING_ENABLED: bool = True
+    LLM_THINKING_STAGES: list = ["fact_consolidation", "assessment_generation", "plan_generation", "verification"]
+    
     DEFAULT_LANGUAGE: str = "zh"
     SUPPORTED_LANGUAGES: list = ["zh", "en"]
     
@@ -53,6 +56,12 @@ class Settings(BaseSettings):
     ICD11_ZH_PATH: str = "data/text/SimpleTabulation-ICD-11-MMS-zh.txt"
     CHINESE_TERM_FUZZY_THRESHOLD: float = 0.7
     CHINESE_TERM_EXACT_MATCH_BONUS: float = 0.2
+
+    ENABLE_REWRITE: bool = True
+    REWRITE_TRIGGER_THRESHOLD: float = 0.5
+    REWRITE_MAX_PHRASINGS: int = 3
+    ALT_PHRASING_MAX_COUNT: int = 2
+    ENABLE_MULTI_CONCEPT_DECOMPOSE: bool = True
 
     class Config:
         env_file = ".env"

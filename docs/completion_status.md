@@ -1,5 +1,394 @@
 # 完成状态记录
 
+## 2026-05-21 BugFix: 并行处理时LLM配置线程安全与fallback结果丢失
+
+### 问题描述
+
+1. **LLM调用失败**：`float() argument must be a string or a real number, not 'NoneType'`
+2. **turn丢失**：实际有32个turn，但只处理了22个
+
+### 问题分析
+
+**问题1：线程安全问题**
+- 并行处理时，多个线程共享同一个`llm_service`实例
+- 数据库session不是线程安全的，导致某些线程的config查询返回None
+- `float(config.temperature)`失败，因为config为None
+
+**问题2：fallback结果格式不一致**
+- 正常处理返回：`{"turns": [...], "role_mapping": {...}}`
+- fallback返回：`{"role_mapping": {...}, "annotated_text": "..."}`
+- fallback没有返回`turns`字段，导致这些turn被丢失
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| LLMService添加配置缓存 | ✅ 完成 | 使用`adapter_configs`缓存配置，避免每次查询数据库 |
+| LLMService添加线程锁 | ✅ 完成 | 使用`threading.Lock`保护数据库查询 |
+| 修复fallback返回格式 | ✅ 完成 | 返回与正常处理一致的`{"turns": [...], "role_mapping": {...}}`格式 |
+
+### 修改文件
+
+1. **backend/services/llm/llm_service.py**
+   - 添加`adapter_configs`缓存配置信息
+   - 添加`threading.Lock`保护数据库查询
+   - `generate()`方法使用缓存配置而非每次查询数据库
+
+2. **backend/services/llm_pipeline_service.py**
+   - `_fallback_role_annotation()`返回与正常处理一致的格式
+   - 包含`turns`字段，确保所有turn都被正确处理
+
+---
+
+## 2026-05-20 性能优化：大模型Thinking模式选择性启用
+
+### 问题描述
+
+病历处理总耗时仍较长（约225秒），日志分析发现大模型thinking模式是主要瓶颈：
+- 每次LLM调用都启用thinking模式
+- 事实收束阶段reasoning_tokens达3729，thinking内容7787字符
+- 核查修订阶段重写整份SOAP，工作量过大
+
+### 问题分析
+
+| 阶段 | thinking模式 | 问题 |
+|------|-------------|------|
+| 转写清洗 | 启用 | 简单模式匹配任务，不需要复杂推理 |
+| 事实抽取 | 启用 | 结构化抽取任务，不需要复杂推理 |
+| 事实收束 | 启用 | 需要冲突判断，保留thinking |
+| SO生成 | 启用 | 结构化生成任务，不需要复杂推理 |
+| AP生成 | 启用 | 需要诊断推断，保留thinking |
+| 核查修订 | 启用 | 重写整份SOAP，工作量过大 |
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 转写清洗阶段禁用thinking | ✅ 完成 | 添加`thinking_enabled=False` |
+| 事实抽取阶段禁用thinking | ✅ 完成 | 添加`thinking_enabled=False` |
+| 字段抽取阶段禁用thinking | ✅ 完成 | 添加`thinking_enabled=False` |
+| SO生成阶段禁用thinking | ✅ 完成 | 添加`thinking_enabled=False` |
+| 简化核查修订提示词 | ✅ 完成 | 改为定向核查，先输出问题清单 |
+| 简化事实收束提示词 | ✅ 完成 | 移除补判逻辑，仅合并重复和标记冲突 |
+| 新增Thinking配置项 | ✅ 完成 | `LLM_THINKING_ENABLED`和`LLM_THINKING_STAGES` |
+
+### 修改文件
+
+1. **backend/services/llm_pipeline_service.py**
+   - 转写清洗、事实抽取、字段抽取、SO生成阶段添加`thinking_enabled=False`
+   - 各阶段添加thinking模式日志记录
+
+2. **backend/services/llm/prompts.py**
+   - `soap_verification`：简化为定向核查，最多5个问题，仅修订有问题的字段
+   - `fact_consolidation`：移除补判逻辑，仅合并重复和标记冲突
+
+3. **backend/config.py**
+   - 新增`LLM_THINKING_ENABLED`：全局thinking开关
+   - 新增`LLM_THINKING_STAGES`：指定启用thinking的阶段列表
+
+### 预期效果
+
+| 指标 | 优化前 | 优化后目标 | 提升 |
+|------|--------|------------|------|
+| 简单任务推理时间 | 20-60秒 | 5-15秒 | 70-75% |
+| 核查修订工作量 | 重写整份SOAP | 仅修订问题字段 | 50-70% |
+| 总耗时 | 225秒 | 120-150秒 | 33-47% |
+
+---
+
+## 2026-05-20 BugFix: turn_id索引匹配与max_tokens不足
+
+### 问题描述
+
+1. **turn_id不在segment索引中**：LLM返回的turn_id与数据库中的turn_index匹配失败
+2. **无法从响应中提取有效JSON**：思考模式下reasoning_tokens消耗大量token（如13383），导致输出被截断，JSON不完整
+3. **'NoneType' object has no attribute 'max_tokens'**：LLM配置查询返回None
+
+### 问题分析
+
+**问题1：turn_id匹配失败（根本原因）**
+- 输入格式：`[#30] [spk0]: 对话内容` - 使用数据库中的`turn_index`（如30, 31）
+- Prompt示例：`"turn_id": 0` - 示例中使用0，LLM理解为位置索引
+- LLM输出：`turn_id: 0, 1` - LLM按示例返回位置索引
+- 匹配失败：`turn_by_index`的keys是`[30, 31]`，找不到0, 1
+- **解决方案**：修改prompt模板，明确告诉LLM使用`[#N]`中的N作为turn_id
+
+**问题2：max_tokens不足**
+- 默认max_tokens=2048，思考模式下乘以3=6144
+- 实际reasoning_tokens消耗13383，远超可用空间
+- 导致`finish_reason=length`，JSON输出被截断
+
+**问题3：LLM配置查询返回None**
+- 数据库中可能没有对应的配置记录
+- 或配置的is_active=False
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 修复prompt模板turn_id说明 | ✅ 完成 | 明确告诉LLM使用`[#N]`中的N作为turn_id |
+| 添加LLM配置查询详细日志 | ✅ 完成 | 显示数据库中所有配置，帮助定位问题 |
+| 添加turn_id匹配详细日志 | ✅ 完成 | 显示segment详情、turn_index列表、匹配过程 |
+| 增大max_tokens默认值 | ✅ 完成 | 从2048改为8192 |
+| 增大思考模式倍数 | ✅ 完成 | 从3倍改为5倍 |
+
+### 修改文件
+
+1. **backend/services/llm/prompts.py**
+   - `turn_cleaning`模板：添加说明"turn_id必须使用对话中的[#N]编号"
+   - 示例改为`"turn_id": 30`而非`"turn_id": 0`
+
+2. **backend/services/llm/llm_service.py**
+   - `generate()`: 添加详细日志，显示数据库中所有配置
+   - 当config为None时，列出所有可用配置帮助定位问题
+
+3. **backend/services/llm_pipeline_service.py**
+   - `_parse_cleaning_response()`: 使用`turn_by_index.get(turn_id)`匹配
+   - `_apply_asr_corrections()`: 同样使用turn_by_index匹配
+   - 添加详细日志：segment详情、turn_index列表、匹配过程
+
+4. **backend/models/llm_config.py**
+   - `max_tokens`默认值从2048改为8192
+
+5. **backend/services/llm/openai_compatible_adapter.py**
+   - 思考模式下max_tokens倍数从3改为5
+
+### 注意事项
+
+数据库中已有的LLM配置记录不会自动更新max_tokens值。需要手动更新：
+
+```sql
+UPDATE llm_configs SET max_tokens = 8192 WHERE max_tokens = 2048;
+```
+
+或在配置页面重新设置max_tokens。
+
+---
+
+## 2026-05-20 性能优化：段落处理并行化与阶段延迟减少
+
+### 变更内容
+
+针对病历处理时间过长的问题（总耗时约272-281秒），实施两项核心优化：**段落处理并行化**和**减少阶段间延迟**。
+
+### 问题分析
+
+从日志分析，病历处理主要耗时分布：
+
+| 阶段 | 耗时范围 | 占比 | 瓶颈原因 |
+|------|----------|------|----------|
+| 段落处理(turn_cleaning) | 81-144秒 | 30-52% | 串行LLM调用，每段约20-36秒 |
+| 阶段间延迟 | 15秒 | 5% | STAGE_DELAY=3秒×5次 |
+
+**根因**：
+1. 段落处理串行执行，32个turn分成4个段落，每个段落需要一次LLM调用
+2. 阶段间延迟原本是为了避免API限流，但现代LLM API通常不需要
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 新增_process_segments_parallel()方法 | ✅ 完成 | 使用ThreadPoolExecutor并行处理段落 |
+| 修改process_transcript()使用并行处理 | ✅ 完成 | 替代原有串行处理逻辑 |
+| 添加MAX_PARALLEL_SEGMENTS配置 | ✅ 完成 | 限制最大并行数，默认4 |
+| 减少STAGE_DELAY | ✅ 完成 | 从3秒降至0.5秒 |
+| 添加性能监控日志 | ✅ 完成 | 记录并行处理耗时 |
+
+### 修改文件
+
+1. **backend/services/llm_pipeline_service.py**
+   - 新增`MAX_PARALLEL_SEGMENTS = 4`类变量
+   - 修改`STAGE_DELAY`从3.0降至0.5
+   - 新增`_process_segments_parallel()`方法：使用线程池并行处理段落
+   - 修改`process_transcript()`：使用并行处理替代串行处理
+
+### 预期效果
+
+| 指标 | 优化前 | 优化后目标 | 提升 |
+|------|--------|------------|------|
+| 段落处理耗时 | 81-144秒 | 30-50秒 | 60-70% |
+| 阶段延迟 | 15秒 | 2.5秒 | 83% |
+| 总耗时 | 272-281秒 | 150-180秒 | 35-45% |
+
+### 技术实现
+
+**并行处理架构**：
+
+```
+段落1 ──┐
+段落2 ──┼── ThreadPoolExecutor(max_workers=4) ── 合并结果
+段落3 ──┤
+段落4 ──┘
+```
+
+**关键设计**：
+1. 使用`ThreadPoolExecutor`实现LLM调用的并行化
+2. 限制最大并行数（`MAX_PARALLEL_SEGMENTS=4`），避免API限流
+3. 保留串行模式作为fallback（调试模式自动切换）
+4. 错误处理：单个段落失败时使用`_fallback_role_annotation()`
+
+---
+
+## 2026-05-20 BugFix: LLM API请求超时修复
+
+### 变更内容
+
+修复事实收束阶段LLM API调用超时问题（`The read operation timed out`）。
+
+### 问题分析
+
+从终端日志分析，事实收束阶段LLM请求耗时约121秒，刚好超过默认的120秒超时：
+
+- 请求开始时间: 15:02:14
+- 错误发生时间: 15:04:15
+- 总耗时: 约121秒
+
+**根因**：事实收束阶段处理大量事实时，LLM响应时间可能超过默认的120秒超时限制。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| LLMRequest添加timeout参数 | ✅ 完成 | 支持请求级别超时配置 |
+| OpenAICompatibleAdapter支持请求级超时 | ✅ 完成 | 优先使用请求级超时，否则使用默认值 |
+| LLMService支持传递timeout参数 | ✅ 完成 | generate()方法新增timeout参数 |
+| 事实收束阶段使用更长超时 | ✅ 完成 | 设置300秒超时 |
+
+### 修改文件
+
+1. **backend/services/llm/base.py**
+   - `LLMRequest`数据类新增`timeout: Optional[float] = None`字段
+
+2. **backend/services/llm/openai_compatible_adapter.py**
+   - 修改`generate()`方法，优先使用请求级超时
+   - 添加超时设置日志输出
+
+3. **backend/services/llm/llm_service.py**
+   - `generate()`方法新增`timeout`参数
+   - 将timeout传递给LLMRequest
+
+4. **backend/services/llm_pipeline_service.py**
+   - `_fact_consolidation_stage()`调用generate时传入`timeout=300.0`
+
+### 超时策略
+
+| 场景 | 默认超时 | 说明 |
+|------|----------|------|
+| 普通请求 | 120秒 | 默认值 |
+| thinking模式 | 300秒 | 需要更长推理时间 |
+| 事实收束阶段 | 300秒 | 处理大量事实需要更长时间 |
+
+## 2026-05-20 术语规范化性能优化
+
+### 变更内容
+
+针对术语规范化阶段处理时间过长的问题（单个术语约14秒，25个术语约350秒），实施三项优化措施：**智能跳过策略**、**批量LLM调用**、**结果缓存机制**。
+
+### 问题分析
+
+从终端日志分析，处理单个术语"脖子处淋巴结肿大"耗时约14秒：
+
+- 第一次LLM调用（rewrite）：约9秒
+- 第二次LLM调用（alternative phrasing）：约5秒
+- 最终结果：unresolved（未解决）
+
+**根因**：串行处理架构 + 多次LLM调用 + 无效调用未被跳过
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| P0: 智能跳过策略 | ✅ 完成 | 当rewrite无变化时跳过alternative phrasing，减少50%无效调用 |
+| P1: 批量LLM调用 | ✅ 完成 | 新增`batch_rewrite_colloquial()`方法，25个术语从25次调用减少到1次 |
+| P1: 批量规范化 | ✅ 完成 | 新增`batch_normalize_terms()`方法，`_normalize_terms_stage`支持批量模式 |
+| P2: 结果缓存机制 | ✅ 完成 | 添加术语规范化结果缓存，避免重复计算 |
+
+### 修改文件
+
+1. **backend/services/terminology_service.py**
+   - 新增类变量 `_normalization_cache` 和 `_cache_max_size`
+   - 新增 `_get_cache_key()`、`_get_from_cache()`、`_save_to_cache()` 缓存方法
+   - 修改 `normalize_single_term()` 添加缓存检查和写入
+   - 新增 `batch_normalize_terms()` 批量规范化方法
+   - 修改 `normalize_term()` 添加 `rewrite_produced_new_terms` 标志，智能跳过alternative phrasing
+
+2. **backend/services/term_rewriter.py**
+   - 新增 `batch_rewrite_colloquial()` 批量重写方法
+   - 新增 `_build_batch_rewrite_prompt()` 批量提示词构建
+   - 新增 `_parse_batch_rewrite_response()` 批量响应解析
+
+3. **backend/services/llm_pipeline_service.py**
+   - 修改 `_normalize_terms_stage()` 支持 `use_batch` 参数
+   - 批量模式下使用 `batch_normalize_terms()` 替代串行调用
+
+### 预期效果
+
+| 指标 | 优化前 | 优化后目标 |
+|------|--------|------------|
+| 单术语平均耗时 | 14秒 | <2秒 |
+| 25术语总耗时 | 350秒 | <50秒 |
+| LLM调用次数 | 50次 | <5次 |
+
+### 配置项
+
+无需新增配置项，批量模式默认启用（`use_batch=True`）。
+
+## 2026-05-19 术语规范化优化：引入Rewrite阶段与约束选择
+
+### 变更内容
+
+依据《口语术语规范化模块设计》文档，重构术语规范化核心流程，引入 **Rewrite 阶段**、**多概念拆解**、**约束选择** 和 **置信度驱动的选择性触发**，同时修正中英文路径分流问题。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 新增 TermRewriter 模块 | ✅ 完成 | `backend/services/term_rewriter.py`，封装口语改写、多概念拆解、alternative phrasing |
+| 新增 ConstrainedTermSelector | ✅ 完成 | 约束LLM只能从候选列表中选择，禁止自由生成术语 |
+| 重构 normalize_term() | ✅ 完成 | 引入分级触发链路：exact/alias预检 → 多概念拆解 → 语言分流检索 → rewrite → alt phrasing → 约束选择 → unresolved |
+| 修复并行模式语言分流 | ✅ 完成 | `extract_and_normalize_terms_parallel()` 中文走本地术语库，英文走UMLS |
+| 修改 _normalize_by_llm() | ✅ 完成 | 降低LLM兜底置信度（0.3→0.45），减少自由生成风险 |
+| 新增配置项 | ✅ 完成 | `ENABLE_REWRITE`、`REWRITE_TRIGGER_THRESHOLD`、`REWRITE_MAX_PHRASINGS`、`ALT_PHRASING_MAX_COUNT`、`ENABLE_MULTI_CONCEPT_DECOMPOSE` |
+
+### 修改文件
+
+1. **backend/services/term_rewriter.py（新增）**
+   - `TermRewriter` 类：`rewrite_colloquial()`、`decompose_multi_concept()`、`generate_alternative_phrasings()`、`detect_multi_concept()`
+   - `ConstrainedTermSelector` 类：`select_from_candidates()`
+   - 中英文 prompt 内置，支持 concept_type 差异化引导
+
+2. **backend/services/terminology_service.py**
+   - 初始化 `TermRewriter` 和 `ConstrainedTermSelector`
+   - `normalize_term()` 重写为分级触发链路
+   - 新增 `_try_exact_or_alias_match()` 预检方法
+   - `extract_and_normalize_terms_parallel()` 修复中英文分流
+
+3. **backend/config.py**
+   - 新增5个配置项
+
+### 数据流变更
+
+```
+旧流程：
+mention → ChineseTerm → UMLS → LLM兜底(自由生成)
+
+新流程（中文路径）：
+mention
+  → [预检] exact/alias → 命中直接返回
+  → [预检] 多概念检测 → 拆解 → 递归规范化
+  → [检索] 本地术语库(ChineseTerm/ICD-11)
+  → [判断] 最高分 ≥ 0.5 → 直接返回
+  → [改写] 低置信度 → rewrite → re-retrieve
+  → [扩写] still low → alternative phrasing → re-retrieve
+  → [约束] LLM 约束选择(unresolved可接受)
+  → [兜底] unresolved(保留原mention, confidence=0.3)
+
+新流程（英文路径）：
+同中文路径，检索源替换为UMLS，不检索本地术语库
+```
+
+---
+
 ## 2026-05-19 性能优化：提示词精简与事实过滤
 
 ### 问题分析
@@ -3401,3 +3790,233 @@ tail -f data/logs/app_20260417.log
 修复：在 `backend/api/evaluation.py` 的 `process_debug_stage` 函数中，将 `quality_result = result` 改为 `quality_result = request.context.get("quality_result", {})`。
 
 影响：之前通过调试模式保存的评估结果中，文档质量数据被安全风险数据覆盖。需要重新运行调试模式以保存正确的评估结果。
+
+---
+
+## 2026-05-20 BugFix: 调试模式病历未保存到数据库
+
+### 问题描述
+
+调试模式完成所有阶段后，前端显示"所有阶段处理完成"，但没有生成病历（前端没有显示病历）。
+
+### 问题分析
+
+通过代码审查发现，调试模式的 `process_stage_with_user_input()` 方法在 `verification` 阶段完成后，只返回了 `completed: True`，但**没有调用 `_save_emr_record()` 方法保存病历到数据库**。
+
+正常模式（`process_visit()` 方法）在处理完所有阶段后会调用：
+```python
+self._save_evidence_spans_from_emr(emr_final, visit_id)
+self._save_emr_record(emr_final, visit_id)
+```
+
+但调试模式缺少这一步。
+
+### 修复内容
+
+在 `process_stage_with_user_input()` 方法的 `verification` 阶段处理逻辑中，添加病历保存逻辑：
+
+1. 从 context 中获取 `subjective`、`objective`、`assessment`、`plan`、`assessment_items`、`plan_items`
+2. 构建 `emr_final`（优先使用 `soap_final`，否则使用各部分数据）
+3. 调用 `_normalize_emr_format()` 格式化病历
+4. 调用 `_save_emr_record()` 保存到数据库
+5. 返回结果中新增 `emr_saved: True` 标记
+
+### 修改文件
+
+1. **backend/services/llm_pipeline_service.py**
+   - 修改 `process_stage_with_user_input()` 方法的 `verification` 分支
+   - 新增病历保存逻辑
+
+### 预期效果
+
+调试模式完成所有阶段后，病历会正确保存到数据库，前端可以正常显示病历内容。
+
+### 后续修复：证据溯源缺失
+
+**问题**：调试模式生成的病历没有证据溯源。
+
+**原因**：
+1. `fact_extraction` 阶段没有保存原子事实到数据库
+2. `verification` 阶段没有填充证据溯源（`_enrich_evidence_traces`）和保存证据溯源（`_save_evidence_spans_from_emr`）
+
+**修复内容**：
+
+1. 在 `fact_extraction` 阶段添加 `_save_atomic_facts(facts_data, visit_id)` 保存原子事实到数据库
+2. 在 `verification` 阶段添加：
+   - 从数据库加载原子事实：`fact_service.get_facts_by_visit(visit_id)`
+   - 填充证据溯源：`_enrich_evidence_traces(emr_final, fact_records, turns)`
+   - 保存证据溯源：`_save_evidence_spans_from_emr(emr_final, visit_id)`
+
+## 2026-05-20 BugFix: 商汤API调用400错误
+
+### 问题描述
+
+调用商汤API时出现400 Bad Request错误，导致LLM调用失败。
+
+### 问题分析（已修正）
+
+**初步分析（错误）**：
+误以为商汤API使用不同的参数格式（`max_new_tokens`、`{"enabled": true}`）
+
+**实际原因**：
+根据官方文档，DeepSeek V4 Flash模型的API格式是正确的：
+- 模型ID：`deepseek-v4-flash`
+- API endpoint：`https://token.sensenova.cn/v1/chat/completions`
+- thinking参数格式：`{"type": "enabled", "reasoning_effort": "high"}`（正确）
+- 使用`max_tokens`参数（正确）
+- 支持JSON模式`response_format`（正确）
+
+### 修复内容
+
+1. **撤销错误的参数格式修改**，恢复原有正确的格式
+2. **添加详细的错误日志**：
+   - 在HTTP错误时获取API返回的具体错误内容
+   - 记录完整的请求payload便于调试
+
+### 修改文件
+
+1. **backend/services/llm/openai_compatible_adapter.py**
+   - 撤销商汤API适配逻辑
+   - 恢复原有参数格式
+   - 添加`HTTPStatusError`详细错误日志
+   - 添加请求payload日志
+
+### 后续排查
+
+需要查看详细错误日志来确定400错误的具体原因：
+- API Key问题
+- 模型未开通
+- 其他参数问题
+
+### 真正原因（已定位）
+
+通过详细错误日志发现：
+```
+'messages' must contain the word 'json' in some form, to use 'response_format' of type 'json_object'.
+```
+
+**问题**：当使用 `response_format: {"type": "json_object"}` 时，messages 中必须包含 "json" 这个词，这是 OpenAI API 的要求。
+
+### 最终修复
+
+在启用 json_mode 时，在 messages 中添加 system message：
+```python
+if use_json_mode:
+    messages.append({"role": "system", "content": "请以JSON格式输出结果。"})
+```
+
+### 修改文件
+
+1. **backend/services/llm/openai_compatible_adapter.py**
+   - 在 json_mode 启用时添加包含 "json" 关键词的 system message
+
+## 2026-05-20 BugFix: 事实合并导致所有事实被删除
+
+### 问题描述
+
+病历生成后内容为空，证据溯源缺失。
+
+### 问题分析
+
+通过日志发现：
+```
+事实收束完成: 合并=20, 冲突=0, 补判=0, 最终=0
+从数据库查询到 0 条原子事实用于阶段3规范化
+```
+
+**根本原因**：LLM返回的事实收束结果中，`merged_from` 列表包含了 `fact_id` 本身：
+```json
+{
+  "fact_id": "fact_xxx",
+  "merged_from": ["fact_xxx"],
+  ...
+}
+```
+
+在合并逻辑中，代码会删除 `merged_from` 中的所有事实，包括要保留的事实本身！
+
+```python
+for from_id in merged_from_ids:
+    from_fact = self.db.query(AtomicFact).filter(AtomicFact.fact_id == from_id).first()
+    if from_fact:
+        ...
+        self.db.delete(from_fact)  # 这里删除了保留的事实！
+```
+
+### 修复内容
+
+在 `_apply_fact_merges()` 方法中添加检查，跳过 `from_id` 等于 `keep_fact_id` 的情况：
+
+```python
+for from_id in merged_from_ids:
+    if from_id == keep_fact_id:
+        continue  # 跳过要保留的事实
+    from_fact = self.db.query(AtomicFact).filter(AtomicFact.fact_id == from_id).first()
+    ...
+```
+
+### 修改文件
+
+1. **backend/services/llm_pipeline_service.py**
+   - 修改 `_apply_fact_merges()` 方法，添加跳过保留事实的逻辑
+
+### 预期效果
+
+事实合并后，保留的事实不会被错误删除，病历生成和证据溯源正常工作。
+
+## 2026-05-20 BugFix: ASR修正索引映射失败
+
+### 问题描述
+
+日志显示：
+```
+解析到 2 个清洗后的turn
+ASR修正跳过: 找不到turn_index=0对应的turn
+ASR修正跳过: 找不到turn_index=1对应的turn
+```
+
+### 问题分析
+
+**根本原因**：LLM返回的 `turn_id` 是相对于当前 segment 的位置索引（0, 1, 2...），而代码使用 `turn_by_index = {turn.turn_index: turn for turn in segment}` 进行查找，期望的是全局的 `turn_index`。
+
+当 segment 不是从 `turn_index=0` 开始时（例如 segment 包含 turn_index 为 100 和 101 的两个 turn），就会出现找不到对应 turn 的情况。
+
+**示例**：
+- segment 包含 turn_index 为 100 和 101 的两个 turn
+- `_format_segment` 输出 `[#100]` 和 `[#101]`
+- LLM 返回 `turn_id: 0` 和 `turn_id: 1`（相对于 segment 的位置）
+- 代码用 `turn_by_index.get(0)` 查找，找不到 turn_index=100 的 turn
+
+### 修复内容
+
+在 `_parse_cleaning_response()` 和 `_apply_asr_corrections()` 方法中添加回退逻辑：
+
+1. 添加调试日志显示 segment 中可用的 turn_index 列表
+2. 当 `turn_by_index.get(turn_id)` 找不到时，尝试按位置匹配：`segment[i]` 对应 `turn_id=i`
+3. 记录回退匹配的详细日志
+
+```python
+turn = turn_by_index.get(turn_id)
+if not turn:
+    if i < len(segment):
+        turn = segment[i]
+        logger.warning(
+            f"turn_id={turn_id}不在segment索引中, "
+            f"回退到位置匹配: 位置{i} -> turn_index={turn.turn_index}"
+        )
+    else:
+        logger.warning(
+            f"turn_id={turn_id}匹配失败: 位置{i}超出segment范围(len={len(segment)})"
+        )
+        continue
+```
+
+### 修改文件
+
+1. **backend/services/llm_pipeline_service.py**
+   - 修改 `_parse_cleaning_response()` 方法，添加索引映射回退逻辑
+   - 修改 `_apply_asr_corrections()` 方法，添加索引映射回退逻辑
+
+### 预期效果
+
+ASR修正和角色识别能够正确匹配到对应的 turn，不再出现"找不到turn"的警告。

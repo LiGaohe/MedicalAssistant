@@ -54,7 +54,9 @@ class LLMPipelineService:
         "其他": "other"
     }
     
-    STAGE_DELAY = 3.0
+    STAGE_DELAY = 0.5
+    
+    MAX_PARALLEL_SEGMENTS = 4
     
     def __init__(self, db: Session, llm_service: Optional[LLMService] = None, language: str = "zh"):
         self.db = db
@@ -293,19 +295,9 @@ class LLMPipelineService:
         segments = self._segment_turns(turns)
         logger.info(f"对话分为 {len(segments)} 个段落")
         
-        all_role_mappings = {}
-        all_cleaned_turns = []
-        
         segment_start = time.time()
-        for i, segment in enumerate(segments):
-            logger.info(f">>> 处理段落 {i+1}/{len(segments)}")
-            
-            result = self._process_segment(segment, i)
-            
-            if result.get("role_mapping"):
-                all_role_mappings.update(result["role_mapping"])
-            if result.get("turns"):
-                all_cleaned_turns.extend(result["turns"])
+        
+        all_role_mappings, all_cleaned_turns = self._process_segments_parallel(segments)
         
         logger.info(f"段落处理完成，耗时: {time.time() - segment_start:.2f}秒")
         
@@ -321,8 +313,16 @@ class LLMPipelineService:
         
         time.sleep(self.STAGE_DELAY)
         
-        normalize_start = time.time()
         fact_service = FactService(self.db)
+        fact_records = fact_service.get_facts_by_visit(visit_id)
+        
+        consolidation_start = time.time()
+        consolidation_result = self._fact_consolidation_stage(fact_records, visit_id)
+        logger.info(f"事实收束阶段完成，耗时: {time.time() - consolidation_start:.2f}秒")
+        
+        time.sleep(self.STAGE_DELAY)
+        
+        normalize_start = time.time()
         fact_records = fact_service.get_facts_by_visit(visit_id)
         logger.info(f"从数据库查询到 {len(fact_records)} 条原子事实用于阶段3规范化")
         normalized_result = self._normalize_terms_stage(fact_records, all_role_mappings, visit_id, save_evidence)
@@ -450,6 +450,81 @@ class LLMPipelineService:
             
         return segments
     
+    def _process_segments_parallel(
+        self,
+        segments: List[List[TranscriptTurn]]
+    ) -> Tuple[Dict[str, str], List[Dict[str, Any]]]:
+        """
+        并行处理所有段落，使用线程池实现LLM调用的并行化。
+        
+        Args:
+            segments: 段落列表，每个段落是一个turn列表
+            
+        Returns:
+            (all_role_mappings, all_cleaned_turns) 元组
+        """
+        logger.info(f">>> 并行处理 {len(segments)} 个段落")
+        parallel_start = time.time()
+        
+        if not segments:
+            return {}, []
+        
+        if self.debug_mode:
+            logger.info("调试模式：使用串行处理")
+            all_role_mappings = {}
+            all_cleaned_turns = []
+            for i, segment in enumerate(segments):
+                logger.info(f">>> 处理段落 {i+1}/{len(segments)}")
+                result = self._process_segment(segment, i)
+                if result.get("role_mapping"):
+                    all_role_mappings.update(result["role_mapping"])
+                if result.get("turns"):
+                    all_cleaned_turns.extend(result["turns"])
+            return all_role_mappings, all_cleaned_turns
+        
+        max_workers = min(len(segments), self.MAX_PARALLEL_SEGMENTS)
+        logger.info(f"使用 {max_workers} 个并行线程处理段落")
+        
+        results = [None] * len(segments)
+        
+        def process_single_segment(args):
+            idx, segment = args
+            try:
+                result = self._process_segment(segment, idx)
+                return idx, result, None
+            except Exception as e:
+                logger.error(f"段落 {idx} 处理失败: {e}")
+                return idx, None, str(e)
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = list(executor.map(
+                process_single_segment,
+                [(i, segment) for i, segment in enumerate(segments)]
+            ))
+            
+            for idx, result, error in futures:
+                if error:
+                    logger.warning(f"段落 {idx} 处理出错: {error}，使用fallback")
+                    fallback_result = self._fallback_role_annotation(segments[idx])
+                    results[idx] = fallback_result
+                else:
+                    results[idx] = result
+        
+        all_role_mappings = {}
+        all_cleaned_turns = []
+        
+        for idx, result in enumerate(results):
+            if result:
+                if result.get("role_mapping"):
+                    all_role_mappings.update(result["role_mapping"])
+                if result.get("turns"):
+                    all_cleaned_turns.extend(result["turns"])
+        
+        parallel_time = time.time() - parallel_start
+        logger.info(f"并行段落处理完成，耗时: {parallel_time:.2f}秒，处理了 {len(segments)} 个段落")
+        
+        return all_role_mappings, all_cleaned_turns
+    
     def _build_text_from_cleaned_turns(
         self,
         cleaned_turns: List[Dict[str, Any]],
@@ -522,7 +597,8 @@ class LLMPipelineService:
                 return self._fallback_role_annotation(segment)
             
             try:
-                response = self.llm_service.generate(prompt)
+                response = self.llm_service.generate(prompt, timeout=300.0, thinking_enabled=False)
+                logger.debug("转写清洗阶段: thinking模式已禁用")
                 response_text = response.text
             except Exception as e:
                 logger.error(f"LLM调用失败: {e}")
@@ -728,18 +804,38 @@ class LLMPipelineService:
             speaker_corrections = []
             
             turn_by_index = {turn.turn_index: turn for turn in segment}
+            logger.info(f"segment详情: 长度={len(segment)}, turn_index列表={[t.turn_index for t in segment]}")
+            logger.info(f"turn_by_index映射: {list(turn_by_index.keys())}")
             
-            for turn_json in turns_data:
+            for i, turn_json in enumerate(turns_data):
                 turn_id = turn_json.get("turn_id")
                 speaker_role = turn_json.get("speaker_role")
+                section_hint = turn_json.get("section_hint", [])
                 
                 if turn_id is None or speaker_role is None:
                     logger.warning(f"turn JSON缺少必要字段: turn_id={turn_id}, speaker_role={speaker_role}")
                     continue
                 
+                logger.debug(f"处理turn_json[{i}]: turn_id={turn_id}, speaker_role={speaker_role}")
+                
                 role_mapping[str(turn_id)] = speaker_role
                 
                 turn = turn_by_index.get(turn_id)
+                if turn:
+                    logger.debug(f"turn_id={turn_id}通过turn_by_index匹配成功: turn_index={turn.turn_index}")
+                else:
+                    logger.warning(f"turn_id={turn_id}在turn_by_index中未找到, 尝试位置匹配")
+                    if 0 <= i < len(segment):
+                        turn = segment[i]
+                        logger.warning(
+                            f"位置匹配: 位置{i} -> turn_index={turn.turn_index} (turn_id={turn_id}被忽略)"
+                        )
+                    else:
+                        logger.warning(
+                            f"位置{i}超出segment范围[0,{len(segment)-1}], 跳过此turn"
+                        )
+                        continue
+                
                 if turn:
                     original_speaker = turn.speaker
                     if original_speaker and original_speaker not in ("unknown", "", "None"):
@@ -757,8 +853,10 @@ class LLMPipelineService:
                             "corrected_speaker": speaker_role,
                             "reason": turn_json.get("reason", "")
                         })
-                
-                turn.corrected_speaker = speaker_role
+                    
+                    turn.corrected_speaker = speaker_role
+                    turn.section_hint = section_hint if section_hint else None
+                    logger.debug(f"turn_index={turn_id}, section_hint={section_hint}")
             
             if speaker_corrections:
                 self._apply_speaker_corrections(speaker_corrections, segment)
@@ -802,10 +900,12 @@ class LLMPipelineService:
             return {}
         
         turn_by_index = {turn.turn_index: turn for turn in segment}
+        logger.info(f"ASR修正 - segment详情: 长度={len(segment)}, turn_index列表={[t.turn_index for t in segment]}")
+        
         correction_map = {}
         applied_count = 0
         
-        for turn_json in turns_data:
+        for i, turn_json in enumerate(turns_data):
             turn_id = turn_json.get("turn_id")
             corrected_text = turn_json.get("corrected_text", "")
             changed_spans = turn_json.get("changed_spans", [])
@@ -814,9 +914,20 @@ class LLMPipelineService:
                 continue
             
             turn = turn_by_index.get(turn_id)
-            if not turn:
-                logger.warning(f"ASR修正跳过: 找不到turn_index={turn_id}对应的turn")
-                continue
+            if turn:
+                logger.debug(f"ASR修正: turn_id={turn_id}通过turn_by_index匹配成功, turn_index={turn.turn_index}")
+            else:
+                logger.warning(f"ASR修正: turn_id={turn_id}在turn_by_index中未找到, 尝试位置匹配")
+                if 0 <= i < len(segment):
+                    turn = segment[i]
+                    logger.warning(
+                        f"ASR修正位置匹配: 位置{i} -> turn_index={turn.turn_index} (turn_id={turn_id}被忽略)"
+                    )
+                else:
+                    logger.warning(
+                        f"ASR修正跳过: 位置{i}超出segment范围[0,{len(segment)-1}]"
+                    )
+                    continue
             
             if changed_spans and corrected_text:
                 turn.corrected_text = corrected_text
@@ -843,15 +954,40 @@ class LLMPipelineService:
         self,
         cleaned_turns: List[Dict],
         role_mapping: Dict[str, str],
-        visit_id: str = None
+        visit_id: str = None,
+        incremental: bool = False
     ) -> Dict[str, Any]:
         logger.info(">>> 阶段2: 事实抽取与证据绑定")
         stage_start = time.time()
         
-        turns_json = json.dumps(cleaned_turns, ensure_ascii=False, indent=2)
+        new_turns_json = json.dumps(cleaned_turns, ensure_ascii=False, indent=2)
         logger.info(f"清理后的turn数: {len(cleaned_turns)}")
         
-        prompt = self.prompt_manager.render("fact_extraction", turns_json=turns_json)
+        existing_facts_summary = "[]"
+        existing_facts_map = {}
+        
+        if incremental and visit_id and self.db:
+            fact_service = FactService(self.db)
+            existing_facts = fact_service.get_facts_by_visit(visit_id)
+            if existing_facts:
+                summary_items = []
+                for fact in existing_facts:
+                    existing_facts_map[fact.fact_id] = fact
+                    summary_items.append({
+                        "fact_id": fact.fact_id,
+                        "mention": fact.mention,
+                        "section_candidate": fact.section_candidate,
+                        "speaker": fact.speaker,
+                        "evidence_turn_ids": fact.evidence_turn_ids or []
+                    })
+                existing_facts_summary = json.dumps(summary_items, ensure_ascii=False, indent=2)
+                logger.info(f"增量模式: 已有 {len(existing_facts)} 条事实")
+        
+        prompt = self.prompt_manager.render(
+            "fact_extraction",
+            new_turns_json=new_turns_json,
+            existing_facts_summary=existing_facts_summary
+        )
         logger.debug(f"事实抽取提示词长度: {len(prompt)} 字符")
         
         if self.debug_mode:
@@ -866,7 +1002,8 @@ class LLMPipelineService:
                 return {"facts": [], "fact_count": 0}
             
             try:
-                response = self.llm_service.generate(prompt)
+                response = self.llm_service.generate(prompt, thinking_enabled=False)
+                logger.debug("事实抽取阶段: thinking模式已禁用")
                 response_text = response.text
             except Exception as e:
                 logger.error(f"事实抽取LLM调用失败: {e}")
@@ -879,7 +1016,10 @@ class LLMPipelineService:
             raw_facts = result.get("facts", [])
             logger.info(f"LLM返回 {len(raw_facts)} 条原始事实")
             
-            facts = self._deduplicate_facts(raw_facts)
+            if incremental and existing_facts_map:
+                facts = self._process_incremental_facts(raw_facts, existing_facts_map, visit_id)
+            else:
+                facts = self._deduplicate_facts(raw_facts)
             logger.info(f"去重后剩余 {len(facts)} 条事实")
         
         if facts and visit_id and self.db:
@@ -892,6 +1032,67 @@ class LLMPipelineService:
             "facts": facts,
             "fact_count": len(facts)
         }
+    
+    def _process_incremental_facts(
+        self,
+        raw_facts: List[Dict],
+        existing_facts_map: Dict[str, Any],
+        visit_id: str
+    ) -> List[Dict]:
+        logger.info("处理增量事实")
+        
+        new_facts = []
+        append_operations = []
+        
+        for fact in raw_facts:
+            operation = fact.get("operation", "new")
+            
+            if operation == "append":
+                matched_fact_id = fact.get("matched_fact_id")
+                if matched_fact_id and matched_fact_id in existing_facts_map:
+                    append_operations.append({
+                        "fact_id": matched_fact_id,
+                        "new_evidence_turn_ids": fact.get("evidence_turn_ids", []),
+                        "new_evidence_text": fact.get("evidence_text", [])
+                    })
+                    logger.debug(f"追加事实: fact_id={matched_fact_id}, turn_ids={fact.get('evidence_turn_ids', [])}")
+                else:
+                    logger.warning(f"追加操作失败: 找不到matched_fact_id={matched_fact_id}，改为新建")
+                    new_facts.append(fact)
+            else:
+                new_facts.append(fact)
+        
+        if append_operations and self.db:
+            self._apply_fact_appends(append_operations)
+        
+        logger.info(f"增量处理完成: 新建 {len(new_facts)} 条, 追加 {len(append_operations)} 条")
+        return new_facts
+    
+    def _apply_fact_appends(self, append_operations: List[Dict]):
+        try:
+            for op in append_operations:
+                fact_id = op["fact_id"]
+                fact = self.db.query(AtomicFact).filter(AtomicFact.fact_id == fact_id).first()
+                if fact:
+                    existing_turn_ids = set(fact.evidence_turn_ids or [])
+                    new_turn_ids = set(op.get("new_evidence_turn_ids", []))
+                    existing_turn_ids.update(new_turn_ids)
+                    fact.evidence_turn_ids = sorted(list(existing_turn_ids))
+                    
+                    existing_texts = fact.evidence_text or []
+                    new_texts = op.get("new_evidence_text", [])
+                    for text in new_texts:
+                        if text not in existing_texts:
+                            existing_texts.append(text)
+                    fact.evidence_text = existing_texts
+                    
+                    logger.debug(f"已追加证据到事实 {fact_id}: turn_ids={fact.evidence_turn_ids}")
+            
+            self.db.commit()
+            logger.info(f"已追加 {len(append_operations)} 条事实的证据")
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"追加事实证据失败: {e}")
     
     def _deduplicate_facts(self, facts: List[Dict]) -> List[Dict]:
         logger.info("开始事实去重")
@@ -1307,13 +1508,21 @@ class LLMPipelineService:
     def _fallback_role_annotation(self, segment: List[TranscriptTurn]) -> Dict[str, Any]:
         role_mapping = self._infer_roles_by_rules(segment)
         
-        annotated_lines = []
+        turns = []
         for turn in segment:
-            annotated_lines.append(f"[#{turn.turn_index}] [{turn.speaker}]: {turn.text}")
+            turns.append({
+                "turn_id": turn.turn_index,
+                "speaker_role": role_mapping.get(turn.speaker, turn.speaker),
+                "corrected_text": turn.text,
+                "section_hint": ["None"],
+                "changed_spans": [],
+                "correction_confidence": "low",
+                "reason": "fallback处理：LLM调用失败，使用规则推断"
+            })
         
         return {
             "role_mapping": role_mapping,
-            "annotated_text": "\n".join(annotated_lines)
+            "turns": turns
         }
     
     def _infer_roles_by_rules(self, segment: List[TranscriptTurn]) -> Dict[str, str]:
@@ -1461,12 +1670,194 @@ class LLMPipelineService:
             "terms": terms_for_result
         }
 
+    def _fact_consolidation_stage(
+        self,
+        fact_records: List[AtomicFact],
+        visit_id: str
+    ) -> Dict[str, Any]:
+        """
+        阶段2.5: 事实收束。
+        
+        解决重复事实合并、冲突事实标记、未判断项补判。
+        
+        Args:
+            fact_records: 原子事实列表
+            visit_id: 就诊ID
+        
+        Returns:
+            {
+                "merged_count": 合并数量,
+                "conflict_count": 冲突数量,
+                "resolved_count": 补判数量,
+                "final_fact_count": 最终事实数量
+            }
+        """
+        logger.info(">>> 阶段2.5: 事实收束")
+        stage_start = time.time()
+        
+        if not fact_records:
+            logger.info("没有事实需要收束")
+            return {"merged_count": 0, "conflict_count": 0, "resolved_count": 0, "final_fact_count": 0}
+        
+        facts_json = self._format_facts_for_prompt(fact_records, lightweight=True)
+        
+        prompt = self.prompt_manager.render("fact_consolidation", facts_json=facts_json)
+        logger.debug(f"事实收束提示词长度: {len(prompt)} 字符")
+        
+        if self.debug_mode:
+            response_text = self._debug_interact(
+                stage="fact_consolidation",
+                prompt=prompt,
+                fact_count=len(fact_records)
+            )
+        else:
+            if not self.llm_service:
+                logger.warning("LLM服务不可用，跳过事实收束")
+                return {"merged_count": 0, "conflict_count": 0, "resolved_count": 0, "final_fact_count": len(fact_records)}
+            
+            try:
+                response = self.llm_service.generate(prompt, timeout=300.0)
+                logger.debug("事实收束阶段: thinking模式已启用（复杂推理）")
+                response_text = response.text
+            except Exception as e:
+                logger.error(f"事实收束LLM调用失败: {e}")
+                return {"merged_count": 0, "conflict_count": 0, "resolved_count": 0, "final_fact_count": len(fact_records)}
+        
+        result = self._extract_json_from_response(response_text, "事实收束")
+        
+        merged_count = 0
+        conflict_count = 0
+        resolved_count = 0
+        
+        if result:
+            merged_facts = result.get("merged_facts", [])
+            conflict_facts = result.get("conflict_facts", [])
+            resolved_facts = result.get("resolved_facts", [])
+            
+            if merged_facts and self.db:
+                merged_count = self._apply_fact_merges(merged_facts)
+            
+            if conflict_facts and self.db:
+                conflict_count = self._mark_conflict_facts(conflict_facts)
+            
+            if resolved_facts and self.db:
+                resolved_count = self._apply_fact_resolutions(resolved_facts)
+        
+        fact_service = FactService(self.db)
+        final_facts = fact_service.get_facts_by_visit(visit_id)
+        final_count = len(final_facts)
+        
+        stage_time = time.time() - stage_start
+        logger.info(
+            f"事实收束完成: 合并={merged_count}, 冲突={conflict_count}, "
+            f"补判={resolved_count}, 最终={final_count}, 耗时: {stage_time:.2f}秒"
+        )
+        
+        return {
+            "merged_count": merged_count,
+            "conflict_count": conflict_count,
+            "resolved_count": resolved_count,
+            "final_fact_count": final_count
+        }
+    
+    def _apply_fact_merges(self, merged_facts: List[Dict]) -> int:
+        """应用事实合并结果"""
+        try:
+            merged_count = 0
+            for merge_info in merged_facts:
+                keep_fact_id = merge_info.get("fact_id")
+                merged_from_ids = merge_info.get("merged_from", [])
+                
+                if not keep_fact_id or not merged_from_ids:
+                    continue
+                
+                keep_fact = self.db.query(AtomicFact).filter(AtomicFact.fact_id == keep_fact_id).first()
+                if not keep_fact:
+                    continue
+                
+                all_turn_ids = set(keep_fact.evidence_turn_ids or [])
+                all_spans = keep_fact.evidence_spans or []
+                
+                for from_id in merged_from_ids:
+                    if from_id == keep_fact_id:
+                        continue
+                    from_fact = self.db.query(AtomicFact).filter(AtomicFact.fact_id == from_id).first()
+                    if from_fact:
+                        all_turn_ids.update(from_fact.evidence_turn_ids or [])
+                        for span in (from_fact.evidence_spans or []):
+                            if span not in all_spans:
+                                all_spans.append(span)
+                        self.db.delete(from_fact)
+                
+                keep_fact.evidence_turn_ids = sorted(list(all_turn_ids))
+                keep_fact.evidence_spans = all_spans
+                merged_count += 1
+            
+            self.db.commit()
+            logger.info(f"已合并 {merged_count} 组事实")
+            return merged_count
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"应用事实合并失败: {e}")
+            return 0
+    
+    def _mark_conflict_facts(self, conflict_facts: List[Dict]) -> int:
+        """标记冲突事实"""
+        try:
+            conflict_count = 0
+            for conflict_info in conflict_facts:
+                fact_id = conflict_info.get("fact_id")
+                if not fact_id:
+                    continue
+                
+                fact = self.db.query(AtomicFact).filter(AtomicFact.fact_id == fact_id).first()
+                if fact:
+                    fact.asr_risk = "high"
+                    conflict_count += 1
+            
+            self.db.commit()
+            logger.info(f"已标记 {conflict_count} 条冲突事实")
+            return conflict_count
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"标记冲突事实失败: {e}")
+            return 0
+    
+    def _apply_fact_resolutions(self, resolved_facts: List[Dict]) -> int:
+        """应用事实补判结果"""
+        try:
+            resolved_count = 0
+            for resolve_info in resolved_facts:
+                fact_id = resolve_info.get("fact_id")
+                resolved_field = resolve_info.get("resolved_field")
+                resolved_value = resolve_info.get("resolved_value")
+                
+                if not fact_id or not resolved_field or not resolved_value:
+                    continue
+                
+                fact = self.db.query(AtomicFact).filter(AtomicFact.fact_id == fact_id).first()
+                if fact:
+                    if resolved_field == "certainty":
+                        fact.certainty = resolved_value
+                    elif resolved_field == "temporality":
+                        fact.temporality = resolved_value
+                    resolved_count += 1
+            
+            self.db.commit()
+            logger.info(f"已补判 {resolved_count} 条事实")
+            return resolved_count
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"应用事实补判失败: {e}")
+            return 0
+
     def _normalize_terms_stage(
         self,
         fact_records: List[AtomicFact],
         role_mapping: Dict[str, str],
         visit_id: str = None,
-        save_to_db: bool = True
+        save_to_db: bool = True,
+        use_batch: bool = True
     ) -> Dict[str, Any]:
         logger.info(">>> 阶段3: 选择性术语规范化（基于事实表）")
         stage_start = time.time()
@@ -1490,44 +1881,102 @@ class LLMPipelineService:
         processed_count = 0
         skipped_count = 0
 
-        for fact in qualifying_facts:
-            try:
-                term_type = fact.concept_type or "unknown"
-                result = self.terminology_service.normalize_single_term(
-                    term=fact.mention,
-                    context="",
-                    term_type=term_type
-                )
+        if use_batch and len(qualifying_facts) > 1:
+            logger.info(f"[BATCH_MODE] Using batch normalization for {len(qualifying_facts)} facts")
+            
+            terms_to_normalize = [
+                {"term": fact.mention, "type": fact.concept_type or "unknown"}
+                for fact in qualifying_facts
+            ]
+            
+            batch_results = self.terminology_service.batch_normalize_terms(
+                terms=terms_to_normalize,
+                context=""
+            )
+            
+            for fact in qualifying_facts:
+                try:
+                    result = batch_results.get(fact.mention)
+                    if not result:
+                        logger.warning(f"No batch result for '{fact.mention}', using fallback")
+                        result = self.terminology_service.normalize_single_term(
+                            term=fact.mention,
+                            context="",
+                            term_type=fact.concept_type or "unknown"
+                        )
+                    
+                    term_type = fact.concept_type or "unknown"
+                    
+                    logger.info(
+                        f"  事实规范化: fact_id={fact.fact_id}, "
+                        f"'{fact.mention}' -> '{result.normalized_term}' "
+                        f"(source: {result.source}, confidence: {result.confidence:.2f})"
+                    )
 
-                logger.info(
-                    f"  事实规范化: fact_id={fact.fact_id}, "
-                    f"'{fact.mention}' -> '{result.normalized_term}' "
-                    f"(source: {result.source}, confidence: {result.confidence:.2f})"
-                )
+                    terms_for_result.append({
+                        "fact_id": fact.fact_id,
+                        "original": fact.mention,
+                        "normalized": result.normalized_term,
+                        "category": term_type,
+                        "source": result.source,
+                        "confidence": result.confidence,
+                        "cui": result.cui,
+                        "code": result.code,
+                        "code_system": result.code_system,
+                        "section_candidate": fact.section_candidate
+                    })
 
-                terms_for_result.append({
-                    "fact_id": fact.fact_id,
-                    "original": fact.mention,
-                    "normalized": result.normalized_term,
-                    "category": term_type,
-                    "source": result.source,
-                    "confidence": result.confidence,
-                    "cui": result.cui,
-                    "code": result.code,
-                    "code_system": result.code_system,
-                    "section_candidate": fact.section_candidate
-                })
+                    if save_to_db and self.db:
+                        fact.normalized_term = result.normalized_term
+                        fact.normalized_code = result.code
+                        fact.normalization_needed = False
 
-                if save_to_db and self.db:
-                    fact.normalized_term = result.normalized_term
-                    fact.normalized_code = result.code
-                    fact.normalization_needed = False
+                    processed_count += 1
 
-                processed_count += 1
+                except Exception as e:
+                    logger.error(f"规范化事实 {fact.fact_id} (mention='{fact.mention}') 失败: {e}")
+                    skipped_count += 1
+        else:
+            logger.info("[SERIAL_MODE] Using serial normalization")
+            
+            for fact in qualifying_facts:
+                try:
+                    term_type = fact.concept_type or "unknown"
+                    result = self.terminology_service.normalize_single_term(
+                        term=fact.mention,
+                        context="",
+                        term_type=term_type
+                    )
 
-            except Exception as e:
-                logger.error(f"规范化事实 {fact.fact_id} (mention='{fact.mention}') 失败: {e}")
-                skipped_count += 1
+                    logger.info(
+                        f"  事实规范化: fact_id={fact.fact_id}, "
+                        f"'{fact.mention}' -> '{result.normalized_term}' "
+                        f"(source: {result.source}, confidence: {result.confidence:.2f})"
+                    )
+
+                    terms_for_result.append({
+                        "fact_id": fact.fact_id,
+                        "original": fact.mention,
+                        "normalized": result.normalized_term,
+                        "category": term_type,
+                        "source": result.source,
+                        "confidence": result.confidence,
+                        "cui": result.cui,
+                        "code": result.code,
+                        "code_system": result.code_system,
+                        "section_candidate": fact.section_candidate
+                    })
+
+                    if save_to_db and self.db:
+                        fact.normalized_term = result.normalized_term
+                        fact.normalized_code = result.code
+                        fact.normalization_needed = False
+
+                    processed_count += 1
+
+                except Exception as e:
+                    logger.error(f"规范化事实 {fact.fact_id} (mention='{fact.mention}') 失败: {e}")
+                    skipped_count += 1
 
         if save_to_db and self.db:
             try:
@@ -1786,7 +2235,8 @@ class LLMPipelineService:
                 return self._fallback_extraction(normalized_text, evidence_traces)
             
             try:
-                response = self.llm_service.generate(prompt)
+                response = self.llm_service.generate(prompt, thinking_enabled=False)
+                logger.debug("字段抽取阶段: thinking模式已禁用")
                 response_text = response.text
             except Exception as e:
                 logger.error(f"字段抽取LLM调用失败: {e}")
@@ -2504,6 +2954,10 @@ class LLMPipelineService:
                 field_value = field_data.get("value", "")
 
                 for trace in traces:
+                    if not isinstance(trace, dict):
+                        logger.warning(f"Skipping non-dict trace: {type(trace)} - {trace}")
+                        continue
+                    
                     evidence = EvidenceSpan(
                         visit_id=visit_id,
                         turn_id=trace.get("turn_id"),
@@ -2630,19 +3084,20 @@ class LLMPipelineService:
         
         return result
 
-    def _format_facts_for_prompt(self, fact_records: List[AtomicFact]) -> str:
+    def _format_facts_for_prompt(self, fact_records: List[AtomicFact], lightweight: bool = True) -> str:
         """
         将AtomicFact记录格式化为prompt用的JSON字符串。
 
         Args:
             fact_records: 原子事实列表
+            lightweight: 是否使用轻量模式（不传完整evidence_text）
 
         Returns:
             JSON字符串
         """
         facts_data = []
         for fact in fact_records:
-            facts_data.append({
+            fact_item = {
                 "fact_id": fact.fact_id,
                 "section_candidate": fact.section_candidate,
                 "concept_type": fact.concept_type,
@@ -2652,9 +3107,18 @@ class LLMPipelineService:
                 "temporality": fact.temporality,
                 "certainty": fact.certainty,
                 "speaker": fact.speaker,
-                "evidence_turn_ids": fact.evidence_turn_ids or [],
-                "evidence_text": fact.evidence_text or []
-            })
+                "evidence_turn_ids": fact.evidence_turn_ids or []
+            }
+            
+            if lightweight:
+                evidence_spans = fact.evidence_spans or []
+                if not evidence_spans and fact.evidence_text:
+                    evidence_spans = [text[:20] if len(text) > 20 else text for text in fact.evidence_text[:3]]
+                fact_item["evidence_spans"] = evidence_spans
+            else:
+                fact_item["evidence_text"] = fact.evidence_text or []
+            
+            facts_data.append(fact_item)
         return json.dumps(facts_data, ensure_ascii=False, indent=2)
 
     def _filter_facts_by_section(
@@ -2758,7 +3222,8 @@ class LLMPipelineService:
                 return {"subjective": {}, "objective": {}, "used_fact_ids": []}
 
             try:
-                response = self.llm_service.generate(prompt)
+                response = self.llm_service.generate(prompt, thinking_enabled=False)
+                logger.debug("SO生成阶段: thinking模式已禁用")
                 response_text = response.text
             except Exception as e:
                 logger.error(f"SO生成LLM调用失败: {e}")
@@ -2778,19 +3243,17 @@ class LLMPipelineService:
         self,
         so_result: Dict[str, Any],
         fact_records: List[AtomicFact],
-        role_mapping: Dict[str, str]
+        role_mapping: Dict[str, str],
+        merged: bool = True
     ) -> Dict[str, Any]:
         """
         阶段4b：分节生成AP（评估 + 计划）。
-
-        分两步：
-        (1) 基于 S+O 和事实表生成 Assessment（采用三层诊断策略）
-        (2) 基于 S+O+A 和事实表生成 Plan（拆分为4个子字段）
 
         Args:
             so_result: 阶段4a的输出，包含 subjective, objective, used_fact_ids
             fact_records: 规范化后的原子事实列表
             role_mapping: 角色映射
+            merged: 是否使用合并模式（单次LLM调用同时生成A和P）
 
         Returns:
             {"assessment": {...}, "plan": {...}, "assessment_items": [...], "plan_items": {...}}
@@ -2798,102 +3261,157 @@ class LLMPipelineService:
         logger.info(">>> 阶段4b: 分节生成AP（评估+计划）")
         stage_start = time.time()
 
-        a_facts = self._filter_facts_by_section(fact_records, ["A"])
-        p_facts = self._filter_facts_by_section(fact_records, ["P"])
-        logger.info(f"AP生成输入: {len(fact_records)} 条事实，A事实 {len(a_facts)} 条，P事实 {len(p_facts)} 条")
+        ap_facts = self._filter_facts_by_section(fact_records, ["A", "P"])
+        logger.info(f"AP生成输入: {len(fact_records)} 条事实，A/P事实 {len(ap_facts)} 条")
 
         subjective_text = json.dumps(so_result.get("subjective", {}), ensure_ascii=False, indent=2)
         objective_text = json.dumps(so_result.get("objective", {}), ensure_ascii=False, indent=2)
+        facts_json = self._format_facts_for_prompt(ap_facts)
 
-        time.sleep(self.STAGE_DELAY)
-
-        logger.info(">>> 阶段4b-1: 生成评估(Assessment)")
-        assessment_facts_json = self._format_facts_for_prompt(a_facts)
-        assessment_prompt = self.prompt_manager.render(
-            "emr_generation_assessment",
-            subjective_text=subjective_text,
-            objective_text=objective_text,
-            facts_json=assessment_facts_json
-        )
-        logger.debug(f"Assessment生成提示词长度: {len(assessment_prompt)} 字符")
-
-        if self.debug_mode:
-            assessment_response_text = self._debug_interact(
-                stage="emr_generation_assessment",
-                prompt=assessment_prompt,
+        if merged:
+            logger.info(">>> 使用合并模式: 单次LLM调用同时生成A和P")
+            prompt = self.prompt_manager.render(
+                "emr_generation_ap",
                 subjective_text=subjective_text,
                 objective_text=objective_text,
                 facts_json=facts_json
             )
+            logger.debug(f"AP合并生成提示词长度: {len(prompt)} 字符")
+
+            if self.debug_mode:
+                response_text = self._debug_interact(
+                    stage="emr_generation_ap",
+                    prompt=prompt,
+                    facts_json=facts_json
+                )
+            else:
+                if not self.llm_service:
+                    logger.warning("LLM服务不可用，AP生成失败")
+                    return {"assessment": {}, "plan": {}, "assessment_items": [], "plan_items": {}}
+
+                try:
+                    response = self.llm_service.generate(prompt)
+                    response_text = response.text
+                except Exception as e:
+                    logger.error(f"AP合并生成LLM调用失败: {e}")
+                    return {"assessment": {}, "plan": {}, "assessment_items": [], "plan_items": {}}
+
+            result = self._extract_json_from_response(response_text, "AP合并生成")
+
+            if result:
+                assessment = result.get("assessment", {})
+                assessment_items = result.get("assessment_items", [])
+                plan = result.get("plan", {})
+                plan_items = result.get("plan_items", {})
+
+                stage_time = time.time() - stage_start
+                logger.info(
+                    f"AP合并生成完成: 评估项={len(assessment_items)}, "
+                    f"计划项={len(plan_items.get('medications', [])) + len(plan_items.get('tests', []))}, "
+                    f"耗时: {stage_time:.2f}秒"
+                )
+
+                return {
+                    "assessment": assessment,
+                    "plan": plan,
+                    "assessment_items": assessment_items,
+                    "plan_items": plan_items
+                }
+
+            logger.warning("AP合并生成JSON解析失败，返回空结果")
+            return {"assessment": {}, "plan": {}, "assessment_items": [], "plan_items": {}}
+
         else:
-            if not self.llm_service:
-                logger.warning("LLM服务不可用，Assessment生成失败")
-                return {"assessment": {}, "plan": {}, "assessment_items": [], "plan_items": {}}
+            logger.info(">>> 使用分离模式: 分两次LLM调用分别生成A和P")
+            time.sleep(self.STAGE_DELAY)
 
-            try:
-                response = self.llm_service.generate(assessment_prompt)
-                assessment_response_text = response.text
-            except Exception as e:
-                logger.error(f"Assessment生成LLM调用失败: {e}")
-                return {"assessment": {}, "plan": {}, "assessment_items": [], "plan_items": {}}
+            a_facts = self._filter_facts_by_section(fact_records, ["A"])
+            p_facts = self._filter_facts_by_section(fact_records, ["P"])
 
-        assessment_result = self._extract_json_from_response(assessment_response_text, "Assessment生成")
+            logger.info(">>> 阶段4b-1: 生成评估(Assessment)")
+            assessment_facts_json = self._format_facts_for_prompt(a_facts)
+            assessment_prompt = self.prompt_manager.render(
+                "emr_generation_assessment",
+                subjective_text=subjective_text,
+                objective_text=objective_text,
+                facts_json=assessment_facts_json
+            )
+            logger.debug(f"Assessment生成提示词长度: {len(assessment_prompt)} 字符")
 
-        if not assessment_result:
-            logger.warning("Assessment JSON解析失败")
-            assessment_result = {}
+            if self.debug_mode:
+                assessment_response_text = self._debug_interact(
+                    stage="emr_generation_assessment",
+                    prompt=assessment_prompt,
+                    facts_json=assessment_facts_json
+                )
+            else:
+                if not self.llm_service:
+                    logger.warning("LLM服务不可用，Assessment生成失败")
+                    return {"assessment": {}, "plan": {}, "assessment_items": [], "plan_items": {}}
 
-        assessment = assessment_result.get("assessment", {})
-        assessment_items = assessment_result.get("assessment_items", [])
-        assessment_text = json.dumps(assessment, ensure_ascii=False, indent=2)
+                try:
+                    response = self.llm_service.generate(assessment_prompt)
+                    logger.debug("Assessment生成阶段: thinking模式已启用（诊断推断）")
+                    assessment_response_text = response.text
+                except Exception as e:
+                    logger.error(f"Assessment生成LLM调用失败: {e}")
+                    return {"assessment": {}, "plan": {}, "assessment_items": [], "plan_items": {}}
 
-        logger.info(f"Assessment生成完成: {len(assessment_items)} 条评估项")
+            assessment_result = self._extract_json_from_response(assessment_response_text, "Assessment生成")
 
-        time.sleep(self.STAGE_DELAY)
+            if not assessment_result:
+                logger.warning("Assessment JSON解析失败")
+                assessment_result = {}
 
-        logger.info(">>> 阶段4b-2: 生成计划(Plan)")
-        plan_facts_json = self._format_facts_for_prompt(p_facts)
-        plan_prompt = self.prompt_manager.render(
-            "emr_generation_plan",
-            subjective_text=subjective_text,
-            objective_text=objective_text,
-            assessment_text=assessment_text,
-            facts_json=plan_facts_json
-        )
-        logger.debug(f"Plan生成提示词长度: {len(plan_prompt)} 字符")
+            assessment = assessment_result.get("assessment", {})
+            assessment_items = assessment_result.get("assessment_items", [])
+            assessment_text = json.dumps(assessment, ensure_ascii=False, indent=2)
 
-        if self.debug_mode:
-            plan_response_text = self._debug_interact(
-                stage="emr_generation_plan",
-                prompt=plan_prompt,
+            logger.info(f"Assessment生成完成: {len(assessment_items)} 条评估项")
+
+            time.sleep(self.STAGE_DELAY)
+
+            logger.info(">>> 阶段4b-2: 生成计划(Plan)")
+            plan_facts_json = self._format_facts_for_prompt(p_facts)
+            plan_prompt = self.prompt_manager.render(
+                "emr_generation_plan",
                 subjective_text=subjective_text,
                 objective_text=objective_text,
                 assessment_text=assessment_text,
-                facts_json=facts_json
+                facts_json=plan_facts_json
             )
-        else:
-            if not self.llm_service:
-                logger.warning("LLM服务不可用，Plan生成失败")
-                return {"assessment": assessment, "plan": {}, "assessment_items": assessment_items, "plan_items": {}}
+            logger.debug(f"Plan生成提示词长度: {len(plan_prompt)} 字符")
 
-            try:
-                response = self.llm_service.generate(plan_prompt)
-                plan_response_text = response.text
-            except Exception as e:
-                logger.error(f"Plan生成LLM调用失败: {e}")
-                return {"assessment": assessment, "plan": {}, "assessment_items": assessment_items, "plan_items": {}}
+            if self.debug_mode:
+                plan_response_text = self._debug_interact(
+                    stage="emr_generation_plan",
+                    prompt=plan_prompt,
+                    facts_json=plan_facts_json
+                )
+            else:
+                if not self.llm_service:
+                    logger.warning("LLM服务不可用，Plan生成失败")
+                    return {"assessment": assessment, "plan": {}, "assessment_items": assessment_items, "plan_items": {}}
 
-        plan_result = self._extract_json_from_response(plan_response_text, "Plan生成")
+                try:
+                    response = self.llm_service.generate(plan_prompt)
+                    logger.debug("Plan生成阶段: thinking模式已启用（诊断推断）")
+                    plan_response_text = response.text
+                except Exception as e:
+                    logger.error(f"Plan生成LLM调用失败: {e}")
+                    return {"assessment": assessment, "plan": {}, "assessment_items": assessment_items, "plan_items": {}}
 
-        if not plan_result:
-            logger.warning("Plan JSON解析失败")
-            plan_result = {}
+            plan_result = self._extract_json_from_response(plan_response_text, "Plan生成")
 
-        plan = plan_result.get("plan", {})
-        plan_items = plan_result.get("plan_items", {})
+            if not plan_result:
+                logger.warning("Plan JSON解析失败")
+                plan_result = {}
 
-        stage_time = time.time() - stage_start
-        logger.info(f"AP生成完成，耗时: {stage_time:.2f}秒")
+            plan = plan_result.get("plan", {})
+            plan_items = plan_result.get("plan_items", {})
+
+            stage_time = time.time() - stage_start
+            logger.info(f"AP分离生成完成，耗时: {stage_time:.2f}秒")
 
         return {
             "assessment": assessment,
@@ -2942,6 +3460,7 @@ class LLMPipelineService:
 
             try:
                 response = self.llm_service.generate(prompt)
+                logger.debug("核查修订阶段: thinking模式已启用（问题判断）")
                 response_text = response.text
             except Exception as e:
                 logger.error(f"核查修订LLM调用失败: {e}")
@@ -3400,6 +3919,9 @@ O: physical_examination、auxiliary_examination
             
             self._lightweight_normalize(facts_data)
             
+            self._save_atomic_facts(facts_data, visit_id)
+            logger.info(f"调试模式: 已保存 {len(facts_data)} 条原子事实到数据库")
+            
             dialogue_parts = []
             for fact in so_facts:
                 mention = fact.get("normalized_term") or fact.get("mention", "")
@@ -3543,8 +4065,40 @@ O: physical_examination、auxiliary_examination
             
             logger.info(f"核查完成: unsupported={len(issues.get('unsupported_claims',[]))}, missing={len(issues.get('missing_critical_facts',[]))}, conflicts={len(issues.get('internal_conflicts',[]))}")
             
+            subjective = context.get("subjective", {})
+            objective = context.get("objective", {})
+            assessment = context.get("assessment", {})
+            plan = context.get("plan", {})
+            assessment_items = context.get("assessment_items", [])
+            plan_items = context.get("plan_items", {})
+            
+            emr_final = soap_final if soap_final else {
+                "subjective": subjective,
+                "objective": objective,
+                "assessment": assessment,
+                "plan": plan
+            }
+            emr_final["assessment_items"] = assessment_items
+            emr_final["plan_items"] = plan_items
+            
+            emr_final = self._normalize_emr_format(emr_final)
+            logger.info(f"调试模式: 病历格式归一化完成")
+            
+            fact_service = FactService(self.db)
+            fact_records = fact_service.get_facts_by_visit(visit_id)
+            logger.info(f"调试模式: 从数据库加载 {len(fact_records)} 条原子事实")
+            
+            emr_final = self._enrich_evidence_traces(emr_final, fact_records, turns)
+            logger.info(f"调试模式: 证据溯源富化完成")
+            
+            self._save_evidence_spans_from_emr(emr_final, visit_id)
+            logger.info(f"调试模式: 已保存证据溯源到数据库")
+            
+            self._save_emr_record(emr_final, visit_id)
+            logger.info(f"调试模式: 已保存病历记录到数据库: visit_id={visit_id}")
+            
             return {
-                "result": {"soap_final": soap_final, "issues": issues},
+                "result": {"soap_final": soap_final, "issues": issues, "emr_saved": True},
                 "next_stage": None,
                 "next_prompt": None,
                 "next_description": None,

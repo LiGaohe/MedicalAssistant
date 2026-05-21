@@ -307,6 +307,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             'chief_complaint': '主诉',
             'history_present_illness': '现病史',
             'past_history': '既往史',
+            'denied_symptoms': '否认症状',
             'physical_examination': '体格检查',
             'auxiliary_examination': '辅助检查',
             'diagnosis': '诊断',

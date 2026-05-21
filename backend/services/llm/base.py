@@ -14,6 +14,7 @@ class LLMRequest:
     json_mode: bool = False
     thinking_enabled: bool = False
     thinking_effort: str = "high"
+    timeout: Optional[float] = None
     
 
 @dataclass

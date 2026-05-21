@@ -20,6 +20,7 @@ class AtomicFact(Base):
     certainty = Column(String, nullable=False, default="supported")
     speaker = Column(String, nullable=False, default="patient")
     evidence_turn_ids = Column(JSON, nullable=True)
+    evidence_spans = Column(JSON, nullable=True)
     evidence_text = Column(JSON, nullable=True)
     asr_risk = Column(String, nullable=False, default="low")
     normalization_needed = Column(Boolean, nullable=False, default=True)

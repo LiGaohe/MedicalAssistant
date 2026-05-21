@@ -13,11 +13,15 @@ from .umls import UMLSCandidate, UMLSSearchResult
 from .translation_service import TranslationService
 from .chinese_term_indexer import ChineseTermIndexer
 from .chinese_term_client import ChineseTermClient
+from .term_rewriter import TermRewriter, ConstrainedTermSelector
 from ..config import settings
 from ..utils.logger import logger
 
 
 class TerminologyService:
+    _normalization_cache: Dict[str, NormalizedTerm] = {}
+    _cache_max_size: int = 1000
+    
     def __init__(
         self, 
         db: Session, 
@@ -36,6 +40,8 @@ class TerminologyService:
         self.async_umls_client: Optional[AsyncUMLSClient] = None
         self.cache_service: Optional[TermCache] = None
         self.chinese_term_client: Optional[ChineseTermClient] = None
+        self.rewriter: Optional[TermRewriter] = None
+        self.selector: Optional[ConstrainedTermSelector] = None
         
         if settings.UMLS_ENABLED and settings.UMLS_API_KEY and language != "zh":
             self._init_umls()
@@ -48,7 +54,14 @@ class TerminologyService:
         if settings.CHINESE_TERM_ENABLED:
             self._init_chinese_term_client()
         
-        logger.info(f"TerminologyService initialized, UMLS: {'enabled' if self.umls_client else 'disabled'}, Translation: {'enabled' if self.translation_service else 'disabled'}, ChineseTerm: {'enabled' if self.chinese_term_client else 'disabled'}, language: {language}")
+        if settings.ENABLE_REWRITE and self.llm_service:
+            self.rewriter = TermRewriter(llm_service=self.llm_service, language=language)
+            self.selector = ConstrainedTermSelector(llm_service=self.llm_service, language=language)
+            logger.info("TermRewriter and ConstrainedTermSelector initialized")
+        elif settings.ENABLE_REWRITE:
+            logger.warning("ENABLE_REWRITE is True but LLM service not available, rewrite disabled")
+        
+        logger.info(f"TerminologyService initialized, UMLS: {'enabled' if self.umls_client else 'disabled'}, Translation: {'enabled' if self.translation_service else 'disabled'}, ChineseTerm: {'enabled' if self.chinese_term_client else 'disabled'}, Rewrite: {'enabled' if self.rewriter else 'disabled'}, language: {language}")
     
     def _init_umls(self):
         try:
@@ -347,6 +360,30 @@ Note: Only output JSON, no other content."""
         logger.debug("所有JSON修复尝试均失败")
         return None
     
+    def _get_cache_key(self, term: str, term_type: str) -> str:
+        """生成缓存键"""
+        return f"{term}|{term_type}"
+    
+    def _get_from_cache(self, term: str, term_type: str) -> Optional[NormalizedTerm]:
+        """从缓存获取规范化结果"""
+        cache_key = self._get_cache_key(term, term_type)
+        if cache_key in self._normalization_cache:
+            logger.info(f"[CACHE_HIT] Found cached result for '{term}' (type: {term_type})")
+            return self._normalization_cache[cache_key]
+        return None
+    
+    def _save_to_cache(self, term: str, term_type: str, result: NormalizedTerm):
+        """保存规范化结果到缓存"""
+        if len(self._normalization_cache) >= self._cache_max_size:
+            keys_to_remove = list(self._normalization_cache.keys())[:self._cache_max_size // 2]
+            for key in keys_to_remove:
+                del self._normalization_cache[key]
+            logger.info(f"[CACHE] Evicted {len(keys_to_remove)} entries from cache")
+        
+        cache_key = self._get_cache_key(term, term_type)
+        self._normalization_cache[cache_key] = result
+        logger.debug(f"[CACHE] Saved result for '{term}' (type: {term_type})")
+    
     def normalize_single_term(
         self,
         term: str,
@@ -368,8 +405,172 @@ Note: Only output JSON, no other content."""
         Returns:
             NormalizedTerm with normalization results
         """
+        cached_result = self._get_from_cache(term, term_type)
+        if cached_result:
+            return cached_result
+        
         logger.info(f"Normalizing single term: '{term}' (type: {term_type})")
-        return self.normalize_term(term, context=context, term_type=term_type)
+        result = self.normalize_term(term, context=context, term_type=term_type)
+        
+        self._save_to_cache(term, term_type, result)
+        
+        return result
+
+    def batch_normalize_terms(
+        self,
+        terms: List[Dict[str, str]],
+        context: str = ""
+    ) -> Dict[str, NormalizedTerm]:
+        """
+        批量规范化术语，使用批量LLM调用优化性能
+        
+        Args:
+            terms: [{"term": "脖子处淋巴结肿大", "type": "symptom"}, ...]
+            context: 可选的上下文字符串
+        
+        Returns:
+            {"脖子处淋巴结肿大": NormalizedTerm, ...}
+        """
+        if not terms:
+            return {}
+        
+        logger.info(f"[BATCH_NORM] Starting batch normalization for {len(terms)} terms")
+        start_time = time.time()
+        
+        results = {}
+        is_zh = self.language == "zh"
+        
+        terms_needing_rewrite = []
+        rewrite_map = {}
+        
+        for term_info in terms:
+            term = term_info.get("term", "")
+            term_type = term_info.get("type", "unknown")
+            
+            best_result = self._try_exact_or_alias_match(term, term_type)
+            if best_result:
+                normalized, confidence, reasoning, code, code_system, source, candidates = best_result
+                logger.info(f"[BATCH_NORM] Exact/alias match: '{term}' -> '{normalized}'")
+                results[term] = NormalizedTerm(
+                    original_term=term,
+                    normalized_term=normalized,
+                    term_type=term_type,
+                    confidence=confidence,
+                    is_risky=confidence < 0.5,
+                    reasoning=reasoning,
+                    code=code,
+                    code_system=code_system,
+                    source=source,
+                    candidates=candidates
+                )
+                continue
+            
+            if is_zh and self.chinese_term_client:
+                zh_result = self._normalize_by_chinese_term(term, term_type)
+                if zh_result and zh_result[1] >= settings.REWRITE_TRIGGER_THRESHOLD:
+                    n, c, r, cd, cs, s, cands = zh_result
+                    logger.info(f"[BATCH_NORM] ChineseTerm match: '{term}' -> '{n}' (score: {c:.2f})")
+                    results[term] = NormalizedTerm(
+                        original_term=term,
+                        normalized_term=n,
+                        term_type=term_type,
+                        confidence=c,
+                        is_risky=c < 0.5,
+                        reasoning=r,
+                        code=cd,
+                        code_system=cs,
+                        source=s,
+                        candidates=cands
+                    )
+                    continue
+            
+            terms_needing_rewrite.append(term_info)
+            rewrite_map[term] = term_type
+        
+        if terms_needing_rewrite and self.rewriter:
+            logger.info(f"[BATCH_NORM] {len(terms_needing_rewrite)} terms need rewrite, using batch LLM")
+            
+            batch_rewrite_start = time.time()
+            batch_rewrites = self.rewriter.batch_rewrite_colloquial(
+                terms_needing_rewrite,
+                max_phrasings_per_term=2
+            )
+            logger.info(f"[BATCH_NORM] Batch rewrite completed in {time.time() - batch_rewrite_start:.2f}s")
+            
+            for term_info in terms_needing_rewrite:
+                term = term_info.get("term", "")
+                term_type = term_info.get("type", "unknown")
+                
+                if term in results:
+                    continue
+                
+                rewrites = batch_rewrites.get(term, [term])
+                best_score = 0.0
+                best_normalized = term
+                best_code = None
+                best_code_system = None
+                best_source = "unresolved"
+                best_candidates = None
+                
+                for rewrite in rewrites:
+                    if rewrite == term:
+                        continue
+                    
+                    if is_zh and self.chinese_term_client:
+                        zh_result = self._normalize_by_chinese_term(rewrite, term_type)
+                        if zh_result:
+                            n, c, r, cd, cs, s, cands = zh_result
+                            if c > best_score:
+                                best_score = c
+                                best_normalized = n
+                                best_code = cd
+                                best_code_system = cs
+                                best_source = s
+                                best_candidates = cands
+                                logger.info(f"[BATCH_NORM] Rewrite match: '{term}' -> '{rewrite}' -> '{n}' (score: {c:.2f})")
+                
+                if best_score >= 0.3:
+                    results[term] = NormalizedTerm(
+                        original_term=term,
+                        normalized_term=best_normalized,
+                        term_type=term_type,
+                        confidence=best_score,
+                        is_risky=best_score < 0.5,
+                        reasoning=f"批量重写匹配: {term} -> {best_normalized}",
+                        code=best_code,
+                        code_system=best_code_system,
+                        source=best_source,
+                        candidates=best_candidates
+                    )
+                else:
+                    results[term] = NormalizedTerm(
+                        original_term=term,
+                        normalized_term=term,
+                        term_type=term_type,
+                        confidence=0.3,
+                        is_risky=True,
+                        reasoning="批量规范化未找到匹配，保留原术语",
+                        source="unresolved"
+                    )
+        
+        for term_info in terms:
+            term = term_info.get("term", "")
+            if term not in results:
+                term_type = term_info.get("type", "unknown")
+                results[term] = NormalizedTerm(
+                    original_term=term,
+                    normalized_term=term,
+                    term_type=term_type,
+                    confidence=0.3,
+                    is_risky=True,
+                    reasoning="未处理，保留原术语",
+                    source="unresolved"
+                )
+        
+        total_time = time.time() - start_time
+        logger.info(f"[BATCH_NORM] Completed {len(results)} terms in {total_time:.2f}s")
+        
+        return results
 
     def normalize_term(
         self, 
@@ -377,7 +578,7 @@ Note: Only output JSON, no other content."""
         context: str = "",
         term_type: Optional[str] = None
     ) -> NormalizedTerm:
-        logger.debug(f"Normalizing term: '{term}' (type: {term_type})")
+        logger.info(f"[TERM_NORM] Normalizing term: '{term}' (type: {term_type})")
         
         normalized = term
         confidence = 0.0
@@ -387,34 +588,191 @@ Note: Only output JSON, no other content."""
         source = "none"
         candidates = None
         cui = None
-        
-        if self.chinese_term_client:
-            chinese_result = self._normalize_by_chinese_term(term, term_type)
-            if chinese_result:
-                normalized, confidence, reasoning, code, code_system, source, candidates = chinese_result
-                logger.info(f"ChineseTerm normalized '{term}' -> '{normalized}' (confidence: {confidence:.2f})")
-        
-        if confidence < 0.5 and self.umls_client:
-            umls_result = self._normalize_by_umls(term, context)
-            if umls_result:
-                normalized, confidence, reasoning, code, code_system, source, candidates, cui = umls_result
-                logger.info(f"UMLS normalized '{term}' -> '{normalized}' (confidence: {confidence:.2f})")
-        
-        if confidence < 0.5 and self.llm_service:
-            llm_result = self._normalize_by_llm(term, context)
-            if llm_result and llm_result[1] > confidence:
-                normalized, confidence, reasoning = llm_result
-                source = "LLM"
-                logger.info(f"LLM normalized '{term}' -> '{normalized}' (confidence: {confidence:.2f})")
-        
+        is_zh = self.language == "zh"
+
+        best_result = self._try_exact_or_alias_match(term, term_type)
+        if best_result:
+            normalized, confidence, reasoning, code, code_system, source, candidates = best_result
+            logger.info(f"[TERM_NORM] Exact/alias match: '{term}' -> '{normalized}' (confidence: {confidence:.2f}, source: {source})")
+            is_risky = confidence < 0.5
+            return NormalizedTerm(
+                original_term=term,
+                normalized_term=normalized,
+                term_type=term_type or "unknown",
+                confidence=confidence,
+                is_risky=is_risky,
+                reasoning=reasoning,
+                code=code,
+                code_system=code_system,
+                source=source,
+                candidates=candidates,
+                cui=cui
+            )
+
+        if self.rewriter and self.rewriter.detect_multi_concept(term):
+            logger.info(f"[TERM_NORM] Multi-concept detected for '{term}', decomposing")
+            atomic_mentions = self.rewriter.decompose_multi_concept(term, term_type or "unknown", context)
+            if len(atomic_mentions) > 1:
+                logger.info(f"[TERM_NORM] Decomposed '{term}' into {len(atomic_mentions)} atomic mentions: {atomic_mentions}")
+                normalized_terms = []
+                for atomic in atomic_mentions:
+                    sub_result = self.normalize_term(atomic, context, term_type)
+                    normalized_terms.append(sub_result.normalized_term)
+                combined = "；".join(normalized_terms)
+                return NormalizedTerm(
+                    original_term=term,
+                    normalized_term=combined,
+                    term_type=term_type or "unknown",
+                    confidence=0.5,
+                    is_risky=False,
+                    reasoning=f"多概念拆解规范化: {term} -> {atomic_mentions} -> {normalized_terms}",
+                    source="decompose",
+                )
+
+        best_score = 0.0
+        all_candidates = []
+
+        if is_zh and self.chinese_term_client:
+            zh_result_data = self._normalize_by_chinese_term(term, term_type)
+            if zh_result_data:
+                n, c, r, cd, cs, s, cands = zh_result_data
+                all_candidates.append({
+                    "term": n, "confidence": c, "reasoning": r,
+                    "code": cd, "code_system": cs, "source": s, "candidates": cands
+                })
+                if c > best_score:
+                    best_score = c
+                    normalized, confidence, reasoning, code, code_system, source, candidates = n, c, r, cd, cs, s, cands
+                    logger.info(f"[TERM_NORM] ChineseTerm result: '{term}' -> '{normalized}' (score: {c:.2f})")
+
+        if not is_zh and self.umls_client:
+            umls_result_data = self._normalize_by_umls(term, context)
+            if umls_result_data:
+                n, c, r, cd, cs, s, cands, cu = umls_result_data
+                all_candidates.append({
+                    "term": n, "confidence": c, "reasoning": r,
+                    "code": cd, "code_system": cs, "source": s, "candidates": cands, "cui": cu
+                })
+                if c > best_score:
+                    best_score = c
+                    normalized, confidence, reasoning, code, code_system, source, candidates, cui = n, c, r, cd, cs, s, cands, cu
+                    logger.info(f"[TERM_NORM] UMLS result: '{term}' -> '{normalized}' (score: {c:.2f})")
+
+        threshold = settings.REWRITE_TRIGGER_THRESHOLD
+        if best_score >= threshold:
+            logger.info(f"[TERM_NORM] High confidence ({best_score:.2f} >= {threshold}), returning directly")
+            is_risky = confidence < 0.5
+            return NormalizedTerm(
+                original_term=term, normalized_term=normalized,
+                term_type=term_type or "unknown", confidence=confidence,
+                is_risky=is_risky, reasoning=reasoning,
+                code=code, code_system=code_system, source=source,
+                candidates=candidates, cui=cui
+            )
+
+        rewrite_produced_new_terms = False
+        if self.rewriter and best_score < threshold:
+            logger.info(f"[TERM_NORM] Low confidence ({best_score:.2f} < {threshold}), triggering rewrite")
+            rewrites = self.rewriter.rewrite_colloquial(term, term_type or "unknown", context)
+            search_terms = [term] + [r for r in rewrites if r != term]
+            logger.info(f"[TERM_NORM] Search terms after rewrite: {search_terms}")
+            
+            rewrite_produced_new_terms = len(search_terms) > 1
+
+            for search_term in search_terms:
+                if search_term == term:
+                    continue
+
+                if is_zh and self.chinese_term_client:
+                    zh_result = self._normalize_by_chinese_term(search_term, term_type)
+                    if zh_result:
+                        n, c, r, cd, cs, s, cands = zh_result
+                        all_candidates.append({
+                            "term": n, "confidence": c, "reasoning": r,
+                            "code": cd, "code_system": cs, "source": s, "candidates": cands,
+                            "via_rewrite": search_term
+                        })
+                        if c > best_score:
+                            best_score = c
+                            normalized, confidence, reasoning, code, code_system, source, candidates = n, c, r, cd, cs, s, cands
+                            logger.info(f"[TERM_NORM] Rewrite retrieval match: '{search_term}' -> '{normalized}' (score: {c:.2f})")
+
+                if not is_zh and self.umls_client:
+                    umls_result = self._normalize_by_umls(search_term, context)
+                    if umls_result:
+                        n, c, r, cd, cs, s, cands, cu = umls_result
+                        all_candidates.append({
+                            "term": n, "confidence": c, "reasoning": r,
+                            "code": cd, "code_system": cs, "source": s, "candidates": cands,
+                            "cui": cu, "via_rewrite": search_term
+                        })
+                        if c > best_score:
+                            best_score = c
+                            normalized, confidence, reasoning, code, code_system, source, candidates, cui = n, c, r, cd, cs, s, cands, cu
+                            logger.info(f"[TERM_NORM] Rewrite retrieval UMLS match: '{search_term}' -> '{normalized}' (score: {c:.2f})")
+
+        if best_score < threshold and self.rewriter and rewrite_produced_new_terms:
+            logger.info(f"[TERM_NORM] Still low confidence ({best_score:.2f}), generating alternative phrasings")
+            alternatives = self.rewriter.generate_alternative_phrasings(term, term_type or "unknown", context)
+            if alternatives:
+                for alt in alternatives:
+                    if is_zh and self.chinese_term_client:
+                        zh_result = self._normalize_by_chinese_term(alt, term_type)
+                        if zh_result:
+                            n, c, r, cd, cs, s, cands = zh_result
+                            all_candidates.append({
+                                "term": n, "confidence": c, "reasoning": r,
+                                "code": cd, "code_system": cs, "source": s, "candidates": cands,
+                                "via_alt": alt
+                            })
+                            if c > best_score:
+                                best_score = c
+                                normalized, confidence, reasoning, code, code_system, source, candidates = n, c, r, cd, cs, s, cands
+                                logger.info(f"[TERM_NORM] Alt phrasing match: '{alt}' -> '{normalized}' (score: {c:.2f})")
+
+                    if not is_zh and self.umls_client:
+                        umls_result = self._normalize_by_umls(alt, context)
+                        if umls_result:
+                            n, c, r, cd, cs, s, cands, cu = umls_result
+                            all_candidates.append({
+                                "term": n, "confidence": c, "reasoning": r,
+                                "code": cd, "code_system": cs, "source": s, "candidates": cands,
+                                "cui": cu, "via_alt": alt
+                            })
+                            if c > best_score:
+                                best_score = c
+                                normalized, confidence, reasoning, code, code_system, source, candidates, cui = n, c, r, cd, cs, s, cands, cu
+                                logger.info(f"[TERM_NORM] Alt phrasing UMLS match: '{alt}' -> '{normalized}' (score: {c:.2f})")
+
+        if all_candidates and self.selector:
+            logger.info(f"[TERM_NORM] Running constrained selection from {len(all_candidates)} candidates")
+            selected = self.selector.select_from_candidates(
+                mention=term,
+                concept_type=term_type or "unknown",
+                candidates=all_candidates,
+                context=context
+            )
+            if selected:
+                normalized = selected.get("term", normalized)
+                confidence = selected.get("confidence", confidence)
+                reasoning = selected.get("reasoning", reasoning) or f"Constrained selection from {len(all_candidates)} candidates"
+                code = selected.get("code", code)
+                code_system = selected.get("code_system", code_system)
+                source = selected.get("source", "constrained_select")
+                candidates = selected.get("candidates", candidates)
+                cui = selected.get("cui", cui)
+                logger.info(f"[TERM_NORM] Constrained selection: '{term}' -> '{normalized}' (confidence: {confidence:.2f})")
+
         if confidence < 0.3:
             normalized = term
             confidence = 0.3
-            reasoning = "无法规范化，保留原术语"
-            source = "none"
-        
+            reasoning = "无法规范化，保留原术语(unresolved)"
+            source = "unresolved"
+            logger.info(f"[TERM_NORM] Unresolved: '{term}' kept as original")
+
         is_risky = confidence < 0.5
-        
+
+        logger.info(f"[TERM_NORM] Final: '{term}' -> '{normalized}' (confidence: {confidence:.2f}, source: {source})")
         return NormalizedTerm(
             original_term=term,
             normalized_term=normalized,
@@ -428,6 +786,57 @@ Note: Only output JSON, no other content."""
             candidates=candidates,
             cui=cui
         )
+
+    def _try_exact_or_alias_match(
+        self,
+        term: str,
+        term_type: Optional[str] = None
+    ) -> Optional[Tuple[str, float, str, Optional[str], Optional[str], str, Optional[List]]]:
+        if not self.chinese_term_client:
+            return None
+
+        try:
+            result = self.chinese_term_client.search_term(
+                term=term,
+                term_type=term_type,
+                use_fuzzy=False
+            )
+
+            if not result:
+                return None
+
+            if result.match_type == "exact" and result.confidence >= 0.9:
+                candidates_data = None
+                if result.candidates:
+                    candidates_data = [
+                        {"term": c.term, "code": c.code, "code_system": c.code_system,
+                         "term_type": c.term_type, "source": c.source}
+                        for c in result.candidates[:5]
+                    ]
+                return (
+                    result.matched_term, result.confidence,
+                    f"精确匹配: {term} -> {result.matched_term}",
+                    result.code, result.code_system, "ChineseTerm_exact", candidates_data
+                )
+
+            if result.match_type == "synonym" and result.confidence >= 0.85:
+                candidates_data = None
+                if result.candidates:
+                    candidates_data = [
+                        {"term": c.term, "code": c.code, "code_system": c.code_system,
+                         "term_type": c.term_type, "source": c.source}
+                        for c in result.candidates[:5]
+                    ]
+                return (
+                    result.matched_term, result.confidence,
+                    f"同义词匹配: {term} -> {result.matched_term}",
+                    result.code, result.code_system, "ChineseTerm_synonym", candidates_data
+                )
+
+        except Exception as e:
+            logger.error(f"Exact/alias match check failed for '{term}': {e}")
+
+        return None
     
     def _normalize_by_chinese_term(
         self,
@@ -717,14 +1126,16 @@ Please output only the number (1-{len(candidates)}) of the best match, no other 
             if self.language == "zh":
                 prompt = f"""你是一个医学术语规范化专家。请将以下口语化医疗术语映射到标准医学术语。
 
-口语化术语: {term}
+口腔化术语: {term}
 上下文: {context}
 
 请按以下格式输出JSON：
 {{
   "normalized_term": "标准术语",
   "reasoning": "映射理由"
-}}"""
+}}
+
+注意：只能根据你的医学知识输出最合理的标准术语。如果无法确定，将normalized_term设为与输入相同的值，confidence设为0.3。"""
             else:
                 prompt = f"""You are a medical terminology normalization expert. Please map the following colloquial medical term to a standard medical term.
 
@@ -735,7 +1146,9 @@ Please output in the following JSON format:
 {{
   "normalized_term": "standard term",
   "reasoning": "mapping rationale"
-}}"""
+}}
+
+Note: Output the most reasonable standard term based on your medical knowledge. If uncertain, set normalized_term to the same value as input with confidence 0.3."""
 
             response = self.llm_service.generate(prompt, max_tokens=1000)
             
@@ -761,10 +1174,9 @@ Please output in the following JSON format:
                     if isinstance(reasoning, dict):
                         reasoning = str(reasoning)
                     
-                    if normalized_term != term:
-                        confidence = 0.5
-                    else:
-                        confidence = 0.3
+                    confidence = 0.4
+                    if normalized_term != term and normalized_term:
+                        confidence = 0.45
                     
                     return (normalized_term, confidence, reasoning)
             return None
@@ -917,7 +1329,7 @@ Note: Only output JSON, no other content."""
         context: str = ""
     ) -> List[NormalizedTerm]:
         """
-        并行版本的术语提取和规范化
+        并行版本的术语提取和规范化（已修复语言分流）
         """
         start_time = time.time()
         logger.info(f"开始并行提取和规范化术语，文本长度: {len(text)}")
@@ -941,15 +1353,16 @@ Note: Only output JSON, no other content."""
         terms = [t["term"] for t in unique_terms]
         contexts = {t["term"]: t.get("context", context) for t in unique_terms}
         term_types = {t["term"]: t.get("term_type", "unknown") for t in unique_terms}
+        is_zh = self.language == "zh"
 
         translations = {}
-        if self.language == "zh" and self.translation_service:
+        if is_zh and self.translation_service:
             trans_start = time.time()
             translations = self.translation_service.batch_translate_zh_to_en(terms)
             logger.info(f"批量翻译完成，耗时: {time.time() - trans_start:.2f}秒")
 
         umls_results = {}
-        if self.async_umls_client:
+        if not is_zh and self.async_umls_client:
             search_start = time.time()
             search_terms = [translations.get(term, term) for term in terms]
             umls_results = await self.async_umls_client.batch_search(
@@ -958,12 +1371,20 @@ Note: Only output JSON, no other content."""
             )
             logger.info(f"并行UMLS检索完成，耗时: {time.time() - search_start:.2f}秒")
 
+        chinese_results = {}
+        if is_zh and self.chinese_term_client:
+            chinese_start = time.time()
+            chinese_results = self.chinese_term_client.batch_search(terms)
+            matched_count = sum(1 for r in chinese_results.values() if r is not None)
+            logger.info(f"中文术语批量搜索完成: {matched_count}/{len(terms)} 匹配, 耗时: {time.time() - chinese_start:.2f}秒")
+
         term_candidates = {}
-        for term in terms:
-            search_term = translations.get(term, term)
-            result = umls_results.get(search_term)
-            if result and hasattr(result, 'candidates') and result.candidates:
-                term_candidates[term] = result.candidates[:5]
+        if not is_zh:
+            for term in terms:
+                search_term = translations.get(term, term)
+                result = umls_results.get(search_term)
+                if result and hasattr(result, 'candidates') and result.candidates:
+                    term_candidates[term] = result.candidates[:5]
 
         selections = {}
         if term_candidates and self.llm_service:
@@ -1002,7 +1423,23 @@ Note: Only output JSON, no other content."""
             candidates_data = None
             cui = None
 
-            if term in selections:
+            if is_zh and term in chinese_results and chinese_results[term]:
+                zh_result = chinese_results[term]
+                normalized = zh_result.matched_term
+                confidence = zh_result.confidence
+                code = zh_result.code
+                code_system = zh_result.code_system
+                source = "ChineseTerm"
+                reasoning = f"中文术语库匹配: {term} -> {zh_result.matched_term} (confidence: {zh_result.confidence:.2f})"
+                if zh_result.candidates:
+                    candidates_data = [
+                        {"term": c.term, "code": c.code, "code_system": c.code_system,
+                         "term_type": c.term_type, "source": c.source}
+                        for c in zh_result.candidates[:5]
+                    ]
+                logger.info(f"ChineseTerm批量匹配: '{term}' -> '{normalized}' (confidence: {confidence:.2f})")
+
+            elif not is_zh and term in selections:
                 best_candidate = selections[term]
                 code, code_system = code_results.get(term, (None, None))
 
@@ -1029,6 +1466,7 @@ Note: Only output JSON, no other content."""
                 if llm_result and llm_result[1] > confidence:
                     normalized, confidence, reasoning = llm_result
                     source = "LLM"
+                    logger.info(f"LLM兜底规范化: '{term}' -> '{normalized}' (confidence: {confidence:.2f})")
 
             is_risky = confidence < 0.5
 

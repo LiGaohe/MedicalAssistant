@@ -198,18 +198,30 @@ $transcript
 ## 任务
 1. 判断每个turn的说话人角色（doctor/patient），纠正ASR角色分配错误
 2. 修正明显的ASR文本错误（同音字、医学术语拼写错误）
-3. 不确定则保留原文，correction_confidence设为"low"
+3. 判断每个turn的SOAP章节归属（section_hint），为后续路由提供信息
+4. 不确定则保留原文，correction_confidence设为"low"
+
+## section_hint说明
+- S: 主诉、现病史、既往史相关内容（患者描述症状、病史）
+- O: 体格检查、辅助检查相关内容（医生检查、检查结果）
+- A: 诊断、评估相关内容（医生诊断判断）
+- P: 用药、检查建议、复诊、健康指导（医生建议、处方）
+- None: 无法归类或不相关内容
+- 可多标签：如["S", "A"]表示同时涉及主诉和诊断
 
 ## 约束
 - 严禁添加原文没有的信息
 - 修正后保持原意和语气
 
 ## 输出格式
+**重要**：turn_id必须使用对话中的[#N]编号，例如对话是[#30]则turn_id为30，不是位置索引。
+
 {
   "turns": [{
-    "turn_id": 0,
+    "turn_id": 30,
     "speaker_role": "doctor或patient",
     "corrected_text": "修正后文本（未修正则与原文一致）",
+    "section_hint": ["S"]或["O"]或["A"]或["P"]或["None"]或["S", "A"]等多标签,
     "changed_spans": [{"original": "原词", "corrected": "修正词", "position": "位置描述"}],
     "correction_confidence": "high|medium|low",
     "reason": "修正或保留理由"
@@ -221,8 +233,11 @@ $transcript
         self.templates["fact_extraction"] = PromptTemplate(
             template="""你是一个医疗临床事实抽取专家。从以下医患对话中抽取原子级临床事实。
 
-## 对话轮次（JSON）
-$turns_json
+## 新增对话轮次（JSON）
+$new_turns_json
+
+## 已有事实摘要（用于去重和合并）
+$existing_facts_summary
 
 ## 抽取规则
 每条事实是一个不可再分的独立临床陈述，包含以下字段：
@@ -235,15 +250,25 @@ $turns_json
 - **certainty**: explicit（医生明确陈述）/ supported（有充分证据）/ weak（模糊表述）
 - **speaker**: patient（患者陈述）/ doctor（医生判断）
 - **evidence_turn_ids**: 支撑该事实的turn_id列表
-- **evidence_text**: 与evidence_turn_ids对应的原文片段列表
+- **evidence_text**: 与evidence_turn_ids对应的原文片段列表（仅保留短片段，不超过20字）
+
+## 增量抽取规则
+1. 只抽取新增对话中的事实，不要重复抽取已有事实
+2. 如果新对话中的事实与已有事实相同，追加evidence_turn_ids和evidence_text
+3. 在输出中标记operation字段：
+   - "new": 新事实
+   - "append": 追加到已有事实（需提供matched_fact_id）
 
 ## 约束
 - 严禁编造事实
+- evidence_text只保留短片段，不超过20字
 - 同一事实在多轮提及则合并，合并evidence_turn_ids和evidence_text
 
 ## 输出格式
 {
   "facts": [{
+    "operation": "new或append",
+    "matched_fact_id": "如果operation=append，填写已有事实的fact_id",
     "section_candidate": "S",
     "concept_type": "symptom",
     "mention": "原文",
@@ -252,14 +277,58 @@ $turns_json
     "certainty": "supported",
     "speaker": "patient",
     "evidence_turn_ids": [0],
-    "evidence_text": ["原文"]
+    "evidence_text": ["短片段"]
   }]
 }""",
-            required_vars=["turns_json"]
+            required_vars=["new_turns_json", "existing_facts_summary"]
+        )
+
+        self.templates["fact_consolidation"] = PromptTemplate(
+            template="""对以下事实表进行快速收束处理。**仅合并重复，标记冲突，不做复杂补判。**
+
+## 原始事实表
+$facts_json
+
+## 收束任务
+
+### 1. 重复事实合并
+检查语义相同但表述不同的事实，合并为一条：
+- 合并evidence_turn_ids
+- 选择最规范的mention作为最终表述
+
+### 2. 冲突事实标记
+检查矛盾事实（如同一症状既肯定又否定），标记为需人工复核：
+- 标记conflict_type：polarity_conflict（极性冲突）/ temporality_conflict（时序冲突）
+
+## 输出格式
+
+```json
+{
+  "merged_facts": [{
+    "fact_id": "保留的fact_id",
+    "merged_from": ["被合并的fact_id列表"],
+    "mention": "最终表述",
+    "evidence_turn_ids": [合并后的turn_id列表]
+  }],
+  "conflict_facts": [{
+    "fact_id": "冲突事实ID",
+    "conflict_with": ["冲突的fact_id列表"],
+    "conflict_type": "冲突类型",
+    "needs_review": true
+  }],
+  "final_fact_count": 最终事实数量
+}
+```
+
+**重要**：
+- 不做certainty/temporality补判，保留原值
+- 仅处理明确的重复和冲突
+- 不确定则保留原状""",
+            required_vars=["facts_json"]
         )
 
         self.templates["soap_verification"] = PromptTemplate(
-            template="""对以下SOAP病历草稿进行结构化核查与修订。
+            template="""对以下SOAP病历草稿进行快速核查。**先输出问题清单，再按需修订。**
 
 ## 病历草稿
 $draft_emr
@@ -270,35 +339,34 @@ $fact_table
 ## 角色映射
 $role_mapping
 
-## 核查维度
+## 核查任务（最多5个问题）
 
-### 1. 无证据声明(unsupported_claims)
-检查病历每句话是否有事实表支撑。无支撑则标记：claim_text、soap_location、reason
+检查以下4类问题，每类最多标记1个最严重的问题：
 
-### 2. 遗漏关键事实(missing_critical_facts)
-检查高重要性事实(certainty=explicit, polarity=present, speaker=doctor)是否已在病历中体现：fact_id、fact_content、importance_reason
-
-### 3. 内部冲突(internal_conflicts)
-检查病历内部矛盾：age/gender/body_part/time/negation/drug_name，标记conflict_type、location_1/content_1、location_2/content_2
-
-### 4. 确定性错误(certainty_errors)
-检查疑似诊断是否被表述为明确诊断：soap_text、correct_certainty、reason
-
-## 修订规则
-1. 第一优先：删除无证据声明
-2. 第二优先：补充遗漏事实
-3. 第三优先：修正矛盾和确定性错误
+1. **无证据声明**：病历中无事实支撑的陈述
+2. **关键遗漏**：高重要性事实(certainty=explicit, polarity=present)未体现
+3. **内部冲突**：病历内部矛盾（年龄/部位/时间/否定词）
+4. **确定性错误**：疑似诊断被表述为明确诊断
 
 ## 输出格式
+
+```json
 {
+  "issue_count": 问题数量(0-5),
   "issues": {
-    "unsupported_claims": [{"claim_text": "", "soap_location": "", "reason": ""}],
-    "missing_critical_facts": [{"fact_id": "", "fact_content": "", "importance_reason": ""}],
-    "internal_conflicts": [{"conflict_type": "", "location_1": "", "content_1": "", "location_2": "", "content_2": ""}],
-    "certainty_errors": [{"soap_text": "", "correct_certainty": "", "reason": ""}]
+    "unsupported_claims": [{"claim_text": "", "soap_location": ""}],
+    "missing_critical_facts": [{"fact_id": "", "fact_content": ""}],
+    "internal_conflicts": [{"conflict_type": "", "description": ""}],
+    "certainty_errors": [{"soap_text": "", "correct_certainty": ""}]
   },
   "soap_final": {"subjective": {...}, "objective": {...}, "assessment": {...}, "plan": {...}}
-}""",
+}
+```
+
+**重要**：
+- 若issue_count=0，soap_final直接使用原草稿，无需修订
+- 若有问题，仅修订有问题的字段，其他字段保持不变
+- 禁止重写整份SOAP，仅做最小化修订""",
             required_vars=["draft_emr", "fact_table", "role_mapping"]
         )
 
@@ -428,6 +496,62 @@ $facts_json
   }
 }""",
             required_vars=["subjective_text", "objective_text", "assessment_text", "facts_json"]
+        )
+
+        self.templates["emr_generation_ap"] = PromptTemplate(
+            template="""根据已生成的S/O文本和事实表，同时生成评估(A)和计划(P)部分。
+
+## 主观数据(S)
+$subjective_text
+
+## 客观数据(O)
+$objective_text
+
+## 事实表
+$facts_json
+
+## 评估(A)生成规则 - 三层诊断策略
+1. **明确诊断(explicit_diagnosis)**：certainty=explicit，concept_type=disease，speaker=doctor → 直接写明疾病名称
+2. **倾向性诊断(suspected_diagnosis)**：仅有supported级别证据，或医生有倾向未确诊 → 使用"考虑XXX""XXX待排"等措辞
+3. **症状性评估(symptom_based_assessment)**：仅有症状无诊断 → 只描述症状，禁止发明疾病名称
+
+## 计划(P)生成规则 - 四个子字段
+1. **medications（用药方案）**：药物名称、剂量、频次、疗程
+2. **tests（检查建议）**：检查项目、建议原因
+3. **follow_up（复诊）**：复诊时间/条件
+4. **education（健康教育）**：生活方式指导、饮食建议、注意事项
+
+## 约束
+- 严禁编造诊断结论
+- 每条计划必须有事实依据，对应至少一条fact_id
+- 无证据则留空
+- 优先使用normalized_term
+
+## 输出格式
+{
+  "assessment": {
+    "text": "诊断：...",
+    "diagnosis": {"value": "...", "evidence_traces": []}
+  },
+  "assessment_items": [{
+    "text": "...",
+    "certainty_level": "high",
+    "supporting_fact_ids": ["fact_id_1"],
+    "diagnosis_type": "explicit_diagnosis"
+  }],
+  "plan": {
+    "text": "治疗方案：...",
+    "treatment": {"value": "...", "evidence_traces": []},
+    "advice": {"value": "...", "evidence_traces": []}
+  },
+  "plan_items": {
+    "medications": [{"name": "", "dosage": "", "frequency": "", "duration": "", "used_fact_ids": []}],
+    "tests": [{"name": "", "reason": "", "used_fact_ids": []}],
+    "follow_up": {"text": "", "used_fact_ids": []},
+    "education": {"text": "", "used_fact_ids": []}
+  }
+}""",
+            required_vars=["subjective_text", "objective_text", "facts_json"]
         )
 
         self._load_chinese_evaluation_templates()

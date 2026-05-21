@@ -5,6 +5,7 @@ from .openai_compatible_adapter import OpenAICompatibleAdapter
 from .prompts import PromptManager
 from ...models.llm_config import LLMConfig
 import json
+import threading
 from ...utils.logger import logger
 
 
@@ -12,7 +13,9 @@ class LLMService:
     def __init__(self, db: Session):
         self.db = db
         self.adapters: Dict[str, LLMAdapter] = {}
+        self.adapter_configs: Dict[str, Dict[str, Any]] = {}
         self.prompt_manager = PromptManager()
+        self._config_lock = threading.Lock()
         self._load_adapters()
         
     def _load_adapters(self):
@@ -21,6 +24,13 @@ class LLMService:
             try:
                 adapter = self._create_adapter(config)
                 self.adapters[config.config_name] = adapter
+                self.adapter_configs[config.config_name] = {
+                    "max_tokens": config.max_tokens,
+                    "temperature": float(config.temperature),
+                    "json_mode": config.json_mode,
+                    "thinking_enabled": config.thinking_enabled,
+                    "thinking_effort": config.thinking_effort
+                }
             except Exception as e:
                 print(f"Failed to load adapter {config.config_name}: {e}")
                 
@@ -47,28 +57,41 @@ class LLMService:
         temperature: Optional[float] = None,
         json_mode: Optional[bool] = None,
         thinking_enabled: Optional[bool] = None,
-        thinking_effort: Optional[str] = None
+        thinking_effort: Optional[str] = None,
+        timeout: Optional[float] = None
     ) -> LLMResponse:
         if not self.adapters:
+            with self._config_lock:
+                all_configs = self.db.query(LLMConfig).all()
+            logger.error(f"No active LLM adapters available. 数据库中共有{len(all_configs)}条配置:")
+            for c in all_configs:
+                logger.error(f"  - config_name={c.config_name}, is_active={c.is_active}, provider={c.provider}")
             raise RuntimeError("No active LLM adapters available")
             
         adapter_name = config_name or list(self.adapters.keys())[0]
+        logger.debug(f"请求使用adapter: {adapter_name}, 可用adapters: {list(self.adapters.keys())}")
+        
         if adapter_name not in self.adapters:
-            raise ValueError(f"Adapter '{adapter_name}' not found")
+            logger.error(f"Adapter '{adapter_name}' not found. 可用adapters: {list(self.adapters.keys())}")
+            raise ValueError(f"Adapter '{adapter_name}' not found. Available: {list(self.adapters.keys())}")
             
         adapter = self.adapters[adapter_name]
         
-        config = self.db.query(LLMConfig).filter(
-            LLMConfig.config_name == adapter_name
-        ).first()
+        cached_config = self.adapter_configs.get(adapter_name)
+        if cached_config is None:
+            logger.error(f"缓存中未找到config_name={adapter_name}的配置")
+            raise ValueError(f"LLM config '{adapter_name}' not found in cache")
+        
+        logger.debug(f"使用缓存配置: config_name={adapter_name}, max_tokens={cached_config['max_tokens']}, thinking_enabled={cached_config['thinking_enabled']}")
         
         request = LLMRequest(
             prompt=prompt,
-            max_tokens=max_tokens or config.max_tokens,
-            temperature=temperature or float(config.temperature),
-            json_mode=json_mode if json_mode is not None else config.json_mode,
-            thinking_enabled=thinking_enabled if thinking_enabled is not None else config.thinking_enabled,
-            thinking_effort=thinking_effort or config.thinking_effort
+            max_tokens=max_tokens or cached_config["max_tokens"],
+            temperature=temperature or cached_config["temperature"],
+            json_mode=json_mode if json_mode is not None else cached_config["json_mode"],
+            thinking_enabled=thinking_enabled if thinking_enabled is not None else cached_config["thinking_enabled"],
+            thinking_effort=thinking_effort or cached_config["thinking_effort"],
+            timeout=timeout
         )
         
         response = adapter.generate(request)
@@ -129,4 +152,5 @@ class LLMService:
         
     def reload_adapters(self):
         self.adapters.clear()
+        self.adapter_configs.clear()
         self._load_adapters()

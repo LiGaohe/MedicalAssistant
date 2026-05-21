@@ -14,7 +14,7 @@ class LLMConfig(Base):
     api_key = Column(String(200), nullable=True)
     api_endpoint = Column(String(200), nullable=True)
     is_active = Column(Boolean, default=True)
-    max_tokens = Column(Integer, default=2048)
+    max_tokens = Column(Integer, default=8192)
     temperature = Column(String(10), default="0.7")
     json_mode = Column(Boolean, default=False)
     thinking_enabled = Column(Boolean, default=False)

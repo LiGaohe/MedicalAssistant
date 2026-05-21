@@ -719,10 +719,18 @@ identify_colloquial_terms (批量识别)
 
 | 步骤 | 处理方式 | 置信度范围 | 说明 |
 | --- | --- | --- | --- |
-| 1. LLM识别 | 大模型识别口语术语 | - | 从文本中提取所有医学术语 |
-| 2. UMLS查询 | 在线API查询 | 0.60-0.95 | 主要规范化手段 |
-| 3. LLM规范化 | 大模型推理 | 0.30-0.60 | UMLS无结果时兜底 |
-| 4. 保留原词 | 无匹配 | 0.30 | 所有方法都失败时保留原词 |
+| 1. 预检匹配 | exact/alias 匹配 | 0.85-1.0 | 中文模式 exact 或 synonym 命中时直接返回 |
+| 2. 多概念拆解 | LLM拆解 + 递归规范化 | - | 含并列词时拆解为atomic mention分别处理 |
+| 3. 语言分流检索 | 中文：本地术语库(ChineseTerm/ICD-11)；英文：UMLS | 0.60-0.95 | 按语言选择检索源，中英文路径互斥 |
+| 4. Rewrite改写 | LLM口语→临床改写 | - | 初轮检索置信度 < 阈值时触发 |
+| 5. Alternative Phrasing | LLM等价别名生成 | - | Rewrite后仍低置信度时触发 |
+| 6. 约束选择 | LLM从候选中选择 | 0.30-0.95 | 只能从候选列表选择，无匹配返回unresolved |
+| 7. 兜底保留 | 保留原词 | 0.30 | 所有方法都失败时保留原词，标记unresolved |
+
+**中英文路径互斥**：
+- 中文模式（language=="zh"）：只使用本地术语库（ChineseTerm/ICD-11），不走UMLS
+- 英文模式（language!="zh"）：只使用UMLS，不走本地术语库
+- 并行模式 `extract_and_normalize_terms_parallel()` 同样遵循语言分流
 
 **UMLS集成特性：**
 
@@ -1080,7 +1088,8 @@ graph TB
 | TranscriptNormalizer | 文本标准化，说话人映射 | backend/services/normalizer.py |
 | SpeakerRoleClassifier | 说话人角色识别，基于语义分析识别医生/患者 | backend/services/speaker_role_classifier.py |
 | EvidenceService | 证据选择，基于触发词、置信度和LLM筛选相关片段 | backend/services/evidence_service.py |
-| TerminologyService | 术语规范化，LLM识别术语+UMLS检索+LLM候选选择，支持并行处理，新增 normalize_single_term() 方法用于选择性规范化(阶段3) | backend/services/terminology_service.py |
+| TerminologyService | 术语规范化，分级触发链路(预检→拆解→分流检索→Rewrite→约束选择→unresolved)，中英文路径互斥(中文走本地术语库/英文走UMLS)，支持并行处理 | backend/services/terminology_service.py |
+| TermRewriter | 术语改写服务，口语→临床改写、多概念拆解、alternative phrasing生成 | backend/services/term_rewriter.py |
 | TranslationService | 中英文翻译，使用专门翻译小模型提升翻译速度 | backend/services/translation_service.py |
 | FactService | 原子事实CRUD服务，封装AtomicFact的增删改查操作 | backend/services/fact_service.py |
 | ExtractionService | 病历要素抽取，从证据中抽取SOAP要素 | backend/services/extraction_service.py |

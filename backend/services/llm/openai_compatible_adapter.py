@@ -36,11 +36,16 @@ class OpenAICompatibleAdapter(LLMAdapter):
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         
+        use_json_mode = request.json_mode or self.json_mode
+        
+        messages = []
+        if use_json_mode:
+            messages.append({"role": "system", "content": "请以JSON格式输出结果。"})
+        messages.append({"role": "user", "content": request.prompt})
+        
         payload = {
             "model": self.model_name,
-            "messages": [
-                {"role": "user", "content": request.prompt}
-            ],
+            "messages": messages,
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,
             "top_p": request.top_p
@@ -49,7 +54,6 @@ class OpenAICompatibleAdapter(LLMAdapter):
         if request.stop_sequences:
             payload["stop"] = request.stop_sequences
         
-        use_json_mode = request.json_mode or self.json_mode
         if use_json_mode:
             payload["response_format"] = {"type": "json_object"}
         
@@ -60,13 +64,14 @@ class OpenAICompatibleAdapter(LLMAdapter):
                 "type": "enabled",
                 "reasoning_effort": effort
             }
-            payload["max_tokens"] = request.max_tokens * 3
+            payload["max_tokens"] = request.max_tokens * 5
             logger.debug(f"思考模式启用，max_tokens从{request.max_tokens}调整为{payload['max_tokens']}以补偿reasoning_tokens")
         
         logger.info(f"LLM API请求 - 模型: {self.model_name}, 提供商: {self.provider_name}")
         logger.debug(f"LLM API请求 - endpoint: {self.api_endpoint}")
         logger.debug(f"LLM API请求 - max_tokens: {payload.get('max_tokens', request.max_tokens)}, temperature: {request.temperature}")
         logger.debug(f"LLM API请求 - json_mode: {use_json_mode}, thinking_enabled: {use_thinking}")
+        logger.debug(f"LLM API请求 - payload: {json.dumps(payload, ensure_ascii=False)[:500]}")
         
         last_error = None
         
@@ -77,7 +82,8 @@ class OpenAICompatibleAdapter(LLMAdapter):
                     wait_time = self.request_interval - elapsed
                     time.sleep(wait_time)
                 
-                timeout = 300.0 if use_thinking else 120.0
+                timeout = request.timeout if request.timeout else (300.0 if use_thinking else 120.0)
+                logger.debug(f"LLM API请求超时设置: {timeout}秒 (请求级={request.timeout is not None})")
                 with httpx.Client(timeout=timeout) as client:
                     response = client.post(
                         self.api_endpoint,
@@ -147,6 +153,15 @@ class OpenAICompatibleAdapter(LLMAdapter):
                         thinking_content=thinking_content
                     )
                     
+            except httpx.HTTPStatusError as e:
+                error_detail = ""
+                try:
+                    error_body = e.response.text
+                    error_detail = f", 响应内容: {error_body[:500]}"
+                except:
+                    pass
+                logger.error(f"LLM API HTTP错误 (尝试 {attempt + 1}/{self.max_retries}): {str(e)}{error_detail}")
+                last_error = RuntimeError(f"{self.provider_name} API error: {str(e)}{error_detail}")
             except httpx.HTTPError as e:
                 logger.error(f"LLM API HTTP错误 (尝试 {attempt + 1}/{self.max_retries}): {str(e)}")
                 last_error = RuntimeError(f"{self.provider_name} API error: {str(e)}")
