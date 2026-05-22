@@ -182,6 +182,9 @@ window.App = (function() {
             } else if (e.ctrlKey && e.key === '4') {
                 e.preventDefault();
                 setActivePanel('config');
+            } else if (e.ctrlKey && e.key === '5') {
+                e.preventDefault();
+                setActivePanel('history');
             }
         });
 
@@ -227,6 +230,12 @@ window.App = (function() {
                 if (hasEmr && result.latest_record_id) {
                     state.currentRecordId = result.latest_record_id;
                     emit('emrStatusLoaded', result);
+
+                    var cacheData = CacheModule.loadEMRCache(visitId);
+                    if (cacheData && cacheData.emrRecord) {
+                        state.emrRecord = cacheData.emrRecord;
+                        emit('emrGenerated', { emrRecord: cacheData.emrRecord });
+                    }
                 }
                 updateStatusBar('就绪');
             })

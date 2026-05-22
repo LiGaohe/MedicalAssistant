@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
+import json
 
 from ..database import get_db
 from ..models import EMRRecord, Visit
@@ -141,6 +142,109 @@ async def process_visit(
     except Exception as e:
         logger.error(f"病历处理失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+from fastapi.responses import StreamingResponse
+
+
+@router.post("/process-stream")
+async def process_visit_stream(
+    request: ProcessRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    SSE端点：实时推送病历生成进度
+    
+    返回 Server-Sent Events 流，包含各阶段的处理进度
+    """
+    logger.info(f"收到SSE病历处理请求: visit_id={request.visit_id}")
+    logger.info(f"DEBUG模式: {settings.LLM_DEBUG_MODE}")
+    
+    if settings.LLM_DEBUG_MODE:
+        logger.warning("DEBUG模式已开启，但SSE请求不支持终端交互")
+        
+        async def debug_error_generator():
+            yield f"event: error\ndata: {json.dumps({'error': 'DEBUG模式已开启，SSE请求不支持终端交互'}, ensure_ascii=False)}\n\n"
+        
+        return StreamingResponse(
+            debug_error_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
+        )
+    
+    async def event_generator():
+        try:
+            llm_service = LLMService(db)
+            
+            visit = db.query(Visit).filter(Visit.visit_id == request.visit_id).first()
+            language = visit.language if visit and visit.language else "zh"
+            
+            if language == "en":
+                pipeline = LLMPipelineServiceEnglish(db, llm_service)
+            else:
+                pipeline = LLMPipelineService(db, llm_service)
+            
+            for event in pipeline.process_with_callback(
+                request.visit_id,
+                save_evidence=request.save_intermediate
+            ):
+                event_data = {
+                    "stage": event.get("stage"),
+                    "name": event.get("name"),
+                    "status": event.get("status"),
+                    "detail": event.get("detail", "")
+                }
+                
+                if event.get("extra"):
+                    event_data["extra"] = event["extra"]
+                
+                yield f"event: stage_update\ndata: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+                
+                if event.get("status") == "completed" and event.get("stage") == 0:
+                    result = event.get("extra", {}).get("result", {})
+                    
+                    latest_emr = db.query(EMRRecord).filter(
+                        EMRRecord.visit_id == request.visit_id
+                    ).order_by(EMRRecord.version.desc()).first()
+                    
+                    emr_result = result.get("emr_result", {})
+                    emr_record = {
+                        "record_id": latest_emr.record_id if latest_emr else None,
+                        "version": latest_emr.version if latest_emr else None,
+                        "emr_json": {
+                            "subjective": emr_result.get("subjective", {}),
+                            "objective": emr_result.get("objective", {}),
+                            "assessment": emr_result.get("assessment", {}),
+                            "plan": emr_result.get("plan", {})
+                        }
+                    }
+                    
+                    complete_data = {
+                        "status": "completed",
+                        "emr_record": emr_record,
+                        "role_mapping": result.get("role_mapping"),
+                        "fact_count": result.get("fact_result", {}).get("fact_count", 0),
+                        "processing_time": result.get("processing_time", 0)
+                    }
+                    yield f"event: complete\ndata: {json.dumps(complete_data, ensure_ascii=False)}\n\n"
+            
+        except Exception as e:
+            logger.error(f"SSE处理失败: {str(e)}", exc_info=True)
+            yield f"event: error\ndata: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 
 @router.get("/visit/{visit_id}")
@@ -549,6 +653,71 @@ async def debug_process_stage(
             stage=request.stage,
             error=str(e)
         )
+
+
+class DeleteEMRResponse(BaseModel):
+    status: str
+    deleted_count: Optional[int] = None
+    deleted_version: Optional[int] = None
+
+
+@router.delete("/record/{visit_id}", response_model=DeleteEMRResponse)
+async def delete_emr_record(
+    visit_id: str,
+    version: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    logger.info(f"删除病历记录: visit_id={visit_id}, version={version}")
+    try:
+        llm_service = LLMService(db)
+        emr_service = EMRGenerationService(db, llm_service)
+
+        if version is not None:
+            deleted = emr_service.delete_emr_by_version(visit_id, version)
+            if deleted:
+                logger.info(f"已删除病历版本: visit_id={visit_id}, version={version}")
+                return DeleteEMRResponse(
+                    status="success",
+                    deleted_version=version,
+                    deleted_count=deleted
+                )
+            else:
+                raise HTTPException(status_code=404, detail=f"版本 {version} 不存在")
+        else:
+            count = emr_service.delete_all_emr(visit_id)
+            logger.info(f"已删除 {count} 条病历记录: visit_id={visit_id}")
+            return DeleteEMRResponse(
+                status="success",
+                deleted_count=count
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除病历失败: {str(e)}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class VisitsListResponse(BaseModel):
+    visits: List[Dict[str, Any]]
+
+
+@router.get("/visits", response_model=VisitsListResponse)
+async def list_visits_with_emr(
+    db: Session = Depends(get_db)
+):
+    logger.info("获取所有有EMR记录的就诊列表")
+    try:
+        llm_service = LLMService(db)
+        emr_service = EMRGenerationService(db, llm_service)
+
+        visits = emr_service.get_all_visits_with_emr()
+        return VisitsListResponse(visits=visits)
+
+    except Exception as e:
+        logger.error(f"获取就诊列表失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 class UpdateEMRRequest(BaseModel):

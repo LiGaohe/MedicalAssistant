@@ -242,7 +242,13 @@ $existing_facts_summary
 ## 抽取规则
 每条事实是一个不可再分的独立临床陈述，包含以下字段：
 
-- **section_candidate**: S（主诉/现病史/既往史）/ O（体格检查/辅助检查）/ A（诊断/评估）/ P（用药/检查建议/复诊/健康指导）
+- **section_candidate**: S（主观数据）/ O（客观数据）/ A（评估/诊断）/ P（计划）
+- **subsection**: 该事实对应的细粒度EMR字段。取值约束：
+  - section_candidate=S 时：chief_complaint（主诉）/ history_present_illness（现病史）/ past_history（既往史）/ denied_symptoms（否认症状）
+  - section_candidate=O 时：physical_examination（体格检查）/ auxiliary_examination（辅助检查）
+  - section_candidate=A 时：可留空（诊断事实自动归入diagnosis）
+  - section_candidate=P 时：可留空（计划事实由下游plan_items细分）
+  - 多条事实可能对应同一subsection（如多条现病史事实），应分别抽取
 - **concept_type**: symptom / disease / test / drug / plan / other
 - **mention**: 对话中的原始口语表述文本
 - **polarity**: present（肯定）/ absent（否认）/ possible（可能）/ planned（计划）/ recommended（建议）
@@ -270,6 +276,7 @@ $existing_facts_summary
     "operation": "new或append",
     "matched_fact_id": "如果operation=append，填写已有事实的fact_id",
     "section_candidate": "S",
+    "subsection": "chief_complaint",
     "concept_type": "symptom",
     "mention": "原文",
     "polarity": "present",

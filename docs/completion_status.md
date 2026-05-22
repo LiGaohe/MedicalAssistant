@@ -1,5 +1,201 @@
 # 完成状态记录
 
+## 2026-05-22 修复证据溯源字段级分配 —— 以LLM SO阶段输出为准
+
+### 变更说明
+
+日志分析发现：LLM SO 阶段已按字段输出独立的 `evidence_traces`（如 `chief_complaint` → `["fact_...41973dcae321"]`），但 `_enrich_evidence_traces()` 的 subsection 分组逻辑将这些 per-field 分配**覆盖**了。由于 fact_extraction 阶段 LLM 尚未正确输出 `subsection`，导致部分字段（如主诉）证据溯源为空（traces=0）。
+
+修复方案：在 `_enrich_evidence_traces()` 中，**优先使用 LLM SO 阶段的 per-field evidence_traces**，提取每个字段的 fact_ids 后独立调用 `_build_evidence_traces_from_fact_ids()` 进行富化。仅当 LLM 未提供 per-field 数据时，才依次回退到 subsection 分组 → section 级分配。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 根因定位 | ✅ 完成 | 通过 DEBUG 日志捕获 LLM SO 阶段原始输出，确认 LLM 已正确输出 per-field evidence_traces |
+| 修复 `_enrich_evidence_traces()` | ✅ 完成 | 新增 `llm_s_field_fact_ids` / `llm_o_field_fact_ids` 提取逻辑，LLM per-field > subsection > section 三级回退 |
+| 验证 | ✅ 完成 | 测试 visit `text_20260522_190012_ed7177eb`：主诉 traces=3（原来=0），现病史 traces=8，否认症状 traces=2，体格检查 traces=1，辅助检查 traces=1 |
+
+### 修改文件
+
+- `backend/services/llm_pipeline_service.py` — `_enrich_evidence_traces()` 新增 LLM per-field 证据提取逻辑（优先级高于 subsection 分组）
+
+---
+
+## 2026-05-22 病历生成实时进度显示
+
+### 变更说明
+
+此前病历生成过程只显示"正在生成病历..."，用户等待过程枯燥，无法获知当前处理阶段。本次使用 Server-Sent Events (SSE) 技术实现实时进度推送，让用户在等待过程中能看到各阶段的处理进度。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 后端 SSE 端点 | ✅ 完成 | 新增 `/api/emr/process-stream` 端点，使用 StreamingResponse 返回 SSE 格式数据 |
+| 后端进度回调方法 | ✅ 完成 | `LLMPipelineService` 新增 `process_with_callback()` 方法，每个阶段开始/结束时 yield 进度事件 |
+| 前端 SSE 接收 | ✅ 完成 | `agent.js` 使用 fetch + ReadableStream 接收 SSE 流，实时更新阶段显示 |
+| CSS 进度条动画 | ✅ 完成 | 新增 `.stage-progress-animated` 样式，带渐变动画效果 |
+| 网络中断处理 | ✅ 完成 | 当页面刷新导致连接中断时，显示友好提示和"检查病历状态"按钮 |
+
+### 修改文件
+
+1. `backend/api/emr.py` — 新增 `/process-stream` SSE 端点
+2. `backend/services/llm_pipeline_service.py` — 新增 `process_with_callback()` 方法
+3. `frontend/js/agent.js` — 修改 `processEMR()` 使用 SSE，新增 `handleSSEEvent()`、`updateStageMessage()`、`checkEMRStatus()` 函数
+4. `frontend/css/ide.css` — 新增阶段进度条动画样式、warning 消息样式、检查状态按钮样式
+
+### 显示的阶段
+
+| 阶段 | 名称 | 说明 |
+|------|------|------|
+| 阶段1 | 转写清洗与角色纠错 | 清洗ASR文本，识别医生/患者角色 |
+| 阶段2 | 事实抽取与证据绑定 | 从对话中抽取原子临床事实 |
+| 阶段2.5 | 事实收束 | 合并重复事实，标记冲突 |
+| 阶段3 | 选择性术语规范化 | 规范化医学术语 |
+| 阶段4 | 分节生成SOAP病历 | 生成主观/客观/评估/计划部分 |
+| 阶段5 | 核查与修订 | 验证病历完整性，修订错误 |
+
+### 网络中断处理
+
+当用户在病历生成过程中刷新页面导致 SSE 连接中断时：
+
+1. 前端检测到网络错误，显示警告消息（黄色边框）
+2. 提示用户"后端可能仍在处理中"
+3. 提供"检查病历状态"按钮，用户可点击检查病历是否已生成完成
+
+---
+
+## 2026-05-22 原子事实按详细SOAP字段分类 —— 证据溯源字段级独立
+
+### 变更说明
+
+此前所有主观数据字段（主诉/现病史/既往史/否认症状）共享同一份证据溯源列表，前端展开各字段的"证据来源"时内容完全相同。根因是 `AtomicFact` 仅按 `section_candidate`（S/O/A/P）四级分类，`_enrich_evidence_traces()` 将 S 节段所有事实的证据无差别赋给每个主观字段。
+
+本次在 `AtomicFact` 新增 `subsection` 字段，在 `fact_extraction` prompt 中要求 LLM 输出细粒度分类，在 `_enrich_evidence_traces()` 中按 `subsection` 分组构建独立证据列表，实现字段级证据溯源区分。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| prompt 新增 subsection 字段 | ✅ 完成 | `fact_extraction` prompt 新增 `subsection` 字段及取值约束说明，更新输出格式示例 |
+| AtomicFact 模型新增字段 | ✅ 完成 | 新增 `subsection = Column(String, nullable=True)`，`init_db()` 通过 `_add_missing_columns()` 自动兼容 |
+| 解析并存储 subsection | ✅ 完成 | `_save_atomic_facts()` 读取 `subsection` 并写入 DB，`existing_facts_summary` 包含 `subsection` |
+| 证据溯源按字段独立分配 | ✅ 完成 | `_enrich_evidence_traces()` 按 `subsection` 分组 S/O 事实，各字段独立构建 `evidence_traces` |
+| 向后兼容 | ✅ 完成 | 通过 `s_has_subsection` / `o_has_subsection` 检测自动回退旧逻辑 |
+
+### 修改文件
+
+1. `backend/models/atomic_fact.py` — 新增 `subsection` 列
+2. `backend/services/llm/prompts.py` — `fact_extraction` prompt 模板新增 `subsection` 字段说明
+3. `backend/services/llm_pipeline_service.py` — `_save_atomic_facts()` 存储 subsection；`_fact_extraction_stage()` summary 包含 subsection；`_enrich_evidence_traces()` 按 subsection 分组分配证据；日志统计适配新结构
+
+---
+
+## 2026-05-22 事实收束阶段关闭 thinking 模式
+
+### 变更说明
+
+事实收束阶段的任务（合并重复、标记冲突）不需要复杂推理，关闭 thinking 模式以减少 LLM reasoning tokens 开销，降低该阶段耗时约 30-50%。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 关闭 thinking 模式 | ✅ 完成 | `_fact_consolidation_stage` 中 LLM 调用设置 `thinking_enabled=False` |
+
+### 修改文件
+
+1. `backend/services/llm_pipeline_service.py` — `_fact_consolidation_stage` 方法中 LLM 调用添加 `thinking_enabled=False` 参数，日志从"thinking模式已启用"改为"thinking模式已禁用"
+
+---
+
+## 2026-05-22 病历显示清晰度优化与证据来源折叠
+
+### 变更说明
+
+病历生成页面的字段名和字段值字体偏小、视觉区分度不足；证据溯源信息嵌入在每个字段下方，多条证据叠加后占据大量页面空间。本次优化增大字段字体、增加左侧色条区分字段，并将证据溯源默认折叠为紧凑按钮。
+
+同时修复：历史病历加载时证据溯源未折叠（`editor.js` 有独立实现未同步修改）、病历 `text` 字段与子字段内容重复显示。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 字段样式增强 | ✅ 完成 | .field-name 字体 11→12px，颜色改为 #9cdcfe，增加 letter-spacing；.field-value 字体 13→14px，增加 line-height |
+| 字段区域区分 | ✅ 完成 | .field-item 增加 border-left: 3px solid #569cd6 左侧色条，padding 增大至 10px 14px |
+| 证据溯源折叠 | ✅ 完成 | .evidence-traces 默认 collapsed，仅显示"证据来源 (N条)"按钮，点击展开/收起 |
+| 折叠按钮样式 | ✅ 完成 | 新增 .evidence-toggle-btn 样式，hover 高亮，展开/收起时前缀 ± 切换 |
+| JS 交互（emr.js） | ✅ 完成 | buildEvidenceHtml 添加 collapsed 类和折叠按钮，addExpandListeners 新增证据折叠事件 |
+| JS 交互（editor.js） | ✅ 完成 | 同步修改 editor.js 的 buildEvidenceHtml 和 addExpandListeners，修复历史病历加载时证据未折叠 |
+| 病历内容去重 | ✅ 完成 | displaySection 当存在结构化子字段时不再显示 text（叙述性文本），避免重复显示 |
+
+### 修改文件
+
+1. `frontend/css/ide.css` — 增强 .field-item/.field-name/.field-value 样式；新增 .evidence-toggle-btn 样式；调整 .evidence-traces 折叠相关样式；覆盖 style.css 级联样式
+2. `frontend/js/emr.js` — buildEvidenceHtml 添加 collapsed 类和折叠按钮；addExpandListeners 新增证据折叠事件；displaySection 去除重复 text
+3. `frontend/js/editor.js` — 同步修改：buildEvidenceHtml 折叠、addExpandListeners 折叠事件；displaySection 去除重复 text
+
+---
+
+## 2026-05-21 病历缓存、删除与历史病历功能
+
+### 变更说明
+
+解决页面刷新后病历数据丢失问题，新增 localStorage 缓存机制；新增病历删除功能；新增历史病历查看面板。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 后端 DELETE API | ✅ 完成 | 新增 DELETE /api/emr/record/{visit_id} 和 GET /api/emr/visits 接口 |
+| 后端删除服务 | ✅ 完成 | EMRGenerationService 新增 delete_emr_by_version、delete_all_emr、get_all_visits_with_emr |
+| 前端缓存模块 | ✅ 完成 | cache.js：localStorage 封装，支持保存/读取/删除/列出缓存 |
+| 前端历史面板 | ✅ 完成 | history.js：侧边栏历史病历列表，支持查看和删除操作 |
+| HTML 模板更新 | ✅ 完成 | 新增 history 活动栏按钮（Ctrl+5）、历史面板、删除版本按钮 |
+| CSS 样式更新 | ✅ 完成 | 新增 .history-* 系列样式、.editor-btn-danger、.sidebar-header-refresh |
+| app.js 集成 | ✅ 完成 | 新增 Ctrl+5 快捷键、页面初始化时从缓存恢复病历数据 |
+| agent.js 集成 | ✅ 完成 | 病历生成成功后自动写入 localStorage 缓存 |
+| editor.js 集成 | ✅ 完成 | 版本加载/保存后更新缓存、新增 deleteCurrentVersion 删除功能 |
+
+### 新增文件
+
+1. `frontend/js/cache.js` — localStorage 缓存管理模块（读写删除索引管理）
+2. `frontend/js/history.js` — 历史病历面板模块（列表渲染、查看、删除）
+
+### 修改文件
+
+1. `backend/api/emr.py` — 新增 DELETE /record/{visit_id}、GET /visits 两个接口
+2. `backend/services/emr_generation_service.py` — 新增删除和列表查询方法
+3. `frontend/emr.html` — 新增历史面板 HTML、活动栏按钮、删除版本按钮、JS 引入
+4. `frontend/css/ide.css` — 新增历史列表、删除按钮、刷新按钮样式
+5. `frontend/js/app.js` — 集成 history 面板、Ctrl+5 快捷键、缓存恢复
+6. `frontend/js/agent.js` — 病历生成后调用 CacheModule 写缓存
+7. `frontend/js/editor.js` — 加载/保存后更新缓存、新增 deleteCurrentVersion
+
+### 缓存设计
+
+```
+缓存键: emr_cache_{visit_id}
+缓存索引: emr_cache_index（维护访问顺序，最多100个条目）
+缓存内容: { emrRecord, versions, visitInfo, cachedAt }
+
+数据流向:
+  后端 API → 前端内存 (运行时) ──→ 写入 localStorage (持久化)
+  页面刷新 → localStorage 读取 → 前端内存恢复
+  删除操作 → 后端 API + localStorage 同步清除
+```
+
+### API 新增
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| DELETE | /api/emr/record/{visit_id} | 删除所有病历（无 version 参数）|
+| DELETE | /api/emr/record/{visit_id}?version=N | 删除指定版本 |
+| GET | /api/emr/visits | 列出所有有 EMR 的就诊 |
+
+---
+
 ## 2026-05-21 IDE界面图标统一：去除Emoji，统一为SVG
 
 ### 变更说明

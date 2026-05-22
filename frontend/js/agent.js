@@ -3,6 +3,7 @@ window.AgentModule = (function() {
     var selectedFile = null;
     var isProcessing = false;
     var uploadInProgress = false;
+    var stageElements = {};
 
     function addMessage(type, content, details) {
         var container = document.getElementById('agentMessages');
@@ -16,6 +17,7 @@ window.AgentModule = (function() {
         else if (type === 'user') icon = App.icon('user', 16);
         else if (type === 'agent' || type === 'success') icon = App.icon('bot', 16);
         else if (type === 'progress') icon = App.icon('loader', 16);
+        else if (type === 'warning') icon = App.icon('alertTriangle', 16);
         else if (type === 'error') icon = App.icon('xCircle', 16);
 
         msgDiv.innerHTML = '<div class="agent-message-icon">' + icon + '</div>' +
@@ -182,6 +184,26 @@ window.AgentModule = (function() {
                     processBtn.disabled = false;
                 }
             }
+        }
+
+        var clearBtn = document.getElementById('clearAgentBtn');
+        if (clearBtn) {
+            clearBtn.addEventListener('click', function() {
+                var container = document.getElementById('agentMessages');
+                if (container) {
+                    container.innerHTML = '';
+                    var welcomeMsg = document.createElement('div');
+                    welcomeMsg.className = 'agent-message system';
+                    welcomeMsg.innerHTML = '<div class="agent-message-icon">' +
+                        '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2m16 0h2m-7-1v2m-6-2v2"/></svg>' +
+                        '</div>' +
+                        '<div class="agent-message-content">' +
+                        '<p>欢迎使用门诊病历生成系统</p>' +
+                        '<p class="agent-hint">请上传音频文件开始，或使用文本调试模式输入对话内容</p>' +
+                        '</div>';
+                    container.appendChild(welcomeMsg);
+                }
+            });
         }
     }
 
@@ -412,11 +434,13 @@ window.AgentModule = (function() {
         var processBtn = document.getElementById('agentProcess');
         if (processBtn) processBtn.disabled = true;
 
-        addMessage('agent', '<p>' + App.icon('bot', 14) + ' 开始生成SOAP病历...</p>');
+        addMessage('agent', '<p>开始生成SOAP病历...</p>');
         App.updateStatusBar('正在生成病历...');
 
+        var currentStageEl = null;
+
         try {
-            var response = await fetch('/api/emr/process', {
+            var response = await fetch('/api/emr/process-stream', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -425,40 +449,64 @@ window.AgentModule = (function() {
                     save_intermediate: true
                 })
             });
-            var result = await response.json();
 
-            if (result.status === 'completed') {
-                state.emrRecord = result.emr_record;
-                state.currentRecordId = result.emr_record.record_id;
-                App.setState({
-                    emrRecord: result.emr_record,
-                    currentRecordId: result.emr_record.record_id
-                });
+            var reader = response.body.getReader();
+            var decoder = new TextDecoder();
+            var buffer = '';
+            var eventType = '';
+            var result = null;
 
-                result.stages = result.stages || [];
-                result.stages.forEach(function(stage, idx) {
-                    addStageMessage(idx + 1, stage.name || ('阶段' + (idx + 1)),
-                        stage.status || 'completed', stage.detail || '');
-                });
+            while (true) {
+                var readResult = await reader.read();
+                if (readResult.done) break;
 
-                addMessage('success',
-                    '<p>' + App.icon('sparkles', 14) + ' 病历生成完毕！</p>' +
-                    '<p class="agent-hint">请在主编辑区查看病历内容</p>'
+                buffer += decoder.decode(readResult.value, { stream: true });
+                var lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+
+                for (var i = 0; i < lines.length; i++) {
+                    var line = lines[i];
+                    if (line.startsWith('event: ')) {
+                        eventType = line.substring(7);
+                    } else if (line.startsWith('data: ')) {
+                        var dataStr = line.substring(6);
+                        try {
+                            var data = JSON.parse(dataStr);
+                            handleSSEEvent(eventType, data);
+                            
+                            if (eventType === 'complete') {
+                                result = data;
+                            }
+                        } catch (e) {
+                            console.error('SSE JSON parse error:', e);
+                        }
+                    }
+                }
+            }
+
+            if (result && result.status === 'completed') {
+                handleProcessComplete(result);
+            }
+
+        } catch (error) {
+            var isNetworkError = error.name === 'TypeError' || 
+                                 error.message.includes('NetworkError') ||
+                                 error.message.includes('fetch') ||
+                                 error.message.includes('network');
+            
+            if (isNetworkError) {
+                addMessage('warning',
+                    '<p>' + App.icon('alertTriangle', 14) + ' 连接已中断</p>' +
+                    '<p class="agent-hint">后端可能仍在处理中，请稍后刷新页面查看结果</p>' +
+                    '<p class="agent-hint" style="margin-top:8px;">' +
+                    '<button class="check-status-btn" onclick="AgentModule.checkEMRStatus()">' +
+                    App.icon('refreshCw', 12) + ' 检查病历状态</button></p>'
                 );
-
-                App.updateTitlebar(state.visitId, true);
-                App.updateStatusBar('病历生成完成', 'success');
-                App.emit('emrGenerated', { emrRecord: result.emr_record });
+                App.updateStatusBar('连接中断', 'warning');
             } else {
-                addMessage('error',
-                    '<p>病历生成失败</p>' +
-                    '<p class="agent-hint">' + App.escapeHtml(result.errors ? result.errors.join(', ') : '未知错误') + '</p>'
-                );
+                addMessage('error', '<p>病历生成失败: ' + error.message + '</p>');
                 App.updateStatusBar('病历生成失败', 'error');
             }
-        } catch (error) {
-            addMessage('error', '<p>病历生成失败: ' + error.message + '</p>');
-            App.updateStatusBar('病历生成失败', 'error');
         } finally {
             isProcessing = false;
             if (processBtn) {
@@ -468,6 +516,143 @@ window.AgentModule = (function() {
         }
     }
 
+    function handleSSEEvent(eventType, data) {
+        if (eventType === 'stage_update') {
+            updateStageMessage(data.stage, data.name, data.status, data.detail);
+        } else if (eventType === 'error') {
+            addMessage('error', '<p>病历生成失败: ' + App.escapeHtml(data.error || '未知错误') + '</p>');
+            App.updateStatusBar('病历生成失败', 'error');
+            isProcessing = false;
+        }
+    }
+
+    function updateStageMessage(stageNum, stageName, status, detail) {
+        var type = status === 'running' ? 'progress' : 
+                   status === 'completed' ? 'success' : 'error';
+
+        var content = '<div class="stage-name">阶段' + stageNum + '/5: ' + stageName + '</div>';
+        if (detail) {
+            content += '<div class="stage-detail">' + App.escapeHtml(detail) + '</div>';
+        }
+        if (status === 'running') {
+            content += '<div class="stage-progress"><div class="stage-progress-bar stage-progress-animated"></div></div>';
+        }
+
+        if (stageElements[stageNum]) {
+            var el = stageElements[stageNum];
+            el.className = 'agent-message ' + type;
+            var iconEl = el.querySelector('.agent-message-icon');
+            if (iconEl) {
+                var newIcon = '';
+                if (type === 'progress') newIcon = App.icon('loader', 16);
+                else if (type === 'success') newIcon = App.icon('bot', 16);
+                else if (type === 'error') newIcon = App.icon('xCircle', 16);
+                iconEl.innerHTML = newIcon;
+            }
+            var contentEl = el.querySelector('.agent-message-content');
+            if (contentEl) contentEl.innerHTML = content;
+        } else {
+            stageElements[stageNum] = addMessage(type, content);
+        }
+    }
+
+    function handleProcessComplete(result) {
+        if (result.emr_record) {
+            state.emrRecord = result.emr_record;
+            state.currentRecordId = result.emr_record.record_id;
+            App.setState({
+                emrRecord: result.emr_record,
+                currentRecordId: result.emr_record.record_id
+            });
+        }
+
+        addMessage('success',
+            '<p>' + App.icon('sparkles', 14) + ' 病历生成完毕！</p>' +
+            '<p class="agent-hint">请在主编辑区查看病历内容</p>'
+        );
+
+        App.updateTitlebar(state.visitId, true);
+        App.updateStatusBar('病历生成完成', 'success');
+
+        if (state.visitId && result.emr_record) {
+            CacheModule.saveEMRCache(state.visitId, {
+                emrRecord: result.emr_record,
+                versions: [],
+                visitInfo: {}
+            });
+
+            fetch('/api/emr/visit/' + state.visitId)
+                .then(function(r) { return r.json(); })
+                .then(function(visitInfo) {
+                    CacheModule.saveEMRCache(state.visitId, {
+                        emrRecord: result.emr_record,
+                        versions: [],
+                        visitInfo: visitInfo
+                    });
+                })
+                .catch(function() {});
+        }
+
+        App.emit('emrGenerated', { emrRecord: result.emr_record });
+    }
+
+    function checkEMRStatus() {
+        if (!state.visitId) {
+            addMessage('error', '<p>无法检查状态：缺少就诊ID</p>');
+            return;
+        }
+        
+        addMessage('agent', '<p>' + App.icon('loader', 14) + ' 正在检查病历状态...</p>');
+        
+        fetch('/api/emr/record/' + state.visitId)
+            .then(function(r) { 
+                if (r.status === 404) {
+                    return { status: 'not_found' };
+                }
+                return r.json();
+            })
+            .then(function(data) {
+                if (data.status === 'not_found' || !data.record_id) {
+                    addMessage('agent',
+                        '<p>' + App.icon('loader', 14) + ' 病历尚未生成完成</p>' +
+                        '<p class="agent-hint">请稍后再试，或查看历史记录面板</p>'
+                    );
+                } else {
+                    state.emrRecord = data;
+                    state.currentRecordId = data.record_id;
+                    App.setState({
+                        emrRecord: data,
+                        currentRecordId: data.record_id
+                    });
+                    
+                    addMessage('success',
+                        '<p>' + App.icon('checkCircle', 14) + ' 病历已生成完成！</p>' +
+                        '<p class="agent-hint">请在主编辑区查看病历内容</p>'
+                    );
+                    
+                    App.updateTitlebar(state.visitId, true);
+                    App.updateStatusBar('病历生成完成', 'success');
+                    
+                    CacheModule.saveEMRCache(state.visitId, {
+                        emrRecord: data,
+                        versions: [],
+                        visitInfo: {}
+                    });
+                    
+                    App.emit('emrGenerated', { emrRecord: data });
+                    
+                    var processBtn = document.getElementById('agentProcess');
+                    if (processBtn) {
+                        processBtn.innerHTML = App.icon('refreshCw', 14) + ' 重新生成';
+                        processBtn.disabled = false;
+                    }
+                }
+            })
+            .catch(function(e) {
+                addMessage('error', '<p>检查状态失败: ' + e.message + '</p>');
+            });
+    }
+
     document.addEventListener('DOMContentLoaded', function() {
         initAgent();
     });
@@ -475,6 +660,7 @@ window.AgentModule = (function() {
     return {
         addMessage: addMessage,
         addStageMessage: addStageMessage,
-        updateLastMessage: updateLastMessage
+        updateLastMessage: updateLastMessage,
+        checkEMRStatus: checkEMRStatus
     };
 })();

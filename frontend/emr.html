@@ -60,12 +60,21 @@
                         <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
                     </svg>
                 </button>
+                <button class="activity-btn" data-panel="history" title="历史病历 (Ctrl+5)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <polyline points="12 6 12 12 16 14"></polyline>
+                    </svg>
+                </button>
             </div>
 
             <div id="sidebar">
                 <div id="sidebar-panel-agent" class="sidebar-panel active">
                     <div class="sidebar-header">
                         <h3>Agent 助手</h3>
+                        <button id="clearAgentBtn" class="sidebar-header-clear" title="清除对话">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14"/></svg>
+                        </button>
                     </div>
                     <div class="agent-messages" id="agentMessages">
                         <div class="agent-message system">
@@ -230,6 +239,16 @@
                         </div>
                     </div>
                 </div>
+
+                <div id="sidebar-panel-history" class="sidebar-panel">
+                    <div class="sidebar-header">
+                        <h3>历史病历</h3>
+                        <button id="refreshHistoryBtn" class="sidebar-header-refresh" title="刷新列表">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9a9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5m5 4a9 9 0 0 1-9 9a9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
+                        </button>
+                    </div>
+                    <div class="history-list" id="historyList"></div>
+                </div>
             </div>
 
             <div id="editor-area">
@@ -271,6 +290,10 @@
                             保存
                         </button>
                             <button id="cancelEdit" class="editor-btn" style="display: none;">取消</button>
+                            <button id="deleteVersion" class="editor-btn editor-btn-danger" title="删除当前版本">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                                删除
+                            </button>
                         </div>
                     </div>
 
@@ -371,9 +394,11 @@
     </div>
 
     <script src="/static/js/app.js"></script>
+    <script src="/static/js/cache.js"></script>
     <script src="/static/js/agent.js"></script>
     <script src="/static/js/editor.js"></script>
     <script src="/static/js/debug.js"></script>
     <script src="/static/js/config-sidebar.js"></script>
+    <script src="/static/js/history.js"></script>
 </body>
 </html>

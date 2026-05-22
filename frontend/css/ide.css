@@ -291,6 +291,25 @@ html, body {
     color: var(--ide-text);
 }
 
+.sidebar-header-clear {
+    background: none;
+    border: none;
+    color: var(--ide-text-secondary);
+    cursor: pointer;
+    font-size: 14px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    transition: all var(--ide-transition);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.sidebar-header-clear:hover {
+    background: var(--ide-btn-secondary);
+    color: var(--ide-error);
+}
+
 /* ================================================================
    Agent Panel
    ================================================================ */
@@ -1186,43 +1205,76 @@ html, body {
 }
 
 .field-item {
-    padding: 8px 12px;
+    padding: 10px 14px;
     background: var(--ide-soap-section-bg);
     border-radius: 6px;
     border: 1px solid var(--ide-border);
+    border-left: 3px solid var(--ide-soap-header);
 }
 
 .field-name {
-    font-size: 11px;
-    color: var(--ide-soap-header);
+    font-size: 12px;
+    color: #9cdcfe;
     font-weight: 600;
-    margin-bottom: 4px;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+    text-transform: uppercase;
 }
 
 .field-value {
-    font-size: 13px;
+    font-size: 14px;
     color: var(--ide-soap-text);
+    line-height: 1.6;
 }
 
 .evidence-traces {
-    margin-top: 8px;
-    padding: 8px 10px;
-    background: rgba(55, 148, 255, 0.08);
+    margin-top: 6px;
+    padding: 0;
+    background: rgba(55, 148, 255, 0.06);
     border-radius: 4px;
     border-left: 2px solid var(--ide-info);
 }
 
 .evidence-traces > strong {
-    display: block;
+    display: none;
+}
+
+.evidence-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     font-size: 11px;
+    color: var(--ide-text-muted);
+    background: transparent;
+    border: 1px solid var(--ide-border);
+    border-radius: 3px;
+    padding: 2px 8px;
+    cursor: pointer;
+    margin-top: 4px;
+    transition: all var(--ide-transition);
+}
+
+.evidence-toggle-btn:hover {
     color: var(--ide-info);
-    margin-bottom: 6px;
-    font-weight: 500;
+    border-color: var(--ide-info);
+}
+
+.evidence-traces.collapsed .evidence-final-value,
+.evidence-traces.collapsed ul {
+    display: none;
+}
+
+.evidence-traces.collapsed .evidence-toggle-btn::before {
+    content: '+ ';
+}
+
+.evidence-traces:not(.collapsed) .evidence-toggle-btn::before {
+    content: '− ';
 }
 
 .evidence-final-value {
-    padding: 4px 8px;
-    margin-bottom: 6px;
+    padding: 6px 10px;
+    margin: 6px 8px 4px 8px;
     background: var(--ide-input-bg);
     border-radius: 3px;
     font-size: 12px;
@@ -1232,22 +1284,35 @@ html, body {
 .evidence-traces ul {
     list-style: none;
     padding: 0;
-    margin: 0;
+    margin: 0 8px 6px 8px;
 }
 
 .evidence-traces .evidence-item {
-    padding: 6px 8px;
-    margin-bottom: 4px;
+    padding: 4px 8px;
+    margin-bottom: 3px;
     background: var(--ide-input-bg);
     border-radius: 3px;
     font-size: 11px;
+    border: none;
+    transition: none;
+}
+
+.evidence-traces .evidence-item:last-child {
+    margin-bottom: 0;
+}
+
+.evidence-traces .evidence-item:hover {
+    border-color: var(--ide-info);
+    box-shadow: none;
 }
 
 .evidence-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 4px;
+    margin-bottom: 2px;
+    padding-bottom: 2px;
+    border-bottom: 1px solid var(--ide-border);
 }
 
 .evidence-speaker {
@@ -1261,7 +1326,7 @@ html, body {
 }
 
 .evidence-speaker-correction {
-    font-size: 10px;
+    font-size: 9px;
     color: var(--ide-text-muted);
 }
 
@@ -1281,7 +1346,7 @@ html, body {
 .evidence-label {
     font-size: 10px;
     color: var(--ide-text-muted);
-    margin: 3px 0 2px 0;
+    margin: 2px 0 1px 0;
 }
 
 .empty {
@@ -1603,4 +1668,273 @@ html, body {
         border-right: none;
         border-bottom: 1px solid var(--ide-border);
     }
+}
+
+/* ================================================================
+   History Panel Styles
+   ================================================================ */
+
+.history-list {
+    padding: 8px;
+    overflow-y: auto;
+    flex: 1;
+}
+
+.history-loading {
+    text-align: center;
+    color: var(--ide-text-secondary);
+    padding: 20px;
+    font-size: 13px;
+}
+
+.history-empty {
+    text-align: center;
+    color: var(--ide-text-muted);
+    padding: 30px 20px;
+    font-size: 13px;
+}
+
+.history-item {
+    background: var(--ide-sidebar-bg);
+    border: 1px solid var(--ide-border);
+    border-radius: 6px;
+    padding: 12px;
+    margin-bottom: 8px;
+    transition: border-color var(--ide-transition);
+}
+
+.history-item:hover {
+    border-color: var(--ide-accent);
+}
+
+.history-item-current {
+    border-color: var(--ide-accent);
+    background: #1a3a5c;
+}
+
+.history-item-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.history-item-patient {
+    color: var(--ide-text);
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.history-current-badge {
+    color: var(--ide-accent);
+    font-size: 11px;
+    background: rgba(0, 122, 204, 0.15);
+    padding: 1px 6px;
+    border-radius: 3px;
+}
+
+.history-item-meta {
+    display: flex;
+    gap: 12px;
+    color: var(--ide-text-secondary);
+    font-size: 12px;
+    margin-bottom: 6px;
+}
+
+.history-item-preview {
+    color: var(--ide-text-muted);
+    font-size: 12px;
+    margin-bottom: 8px;
+    padding: 6px 8px;
+    background: var(--ide-editor-bg);
+    border-radius: 4px;
+    border-left: 2px solid var(--ide-border);
+    line-height: 1.5;
+    max-height: 48px;
+    overflow: hidden;
+}
+
+.history-item-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.history-btn-view {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    background: var(--ide-btn-secondary);
+    color: var(--ide-text);
+    border: none;
+    border-radius: 3px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background var(--ide-transition);
+}
+
+.history-btn-view:hover {
+    background: var(--ide-btn-secondary-hover);
+}
+
+.history-btn-delete {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    background: transparent;
+    color: var(--ide-error);
+    border: 1px solid var(--ide-error);
+    border-radius: 3px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all var(--ide-transition);
+}
+
+.history-btn-delete:hover {
+    background: var(--ide-error);
+    color: #fff;
+}
+
+/* ================================================================
+   Danger Button Styles
+   ================================================================ */
+
+.editor-btn-danger {
+    background: transparent;
+    color: var(--ide-error);
+    border: 1px solid var(--ide-error);
+}
+
+.editor-btn-danger:hover {
+    background: var(--ide-error);
+    color: #fff;
+}
+
+/* ================================================================
+   Sidebar Header Refresh Button
+   ================================================================ */
+
+.sidebar-header-refresh {
+    background: none;
+    border: none;
+    color: var(--ide-text-secondary);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all var(--ide-transition);
+}
+
+.sidebar-header-refresh:hover {
+    color: var(--ide-text);
+    background: var(--ide-btn-secondary);
+}
+
+/* ================================================================
+   Stage Progress Animation
+   ================================================================ */
+
+.stage-name {
+    font-weight: 500;
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.stage-name svg {
+    flex-shrink: 0;
+}
+
+.stage-detail {
+    font-size: 12px;
+    color: var(--ide-text-secondary);
+    margin-top: 4px;
+    padding-left: 20px;
+}
+
+.stage-progress {
+    height: 4px;
+    background: var(--ide-soap-section-bg);
+    border-radius: 2px;
+    margin-top: 8px;
+    overflow: hidden;
+}
+
+.stage-progress-bar {
+    height: 100%;
+    background: var(--ide-accent);
+    border-radius: 2px;
+    transition: width 0.3s ease;
+}
+
+.stage-progress-animated {
+    width: 60%;
+    animation: progress-pulse 1.5s ease-in-out infinite;
+    background: linear-gradient(90deg, var(--ide-accent) 0%, #4fc3f7 50%, var(--ide-accent) 100%);
+    background-size: 200% 100%;
+}
+
+@keyframes progress-pulse {
+    0% {
+        background-position: 200% 0;
+    }
+    100% {
+        background-position: -200% 0;
+    }
+}
+
+.icon-spin {
+    animation: icon-spin 1s linear infinite;
+}
+
+@keyframes icon-spin {
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* ================================================================
+   Warning Message Style
+   ================================================================ */
+
+.agent-message.warning {
+    background: rgba(204, 167, 0, 0.1);
+    border-left: 3px solid var(--ide-warning);
+}
+
+.agent-message.warning .agent-message-icon {
+    color: var(--ide-warning);
+}
+
+/* ================================================================
+   Check Status Button
+   ================================================================ */
+
+.check-status-btn {
+    background: var(--ide-btn-secondary);
+    border: 1px solid var(--ide-border);
+    color: var(--ide-text);
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: all var(--ide-transition);
+}
+
+.check-status-btn:hover {
+    background: var(--ide-btn-secondary-hover);
+}
+
+.check-status-btn svg {
+    flex-shrink: 0;
 }

@@ -72,7 +72,7 @@ MedicalAssisstant/
 │   │   ├── term.py            # 规范化术语模型（含UMLS编码）
 │   │   ├── extracted_item.py  # 抽取要素模型
 │   │   ├── emr_record.py      # 病历记录模型
-│   │   ├── atomic_fact.py     # 原子事实模型（阶段2核心中间表示）
+│   │   ├── atomic_fact.py     # 原子事实模型（阶段2核心中间表示，含subsection细粒度字段分类）
 │   │   └── evaluation_record.py # 评估记录模型
 │   ├── services/              # 业务服务
 │   │   ├── __init__.py
@@ -135,16 +135,24 @@ MedicalAssisstant/
 │       └── 病历生成流程性能优化计划.md # 性能优化计划文档
 ├── frontend/                   # 前端界面
 │   ├── css/
-│   │   └── style.css          # 样式文件
+│   │   ├── style.css          # 样式文件
+│   │   └── ide.css            # IDE布局样式（VS Code暗色主题）
 │   ├── js/
-│   │   ├── result.js          # 结果页面脚本
-│   │   ├── upload.js          # 上传页面脚本
-│   │   ├── emr.js             # 病历生成页面脚本
-│   │   ├── evaluation.js      # 病历质量评估页面脚本
-│   │   └── config.js          # LLM配置页面脚本
+│   │   ├── app.js             # IDE主控制器（全局状态、活动栏、事件总线）
+│   │   ├── cache.js           # localStorage 缓存管理（EMR数据持久化）
+│   │   ├── agent.js           # Agent助手面板（音频上传、转写、病历生成）
+│   │   ├── editor.js          # 病历编辑器面板（SOAP显示、编辑、版本管理、打印）
+│   │   ├── debug.js           # 调试面板（LLM多阶段调试）
+│   │   ├── config-sidebar.js  # LLM配置面板
+│   │   ├── history.js         # 历史病历面板（列表查看、删除）
+│   │   ├── config.js          # LLM配置页面脚本
+│   │   ├── evaluation.js      # 评估页面脚本
+│   │   ├── emr.js             # 旧病历页面脚本
+│   │   ├── result.js          # 转写结果页面脚本
+│   │   └── upload.js          # 旧上传页面脚本
+│   ├── emr.html               # IDE主界面（单页应用入口）
 │   ├── index.html             # 上传页面
-│   ├── result.html            # 结果展示页面
-│   ├── emr.html               # 病历生成页面
+│   ├── result.html            # 转写结果页面
 │   ├── evaluation.html        # 病历质量评估页面
 │   └── config.html            # LLM配置页面
 ├── output/                     # 输出目录
@@ -1025,7 +1033,10 @@ graph TB
 | /api/emr/process | POST | 处理就诊记录生成病历 | backend/api/emr.py |
 | /api/emr/status/{visit_id} | GET | 查询病历处理状态 | backend/api/emr.py |
 | /api/emr/record/{visit_id} | GET | 获取病历记录 | backend/api/emr.py |
+| /api/emr/record/{visit_id} | PUT | 更新病历记录 | backend/api/emr.py |
+| /api/emr/record/{visit_id} | DELETE | 删除病历记录（全部或指定版本） | backend/api/emr.py |
 | /api/emr/versions/{visit_id} | GET | 获取病历所有版本 | backend/api/emr.py |
+| /api/emr/visits | GET | 列出所有有EMR记录的就诊 | backend/api/emr.py |
 | / | GET | 首页（上传界面） | backend/main.py |
 | /health | GET | 健康检查 | backend/main.py |
 
@@ -1041,7 +1052,7 @@ graph TB
 | NormalizedTerm | normalized_terms | 规范化术语 | backend/models/term.py |
 | ExtractedItem | extracted_items | 抽取的病历要素 | backend/models/extracted_item.py |
 | EMRRecord | emr_records | 病历记录 | backend/models/emr_record.py |
-| AtomicFact | atomic_facts | 原子临床事实（阶段2输出，核心中间表示） | backend/models/atomic_fact.py |
+| AtomicFact | atomic_facts | 原子临床事实（阶段2输出，核心中间表示，含section_candidate粗分类和subsection细粒度字段分类） | backend/models/atomic_fact.py |
 | LLMConfig | llm_configs | LLM配置（含JSON模式、思考模式） | backend/models/llm_config.py |
 
 #### LLMConfig 字段说明

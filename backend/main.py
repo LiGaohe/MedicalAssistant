@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pathlib import Path
 
 from .config import settings
@@ -35,10 +35,7 @@ async def startup_event():
 
 @app.get("/")
 async def root():
-    index_path = Path(__file__).parent.parent / "frontend" / "index.html"
-    if index_path.exists():
-        return FileResponse(str(index_path))
-    return {"message": "中文门诊病历生成系统", "version": settings.APP_VERSION}
+    return RedirectResponse(url="/static/emr.html")
 
 
 @app.get("/health")

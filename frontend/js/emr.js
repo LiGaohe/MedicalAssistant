@@ -222,13 +222,14 @@ document.addEventListener('DOMContentLoaded', async function() {
             return;
         }
         
+        const fields = Object.keys(sectionData).filter(k => k !== 'text' && k !== 'evidence_traces');
+        
         let html = '';
         
-        if (sectionData.text !== undefined && sectionData.text !== null) {
+        if (sectionData.text !== undefined && sectionData.text !== null && fields.length === 0) {
             html += `<div class="section-text" data-field="${sectionName}.text">${sectionData.text || '暂无内容'}</div>`;
         }
         
-        const fields = Object.keys(sectionData).filter(k => k !== 'text' && k !== 'evidence_traces');
         if (fields.length > 0) {
             html += '<div class="section-fields">';
             fields.forEach(field => {
@@ -260,7 +261,7 @@ document.addEventListener('DOMContentLoaded', async function() {
         
         const fieldValue = fieldData.value || '';
         
-        let html = '<div class="evidence-traces"><strong>证据来源：</strong>';
+        let html = '<div class="evidence-traces collapsed"><strong>证据来源：</strong>';
         if (fieldValue) {
             html += `<div class="evidence-final-value"><strong>最终病历：</strong>${fieldValue}</div>`;
         }
@@ -298,7 +299,9 @@ document.addEventListener('DOMContentLoaded', async function() {
                 </li>
             `;
         });
-        html += '</ul></div>';
+        html += '</ul>';
+        html += `<button class="evidence-toggle-btn">证据来源 (${traces.length}条)</button>`;
+        html += '</div>';
         return html;
     }
     
@@ -574,6 +577,19 @@ document.addEventListener('DOMContentLoaded', async function() {
                     if (full) full.style.display = 'none';
                     this.textContent = '展开';
                     this.dataset.expanded = 'false';
+                }
+            });
+        });
+
+        document.querySelectorAll('.evidence-toggle-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const traces = this.parentElement;
+                const collapsed = traces.classList.toggle('collapsed');
+                const count = (traces.querySelectorAll('.evidence-item').length || 0);
+                if (collapsed) {
+                    this.textContent = `证据来源 (${count}条)`;
+                } else {
+                    this.textContent = `收起 证据来源 (${count}条)`;
                 }
             });
         });

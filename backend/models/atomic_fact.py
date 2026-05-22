@@ -11,6 +11,7 @@ class AtomicFact(Base):
     fact_id = Column(String, primary_key=True, index=True)
     visit_id = Column(String, ForeignKey("visits.visit_id"), nullable=False)
     section_candidate = Column(String, nullable=False)
+    subsection = Column(String, nullable=True)
     concept_type = Column(String, nullable=False)
     mention = Column(Text, nullable=False)
     normalized_term = Column(String, nullable=True)

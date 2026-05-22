@@ -37,6 +37,11 @@ window.EditorModule = (function() {
             cancelBtn.addEventListener('click', function() { exitEditMode(); });
         }
 
+        var deleteBtn = document.getElementById('deleteVersion');
+        if (deleteBtn) {
+            deleteBtn.addEventListener('click', function() { deleteCurrentVersion(); });
+        }
+
         if (toggleEvidenceBtn) {
             toggleEvidenceBtn.addEventListener('click', function() {
                 if (evidenceVisible) {
@@ -124,6 +129,12 @@ window.EditorModule = (function() {
             displayEMR(result);
             App.updateStatusBarInfo({ version: version });
             await loadEvidenceData(visitId);
+
+            CacheModule.saveEMRCache(visitId, {
+                emrRecord: result,
+                versions: [],
+                visitInfo: {}
+            });
         } catch (error) {
             console.error('加载病历失败:', error);
         }
@@ -156,16 +167,17 @@ window.EditorModule = (function() {
             return;
         }
 
+        var fields = Object.keys(sectionData).filter(function(k) {
+            return k !== 'text' && k !== 'evidence_traces';
+        });
+
         var html = '';
 
-        if (sectionData.text !== undefined && sectionData.text !== null) {
+        if (sectionData.text !== undefined && sectionData.text !== null && fields.length === 0) {
             html += '<div class="section-text" data-field="' + sectionName + '.text">' +
                 (sectionData.text || '暂无内容') + '</div>';
         }
 
-        var fields = Object.keys(sectionData).filter(function(k) {
-            return k !== 'text' && k !== 'evidence_traces';
-        });
         if (fields.length > 0) {
             html += '<div class="section-fields">';
             fields.forEach(function(field) {
@@ -190,7 +202,7 @@ window.EditorModule = (function() {
         if (traces.length === 0) return '';
 
         var fieldValue = fieldData.value || '';
-        var html = '<div class="evidence-traces"><strong>证据来源</strong>';
+        var html = '<div class="evidence-traces collapsed"><strong>证据来源</strong>';
         if (fieldValue) {
             html += '<div class="evidence-final-value"><strong>最终病历</strong>' +
                 App.escapeHtml(fieldValue) + '</div>';
@@ -225,7 +237,9 @@ window.EditorModule = (function() {
             }
             html += '</div></li>';
         });
-        html += '</ul></div>';
+        html += '</ul>';
+        html += '<button class="evidence-toggle-btn">证据来源 (' + traces.length + '条)</button>';
+        html += '</div>';
         return html;
     }
 
@@ -332,11 +346,71 @@ window.EditorModule = (function() {
                 exitEditMode();
                 await loadEMRVersions(state.visitId);
                 App.updateStatusBar('病历已保存', 'success');
+
+                if (currentEMRRecord) {
+                    currentEMRRecord.emr_json = updatedEMR;
+                    currentEMRRecord.version = result.version;
+                    CacheModule.saveEMRCache(state.visitId, {
+                        emrRecord: currentEMRRecord,
+                        versions: [],
+                        visitInfo: {}
+                    });
+                }
             } else {
                 throw new Error(result.message || '保存失败');
             }
         } catch (error) {
             alert('保存失败: ' + error.message);
+        }
+    }
+
+    async function deleteCurrentVersion() {
+        if (!state.visitId) {
+            alert('请先加载病历');
+            return;
+        }
+
+        var select = document.getElementById('versionSelect');
+        var currentVersion = select ? select.value : null;
+
+        if (!currentVersion) {
+            alert('没有当前版本可以删除');
+            return;
+        }
+
+        var message = '确定要删除版本 ' + currentVersion + ' 吗？此操作不可撤销。';
+        var versionCount = select ? select.options.length : 0;
+        if (versionCount <= 1) {
+            message = '这是唯一的版本，删除后将丢失所有病历数据。确定删除吗？';
+        }
+
+        if (!confirm(message)) return;
+
+        try {
+            var response = await fetch('/api/emr/record/' + state.visitId + '?version=' + currentVersion, {
+                method: 'DELETE'
+            });
+            var result = await response.json();
+
+            if (result.status === 'success') {
+                App.updateStatusBar('已删除版本 ' + currentVersion);
+                CacheModule.removeEMRCache(state.visitId);
+                App.emit('emrDeleted', { visitId: state.visitId });
+
+                await loadEMRVersions(state.visitId);
+                var newSelect = document.getElementById('versionSelect');
+                if (!newSelect || newSelect.options.length === 0) {
+                    state.emrRecord = null;
+                    state.currentRecordId = null;
+                    App.setState({ emrRecord: null, currentRecordId: null });
+                    App.showEditorWelcome();
+                    App.updateTitlebar(state.visitId, false);
+                }
+            } else {
+                alert('删除失败，请重试');
+            }
+        } catch (e) {
+            alert('删除失败: ' + e.message);
         }
     }
 
@@ -484,6 +558,21 @@ window.EditorModule = (function() {
                 }
             });
         });
+
+        document.querySelectorAll('.evidence-toggle-btn').forEach(function(btn) {
+            if (btn.dataset.bound) return;
+            btn.dataset.bound = 'true';
+            btn.addEventListener('click', function() {
+                var traces = this.parentElement;
+                var collapsed = traces.classList.toggle('collapsed');
+                var count = (traces.querySelectorAll('.evidence-item').length || 0);
+                if (collapsed) {
+                    this.textContent = '证据来源 (' + count + '条)';
+                } else {
+                    this.textContent = '收起 证据来源 (' + count + '条)';
+                }
+            });
+        });
     }
 
     document.addEventListener('DOMContentLoaded', function() {
@@ -492,6 +581,7 @@ window.EditorModule = (function() {
 
     return {
         displayEMR: displayEMR,
-        loadEMRVersions: loadEMRVersions
+        loadEMRVersions: loadEMRVersions,
+        deleteCurrentVersion: deleteCurrentVersion
     };
 })();

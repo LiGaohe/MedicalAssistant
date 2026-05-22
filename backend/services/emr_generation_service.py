@@ -512,3 +512,87 @@ class EMRGenerationService:
         return self.db.query(EMRRecord).filter(
             EMRRecord.visit_id == visit_id
         ).order_by(EMRRecord.version).all()
+
+    def delete_emr_by_version(self, visit_id: str, version: int) -> int:
+        logger.info(f"删除病历版本: visit_id={visit_id}, version={version}")
+        record = self.db.query(EMRRecord).filter(
+            EMRRecord.visit_id == visit_id,
+            EMRRecord.version == version
+        ).first()
+
+        if not record:
+            logger.warning(f"病历版本不存在: visit_id={visit_id}, version={version}")
+            return 0
+
+        self.db.delete(record)
+        self.db.commit()
+        logger.info(f"病历版本已删除: record_id={record.record_id}")
+        return 1
+
+    def delete_all_emr(self, visit_id: str) -> int:
+        logger.info(f"删除所有病历: visit_id={visit_id}")
+        count = self.db.query(EMRRecord).filter(
+            EMRRecord.visit_id == visit_id
+        ).count()
+
+        if count == 0:
+            logger.warning(f"没有病历记录: visit_id={visit_id}")
+            return 0
+
+        self.db.query(EMRRecord).filter(
+            EMRRecord.visit_id == visit_id
+        ).delete()
+        self.db.commit()
+        logger.info(f"已删除 {count} 条病历记录")
+        return count
+
+    def get_all_visits_with_emr(self) -> list:
+        from ..models import Visit
+        logger.info("查询所有有EMR记录的就诊")
+
+        visits_with_emr = self.db.query(Visit).filter(
+            Visit.emr_records.any()
+        ).order_by(Visit.created_at.desc()).all()
+
+        result = []
+        for visit in visits_with_emr:
+            emr_records = self.db.query(EMRRecord).filter(
+                EMRRecord.visit_id == visit.visit_id
+            ).order_by(EMRRecord.version.desc()).all()
+
+            versions = []
+            latest_preview = None
+            for emr in emr_records:
+                versions.append({
+                    "version": emr.version,
+                    "record_type": emr.record_type,
+                    "created_at": emr.created_at.isoformat() if emr.created_at else None
+                })
+                if latest_preview is None:
+                    emr_json = emr.emr_json or {}
+                    preview_parts = []
+                    for section_key, section_label in [
+                        ("subjective", "主诉"),
+                        ("assessment", "诊断"),
+                        ("plan", "方案")
+                    ]:
+                        section = emr_json.get(section_key, {})
+                        text = section.get("text", "") if isinstance(section, dict) else ""
+                        if text:
+                            preview = text[:50] + "..." if len(text) > 50 else text
+                            preview_parts.append(f"{section_label}: {preview}")
+                    latest_preview = "；".join(preview_parts) if preview_parts else "(空病历)"
+
+            result.append({
+                "visit_id": visit.visit_id,
+                "patient_name": visit.patient_name,
+                "visit_date": visit.visit_date,
+                "language": visit.language,
+                "versions": versions,
+                "latest_version": versions[0]["version"] if versions else None,
+                "latest_preview": latest_preview,
+                "version_count": len(versions)
+            })
+
+        logger.info(f"查询到 {len(result)} 个有EMR的就诊")
+        return result

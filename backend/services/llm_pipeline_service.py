@@ -399,6 +399,177 @@ class LLMPipelineService:
             "processing_time": total_time
         }
     
+    def process_with_callback(
+        self,
+        visit_id: str,
+        progress_callback=None,
+        save_evidence: bool = True
+    ):
+        """
+        带进度回调的处理方法，用于SSE实时推送进度。
+        
+        Args:
+            visit_id: 就诊ID
+            progress_callback: 进度回调函数，签名为 callback(stage_num, stage_name, status, detail, extra)
+            save_evidence: 是否保存证据
+        
+        Yields:
+            进度事件字典 {"stage": int, "name": str, "status": str, "detail": str, "extra": dict}
+        """
+        def emit_progress(stage_num, stage_name, status, detail="", extra=None):
+            event = {
+                "stage": stage_num,
+                "name": stage_name,
+                "status": status,
+                "detail": detail
+            }
+            if extra:
+                event["extra"] = extra
+            if progress_callback:
+                progress_callback(event)
+            return event
+        
+        logger.info(f"=== 开始多阶段LLM处理(带回调): {visit_id} ===")
+        start_time = time.time()
+        
+        turns = self.db.query(TranscriptTurn).filter(
+            TranscriptTurn.visit_id == visit_id
+        ).order_by(TranscriptTurn.turn_index).all()
+        
+        if not turns:
+            logger.warning("没有找到对话轮次")
+            yield emit_progress(0, "初始化", "failed", "没有找到对话轮次")
+            return
+        
+        segments = self._segment_turns(turns)
+        logger.info(f"对话分为 {len(segments)} 个段落")
+        
+        yield emit_progress(1, "转写清洗与角色纠错", "running", f"正在处理 {len(segments)} 个段落...")
+        
+        segment_start = time.time()
+        all_role_mappings, all_cleaned_turns = self._process_segments_parallel(segments)
+        logger.info(f"段落处理完成，耗时: {time.time() - segment_start:.2f}秒")
+        
+        combined_text = self._build_text_from_cleaned_turns(all_cleaned_turns, turns)
+        logger.info(f"合并后的清洗文本长度: {len(combined_text)} 字符")
+        
+        yield emit_progress(1, "转写清洗与角色纠错", "completed", 
+                           f"完成，清洗 {len(all_cleaned_turns)} 个轮次，耗时 {time.time() - segment_start:.2f}秒")
+        
+        time.sleep(self.STAGE_DELAY)
+        
+        fact_start = time.time()
+        yield emit_progress(2, "事实抽取与证据绑定", "running", "正在抽取临床事实...")
+        
+        fact_result = self._fact_extraction_stage(all_cleaned_turns, all_role_mappings, visit_id)
+        logger.info(f"事实抽取阶段完成，共 {fact_result.get('fact_count', 0)} 条事实，耗时: {time.time() - fact_start:.2f}秒")
+        
+        yield emit_progress(2, "事实抽取与证据绑定", "completed", 
+                           f"抽取 {fact_result.get('fact_count', 0)} 条原子事实")
+        
+        time.sleep(self.STAGE_DELAY)
+        
+        fact_service = FactService(self.db)
+        fact_records = fact_service.get_facts_by_visit(visit_id)
+        
+        consolidation_start = time.time()
+        yield emit_progress(2.5, "事实收束", "running", "正在合并重复事实...")
+        
+        consolidation_result = self._fact_consolidation_stage(fact_records, visit_id)
+        logger.info(f"事实收束阶段完成，耗时: {time.time() - consolidation_start:.2f}秒")
+        
+        resolved_count = consolidation_result.get("resolved_count", 0) if consolidation_result else 0
+        yield emit_progress(2.5, "事实收束", "completed", 
+                           f"合并 {resolved_count} 条重复事实")
+        
+        time.sleep(self.STAGE_DELAY)
+        
+        normalize_start = time.time()
+        fact_records = fact_service.get_facts_by_visit(visit_id)
+        logger.info(f"从数据库查询到 {len(fact_records)} 条原子事实用于阶段3规范化")
+        
+        qualifying_count = len([f for f in fact_records if f.normalization_needed and f.mention])
+        yield emit_progress(3, "选择性术语规范化", "running", 
+                           f"正在规范化 {qualifying_count} 个术语...")
+        
+        normalized_result = self._normalize_terms_stage(fact_records, all_role_mappings, visit_id, save_evidence)
+        logger.info(f"术语规范化阶段完成，耗时: {time.time() - normalize_start:.2f}秒")
+        
+        yield emit_progress(3, "选择性术语规范化", "completed", 
+                           f"规范化 {normalized_result.get('processed_count', 0)} 个术语")
+        
+        time.sleep(self.STAGE_DELAY)
+        
+        extraction_result = fact_result
+        
+        emr_start = time.time()
+        yield emit_progress(4, "分节生成SOAP病历", "running", "正在生成主观和客观部分...")
+        
+        so_result = self._generate_so_stage(fact_records, all_role_mappings)
+        
+        yield emit_progress(4, "分节生成SOAP病历", "running", "正在生成评估和计划部分...")
+        
+        ap_result = self._generate_ap_stage(so_result, fact_records, all_role_mappings)
+        
+        emr_draft = {
+            "subjective": so_result.get("subjective", {}),
+            "objective": so_result.get("objective", {}),
+            "assessment": ap_result.get("assessment", {}),
+            "plan": ap_result.get("plan", {}),
+            "so_used_fact_ids": so_result.get("used_fact_ids", []),
+            "assessment_items": ap_result.get("assessment_items", []),
+            "plan_items": ap_result.get("plan_items", {})
+        }
+        so_used_fact_ids = emr_draft.get("so_used_fact_ids", [])
+        assessment_items = emr_draft.get("assessment_items", [])
+        plan_items = emr_draft.get("plan_items", {})
+        logger.info(f"病历生成阶段完成（SO/AP分节），S/O使用fact数={len(so_used_fact_ids)}, 评估项数={len(assessment_items)}, 耗时: {time.time() - emr_start:.2f}秒")
+        
+        yield emit_progress(4, "分节生成SOAP病历", "completed", 
+                           f"生成完成，S/O使用 {len(so_used_fact_ids)} 条事实")
+        
+        time.sleep(self.STAGE_DELAY)
+        
+        verify_start = time.time()
+        yield emit_progress(5, "核查与修订", "running", "正在核查病历完整性...")
+        
+        fact_records = fact_service.get_facts_by_visit(visit_id)
+        verification_result = self._verification_stage(emr_draft, fact_records, all_role_mappings)
+        logger.info(f"核查修订阶段完成，耗时: {time.time() - verify_start:.2f}秒")
+        
+        emr_final = verification_result.get("soap_final", emr_draft)
+        emr_final["so_used_fact_ids"] = so_used_fact_ids
+        emr_final["assessment_items"] = assessment_items
+        emr_final["plan_items"] = plan_items
+        
+        emr_final = self._normalize_emr_format(emr_final)
+        emr_final = self._enrich_evidence_traces(emr_final, fact_records, turns)
+        if save_evidence and visit_id:
+            self._save_evidence_spans_from_emr(emr_final, visit_id)
+            self._save_emr_record(emr_final, visit_id)
+            logger.info(f"已保存最终病历记录及证据溯源到数据库: visit_id={visit_id}")
+        
+        yield emit_progress(5, "核查与修订", "completed", "核查完成")
+        
+        total_time = time.time() - start_time
+        logger.info(f"=== 多阶段LLM处理完成(带回调): {visit_id}, 总耗时: {total_time:.2f}秒 ===")
+        
+        result = {
+            "status": "completed",
+            "role_mapping": all_role_mappings,
+            "cleaned_turns": all_cleaned_turns,
+            "combined_text": combined_text,
+            "fact_result": fact_result,
+            "normalized_result": normalized_result,
+            "extraction_result": extraction_result,
+            "emr_result": emr_final,
+            "emr_draft": emr_draft,
+            "verification_result": verification_result,
+            "processing_time": total_time
+        }
+        
+        yield emit_progress(0, "完成", "completed", f"病历生成完成，总耗时 {total_time:.2f}秒", {"result": result})
+    
     def _run_evaluation(self, dialogue_text: str, emr_result: Dict[str, Any]):
         """运行评估并输出结果到日志"""
         try:
@@ -977,6 +1148,7 @@ class LLMPipelineService:
                         "fact_id": fact.fact_id,
                         "mention": fact.mention,
                         "section_candidate": fact.section_candidate,
+                        "subsection": fact.subsection,
                         "speaker": fact.speaker,
                         "evidence_turn_ids": fact.evidence_turn_ids or []
                     })
@@ -1139,6 +1311,7 @@ class LLMPipelineService:
                     fact_id=fact_id,
                     visit_id=visit_id,
                     section_candidate=fact_data.get("section_candidate", ""),
+                    subsection=fact_data.get("subsection", None),
                     concept_type=fact_data.get("concept_type", "other"),
                     mention=fact_data.get("mention", ""),
                     polarity=fact_data.get("polarity", "present"),
@@ -1716,8 +1889,8 @@ class LLMPipelineService:
                 return {"merged_count": 0, "conflict_count": 0, "resolved_count": 0, "final_fact_count": len(fact_records)}
             
             try:
-                response = self.llm_service.generate(prompt, timeout=300.0)
-                logger.debug("事实收束阶段: thinking模式已启用（复杂推理）")
+                response = self.llm_service.generate(prompt, timeout=300.0, thinking_enabled=False)
+                logger.debug("事实收束阶段: thinking模式已禁用")
                 response_text = response.text
             except Exception as e:
                 logger.error(f"事实收束LLM调用失败: {e}")
@@ -2843,22 +3016,117 @@ class LLMPipelineService:
                 elif fact.section_candidate == "O":
                     o_fact_ids.add(fid)
 
-        s_evidence_traces = self._build_evidence_traces_from_fact_ids(
-            s_fact_ids, fact_by_id, turn_by_index
-        )
-        o_evidence_traces = self._build_evidence_traces_from_fact_ids(
-            o_fact_ids, fact_by_id, turn_by_index
-        )
+        s_has_subsection = any(
+            fact_by_id.get(fid).subsection
+            for fid in s_fact_ids
+            if fact_by_id.get(fid)
+        ) if s_fact_ids else False
+        o_has_subsection = any(
+            fact_by_id.get(fid).subsection
+            for fid in o_fact_ids
+            if fact_by_id.get(fid)
+        ) if o_fact_ids else False
 
+        llm_s_field_fact_ids = {}
+        s_field_names = [
+            "chief_complaint", "history_present_illness",
+            "past_history", "denied_symptoms"
+        ]
         subject_section = dict(emr_result.get("subjective", {}))
-        for field in ["chief_complaint", "history_present_illness", "past_history", "denied_symptoms"]:
-            if field in subject_section and isinstance(subject_section[field], dict):
-                subject_section[field]["evidence_traces"] = s_evidence_traces
+        for field in s_field_names:
+            field_data = subject_section.get(field)
+            if isinstance(field_data, dict):
+                traces = field_data.get("evidence_traces", [])
+                if isinstance(traces, list) and traces:
+                    fids = set()
+                    for t in traces:
+                        if isinstance(t, str):
+                            fids.add(t)
+                        elif isinstance(t, dict):
+                            fids.add(t.get("fact_id", ""))
+                    if fids:
+                        llm_s_field_fact_ids[field] = fids
 
+        if llm_s_field_fact_ids:
+            logger.info(
+                f"使用LLM SO阶段的per-field证据分配: "
+                f"{dict((k, len(v)) for k, v in llm_s_field_fact_ids.items())}"
+            )
+            for field in s_field_names:
+                if field in subject_section and isinstance(subject_section[field], dict):
+                    field_fids = llm_s_field_fact_ids.get(field, set())
+                    subject_section[field]["evidence_traces"] = self._build_evidence_traces_from_fact_ids(
+                        field_fids, fact_by_id, turn_by_index
+                    )
+        elif s_has_subsection:
+            s_field_fact_ids = {}
+            for fid in s_fact_ids:
+                fact = fact_by_id.get(fid)
+                if fact and fact.subsection:
+                    s_field_fact_ids.setdefault(fact.subsection, set()).add(fid)
+
+            for field in s_field_names:
+                if field in subject_section and isinstance(subject_section[field], dict):
+                    field_fids = s_field_fact_ids.get(field, set())
+                    subject_section[field]["evidence_traces"] = self._build_evidence_traces_from_fact_ids(
+                        field_fids, fact_by_id, turn_by_index
+                    )
+        else:
+            s_evidence_traces = self._build_evidence_traces_from_fact_ids(
+                s_fact_ids, fact_by_id, turn_by_index
+            )
+            for field in s_field_names:
+                if field in subject_section and isinstance(subject_section[field], dict):
+                    subject_section[field]["evidence_traces"] = s_evidence_traces
+
+        llm_o_field_fact_ids = {}
+        o_field_names = ["physical_examination", "auxiliary_examination"]
         objective_section = dict(emr_result.get("objective", {}))
-        for field in ["physical_examination", "auxiliary_examination"]:
-            if field in objective_section and isinstance(objective_section[field], dict):
-                objective_section[field]["evidence_traces"] = o_evidence_traces
+        for field in o_field_names:
+            field_data = objective_section.get(field)
+            if isinstance(field_data, dict):
+                traces = field_data.get("evidence_traces", [])
+                if isinstance(traces, list) and traces:
+                    fids = set()
+                    for t in traces:
+                        if isinstance(t, str):
+                            fids.add(t)
+                        elif isinstance(t, dict):
+                            fids.add(t.get("fact_id", ""))
+                    if fids:
+                        llm_o_field_fact_ids[field] = fids
+
+        if llm_o_field_fact_ids:
+            logger.info(
+                f"使用LLM SO阶段的per-field证据分配: "
+                f"{dict((k, len(v)) for k, v in llm_o_field_fact_ids.items())}"
+            )
+            for field in o_field_names:
+                if field in objective_section and isinstance(objective_section[field], dict):
+                    field_fids = llm_o_field_fact_ids.get(field, set())
+                    objective_section[field]["evidence_traces"] = self._build_evidence_traces_from_fact_ids(
+                        field_fids, fact_by_id, turn_by_index
+                    )
+        elif o_has_subsection:
+            o_field_fact_ids = {}
+            for fid in o_fact_ids:
+                fact = fact_by_id.get(fid)
+                if fact and fact.subsection:
+                    o_field_fact_ids.setdefault(fact.subsection, set()).add(fid)
+
+            for field in o_field_names:
+                if field in objective_section and isinstance(objective_section[field], dict):
+                    field_fids = o_field_fact_ids.get(field, set())
+                    objective_section[field]["evidence_traces"] = self._build_evidence_traces_from_fact_ids(
+                        field_fids, fact_by_id, turn_by_index
+                    )
+        else:
+            o_evidence_traces = self._build_evidence_traces_from_fact_ids(
+                o_fact_ids, fact_by_id, turn_by_index
+            )
+            for field in o_field_names:
+                if field in objective_section and isinstance(objective_section[field], dict):
+                    objective_section[field]["evidence_traces"] = o_evidence_traces
 
         diagnosis_fact_ids = set()
         for item in assessment_items:
@@ -2908,15 +3176,24 @@ class LLMPipelineService:
         emr_result["assessment"] = assessment_section
         emr_result["plan"] = plan_section
 
+        s_total = sum(
+            len(traces) for field_data in subject_section.values()
+            if isinstance(field_data, dict)
+            for traces in [field_data.get("evidence_traces", [])]
+        )
+        o_total = sum(
+            len(traces) for field_data in objective_section.values()
+            if isinstance(field_data, dict)
+            for traces in [field_data.get("evidence_traces", [])]
+        )
         total_traces = (
-            len(s_evidence_traces)
-            + len(o_evidence_traces)
+            s_total + o_total
             + len(a_evidence_traces)
             + len(t_evidence_traces)
             + len(adv_evidence_traces)
         )
         logger.info(
-            f"证据溯源富化完成: S={len(s_evidence_traces)}, O={len(o_evidence_traces)}, "
+            f"证据溯源富化完成: S={s_total}, O={o_total}, "
             f"A={len(a_evidence_traces)}, P_T={len(t_evidence_traces)}, P_Adv={len(adv_evidence_traces)}, "
             f"总计={total_traces}, 耗时={time.time() - enrichment_start:.2f}秒"
         )
