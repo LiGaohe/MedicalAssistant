@@ -72,8 +72,8 @@ source med_env/Scripts/activate
 source med_env/bin/activate
 # 关闭端口8000的进程
 # Windows:
-netstat -ano | findstr 8000 # 查找端口8000的进程id
-powershell -Command "Stop-Process -Id <process_id> -Force"
+netstat -ano | findstr 8000 # 查找端口8000的进程id，例如：22384
+powershell -Command "Stop-Process -Id 22384 -Force"
 # 如果还清理不掉
 taskkill /F /PID 22384
 # 或

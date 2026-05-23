@@ -1,5 +1,103 @@
 # 完成状态记录
 
+## 2026-05-23 LLMPipelineService 完整重构 —— SOLID 原则拆分
+
+### 变更说明
+
+将 4471 行的 God Class `LLMPipelineService` 按 SOLID 原则（单一职责、开闭原则）拆分为 15 个独立模块。
+
+- `LLMPipelineService` 变为 38 行**向后兼容包装类**，全部逻辑委托给 `PipelineOrchestrator`
+- 外部 API（`api/emr.py`、`llm_pipeline_service_en.py`、`services/__init__.py`）**零修改**
+
+### 重构前后对比
+
+| 指标 | 重构前 | 重构后 |
+|------|--------|--------|
+| 文件数 | 1 | 15 (1 包装 + 1 编排 + 7 基础设施 + 6 Stage) |
+| 核心类行数 | 4471 | 38 (包装) + 531 (编排) |
+| 净删除行数 | — | ~3900 |
+| 类中方法数 | 80+ | 12 (编排) + 4 (包装) |
+| SOLID 合规 | SRP 违反（God Class） | SRP/OCP 合规 |
+
+### 新增模块清单
+
+`backend/services/pipeline/` 目录新增 14 个文件：
+
+| 目录 | 文件 | 职责 |
+|------|------|------|
+| `pipeline/` | `__init__.py` | 模块入口 |
+| `pipeline/` | `base.py` | `PipelineContext` 数据传递对象 + `PipelineStage` 抽象接口 |
+| `pipeline/` | `utils.py` | JSON 解析工具函数 |
+| `pipeline/` | `speaker_handler.py` | 说话人角色处理 |
+| `pipeline/` | `debug_interactor.py` | Debug 交互器 |
+| `pipeline/` | `evidence_enricher.py` | 证据溯源富化器 |
+| `pipeline/` | `emr_persistence.py` | EMR 持久化服务 |
+| `pipeline/` | `interactive.py` | 交互式分步处理服务 |
+| `pipeline/` | `orchestrator.py` | Pipeline 编排器（核心） |
+| `pipeline/stages/` | `__init__.py` | Stages 子模块入口 |
+| `pipeline/stages/` | `turn_cleaning.py` | 阶段1: 转写清洗与角色纠错 |
+| `pipeline/stages/` | `fact_extraction.py` | 阶段2: 事实抽取与证据绑定 |
+| `pipeline/stages/` | `fact_consolidation.py` | 阶段2.5: 事实收束 |
+| `pipeline/stages/` | `term_normalization.py` | 阶段3: 选择性术语规范化 |
+| `pipeline/stages/` | `soap_generation.py` | 阶段4: 分节生成 SOAP 病历 |
+| `pipeline/stages/` | `verification.py` | 阶段5: 核查与修订 |
+
+### 设计模式
+
+| 模式 | 实现 | 说明 |
+|------|------|------|
+| Pipeline 模式 | `PipelineStage` 抽象接口 | `execute(ctx: PipelineContext) -> Dict` 统一入口，6 个阶段可独立测试和替换 |
+| Context 对象 | `PipelineContext` dataclass | 各阶段间数据传递，避免阶段间直接耦合 |
+| 向后兼容包装 | `LLMPipelineService` 包装类 | 所有公共方法委托给 `PipelineOrchestrator`，外部调用方零修改 |
+| 依赖注入 | `InteractivePipelineService` | 依赖从 `LLMPipelineService` 改为 `PipelineOrchestrator` |
+
+### 删除内容
+
+- 23 个 DEPRECATED 方法（~1090 行）：`_run_evaluation`, `_build_role_annotation_prompt`, `_parse_role_annotation_response`, `_extract_evidence_traces`, `_fallback_match_turns`, `_normalize_terms_stage_legacy`, `_normalize_terms_serial`, `_normalize_terms_parallel`, `_build_normalization_prompt`, `_parse_normalization_response`, `_extract_fields_stage`, `_build_extraction_prompt`, `_parse_extraction_response`, `_attach_evidence_traces`, `_fallback_extraction`, `_generate_emr_stage`, `_build_emr_generation_prompt`, `_parse_emr_response`, `_attach_evidence_to_emr`, `_legacy_role_annotation_stage`, `_legacy_term_normalization_stage`, `_legacy_field_extraction_stage`, `_legacy_emr_generation_stage`
+- 6 个死代码方法（已复制到 Stage 类）
+
+### 修改文件
+
+1. `backend/services/llm_pipeline_service.py` — 重写为 38 行包装类
+2. `backend/services/pipeline/orchestrator.py` — 新建，531 行核心编排逻辑
+3. `backend/services/pipeline/interactive.py` — 依赖注入从 `LLMPipelineService` 改为 `PipelineOrchestrator`（22 处 `self.lsp.` → `self.orchestrator.`），删除 4 个 `_legacy_*` 路由
+
+### 未修改文件（外部兼容）
+
+- `backend/api/emr.py` — 导入 `LLMPipelineService` 路径不变
+- `backend/services/__init__.py` — 导出路径不变
+- `backend/services/llm_pipeline_service_en.py` — 导入路径不变
+
+### 架构图
+
+详见 `docs/architecture.md` 中新增的 "Pipeline 模块架构" 章节。
+
+---
+
+## 2026-05-22 LLMPipelineService 重构 Step 6 —— 提取交互式阶段处理到 InteractivePipelineService
+
+### 变更说明
+
+将 `LLMPipelineService` 中的交互式/手动分步处理方法 (`process_stage_with_user_input` 和 `_build_compact_turns`) 提取到独立的 `InteractivePipelineService` 类中，放置于 `pipeline/interactive.py`。LLM Pilepine Service 保留 `process_stage_with_user_input` 作为向后兼容的委托方法。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 创建 `pipeline/interactive.py` | ✅ 完成 | 新建 `InteractivePipelineService` 类，接收 `LLMPipelineService` 实例作为依赖 |
+| 提取 `process_stage` 方法 | ✅ 完成 | 将原 LSP 中的分步处理逻辑（turn_cleaning/fact_extraction/emr_generation_so/assessment/plan/verification + 4个legacy阶段路由）完整迁移 |
+| 提取 `_build_compact_turns` | ✅ 完成 | 作为静态方法移至 `InteractivePipelineService` |
+| LSP 委托 | ✅ 完成 | LSP 的 `process_stage_with_user_input` 委托给 `self.interactive_service.process_stage()` |
+| `_build_compact_turns` 从 LSP 移除 | ✅ 完成 | 删除 LSP 中的旧方法，无残留引用 |
+| `_legacy_*` 方法保留 | ✅ 完成 | 4个 `_legacy_*` 方法保留在 LSP 中，通过 `self.lsp._legacy_*` 调用 |
+
+### 修改文件
+
+1. `backend/services/pipeline/interactive.py` — 新建，包含 `InteractivePipelineService` 类
+2. `backend/services/llm_pipeline_service.py` — 新增 `InteractivePipelineService` 导入；`__init__` 中实例化 `self.interactive_service`；`process_stage_with_user_input` 方法体替换为委托调用；删除 `_build_compact_turns` 方法
+
+---
+
 ## 2026-05-22 修复证据溯源字段级分配 —— 以LLM SO阶段输出为准
 
 ### 变更说明

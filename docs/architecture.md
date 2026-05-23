@@ -108,6 +108,24 @@ MedicalAssisstant/
 │   │   │   ├── safety.py       # 安全风险评估服务
 │   │   │   └── evaluation_pipeline.py # 评估流水线
 │   │   └── validation_service.py # 病历验证服务（规则验证）
+│   │   ├── pipeline/            # LLM流水线子模块（SOLID重构后 16 个文件）
+│   │   │   ├── __init__.py
+│   │   │   ├── base.py            # PipelineContext 数据传递对象 + PipelineStage 抽象接口
+│   │   │   ├── orchestrator.py    # PipelineOrchestrator 核心编排器（531行）
+│   │   │   ├── utils.py           # JSON解析工具函数
+│   │   │   ├── speaker_handler.py # 说话人角色处理
+│   │   │   ├── debug_interactor.py # Debug交互器
+│   │   │   ├── evidence_enricher.py # 证据溯源富化器
+│   │   │   ├── emr_persistence.py # EMR持久化服务
+│   │   │   ├── interactive.py     # 交互式分步处理服务
+│   │   │   ├── stages/            # Pipeline阶段实现（PipelineStage子类）
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── turn_cleaning.py    # 阶段1: 转写清洗与角色纠错
+│   │   │   │   ├── fact_extraction.py  # 阶段2: 事实抽取与证据绑定
+│   │   │   │   ├── fact_consolidation.py # 阶段2.5: 事实收束
+│   │   │   │   ├── term_normalization.py # 阶段3: 选择性术语规范化
+│   │   │   │   ├── soap_generation.py  # 阶段4: 分节生成SOAP病历
+│   │   │   │   └── verification.py     # 阶段5: 核查与修订
 │   ├── utils/                 # 工具函数
 │   │   ├── __init__.py
 │   │   └── audio_utils.py     # 音频处理工具
@@ -1106,9 +1124,112 @@ graph TB
 | ExtractionService | 病历要素抽取，从证据中抽取SOAP要素 | backend/services/extraction_service.py |
 | EMRGenerationService | 病历生成，基于模板和LLM生成结构化病历 | backend/services/emr_generation_service.py |
 | MedicalRecordPipeline | 整合服务，串联所有处理步骤，支持并行处理 | backend/services/medical_record_pipeline.py |
-| LLMPipelineService | 多阶段LLM处理，阶段1:转写清洗与角色纠错(turn JSON输出)，阶段2:事实抽取与证据绑定(AtomicFact输出)，阶段3:选择性术语规范化(基于事实表)，阶段4a:分节生成SO(仅S/O事实)，阶段4b:分节生成AP(A/P事实过滤，三层诊断+四子字段计划)，阶段5:核查与修订(全量事实)；提示词已精简50-60%，事实按section过滤减少传输量 | backend/services/llm_pipeline_service.py |
+| LLMPipelineService | **向后兼容包装类**（38行），全部逻辑委托给 PipelineOrchestrator。阶段1:转写清洗与角色纠错(turn JSON输出)，阶段2:事实抽取与证据绑定(AtomicFact输出)，阶段3:选择性术语规范化(基于事实表)，阶段4a:分节生成SO(仅S/O事实)，阶段4b:分节生成AP(A/P事实过滤，三层诊断+四子字段计划)，阶段5:核查与修订(全量事实) | backend/services/llm_pipeline_service.py |
+| PipelineOrchestrator | 核心编排器，串联 6 个 PipelineStage，包含 12 个方法（531行）。依赖 TurnCleaningStage/FactExtractionStage/FactConsolidationStage/TermNormalizationStage/SOAPGenerationStage/VerificationStage | backend/services/pipeline/orchestrator.py |
 | LLMPipelineServiceEnglish | 英文多阶段LLM处理，跳过翻译步骤优化 | backend/services/llm_pipeline_service_en.py |
 | LLMService | LLM服务，支持多适配器、模板渲染、JSON模式和思考模式 | backend/services/llm/llm_service.py |
+
+### Pipeline 模块架构（SOLID 重构后）
+
+#### 分层架构图
+
+```mermaid
+graph TB
+    subgraph "外部 API 层"
+        EMR_API[api/emr.py]
+    end
+
+    subgraph "兼容层"
+        LSP[LLMPipelineService<br/>38行包装类]
+    end
+
+    subgraph "编排层"
+        ORC[PipelineOrchestrator<br/>531行]
+    end
+
+    subgraph "阶段层 (PipelineStage)"
+        TCS[TurnCleaningStage<br/>转写清洗与角色纠错]
+        FES[FactExtractionStage<br/>事实抽取与证据绑定]
+        FCS[FactConsolidationStage<br/>事实收束]
+        TNS[TermNormalizationStage<br/>选择性术语规范化]
+        SGS[SOAPGenerationStage<br/>分节生成SOAP病历]
+        VS[VerificationStage<br/>核查与修订]
+    end
+
+    subgraph "基础设施层"
+        CTX[PipelineContext<br/>数据传递对象]
+        UTIL[utils.py<br/>JSON解析]
+        SPK[speaker_handler.py<br/>说话人角色处理]
+        DBG[debug_interactor.py<br/>Debug交互]
+        EVI[evidence_enricher.py<br/>证据溯源富化]
+        EMR_P[emr_persistence.py<br/>EMR持久化]
+        INT[interactive.py<br/>交互式分步处理]
+    end
+
+    EMR_API --> LSP
+    LSP --> ORC
+    ORC --> TCS
+    TCS --> FES
+    FES --> FCS
+    FCS --> TNS
+    TNS --> SGS
+    SGS --> VS
+    ORC --> CTX
+    ORC --> EMR_P
+    ORC --> EVI
+    ORC --> INT
+    INT --> ORC
+```
+
+#### 阶段依赖关系
+
+| 阶段 | Stage 类 | 输入 | 输出 | 核心文件 |
+|------|----------|------|------|----------|
+| 1 | TurnCleaningStage | turns (原始转写 TranscriptTurn[]) | cleaned_turns, role_mappings | [stages/turn_cleaning.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/turn_cleaning.py) |
+| 2 | FactExtractionStage | cleaned_turns | AtomicFact[] (存入DB) | [stages/fact_extraction.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/fact_extraction.py) |
+| 2.5 | FactConsolidationStage | AtomicFact[] (从DB加载) | merged/conflict-marked facts | [stages/fact_consolidation.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/fact_consolidation.py) |
+| 3 | TermNormalizationStage | AtomicFact[] (需规范化) | NormalizedTerm[] | [stages/term_normalization.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/term_normalization.py) |
+| 4 | SOAPGenerationStage | AtomicFact[] (按section过滤) | emr_draft (SO/AP) | [stages/soap_generation.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/soap_generation.py) |
+| 5 | VerificationStage | emr_draft + AtomicFact[] | emr_final (核查修订后) | [stages/verification.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/verification.py) |
+
+#### PipelineStage 接口
+
+所有阶段实现统一的 `PipelineStage` 抽象接口：
+
+```python
+class PipelineStage(ABC):
+    @abstractmethod
+    def stage_name(self) -> str: ...
+
+    @abstractmethod
+    def execute(self, ctx: PipelineContext) -> Dict[str, Any]: ...
+```
+
+**PipelineContext** 作为各阶段间的数据传递对象，避免阶段间直接耦合：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| db | Session | 数据库会话 |
+| llm_service | LLMService | LLM 服务实例 |
+| prompt_manager | PromptManager | Prompt 模板管理器 |
+| language | str | 语言设置 (zh/en) |
+| debug_mode | bool | 调试模式开关 |
+| visit_id | str | 就诊 ID |
+| turns | List[TranscriptTurn] | 原始转写轮次 |
+| save_evidence | bool | 是否保存证据溯源 |
+| all_role_mappings | Dict | 角色映射结果（阶段1输出） |
+| all_cleaned_turns | List[Dict] | 清洗后轮次（阶段1输出） |
+| combined_text | str | 合并清洗文本（阶段1输出） |
+| fact_records | List[AtomicFact] | 原子事实记录 |
+| emr_draft | Dict | SOAP 草稿（阶段4输出） |
+
+#### 关键设计决策
+
+- **PipelineStage 模式**：`execute(ctx) -> Dict` 统一入口，6 个阶段可独立测试和替换，符合开闭原则（新增阶段无需修改编排器）
+- **PipelineContext**：作为各阶段间的数据传递对象，阶段间通过 Context 读写数据而非直接引用，避免阶段间直接耦合
+- **Orchestrator 单一职责**：`PipelineOrchestrator` 只负责流程编排和资源初始化，不包含领域逻辑（领域逻辑在 Stage 类中）
+- **向后兼容包装**：`LLMPipelineService` 保留为 38 行包装类，所有公共方法委托给 `PipelineOrchestrator`，确保 `api/emr.py` 和外部调用方零修改
+- **依赖注入**：`InteractivePipelineService` 依赖从 `LLMPipelineService` 改为 `PipelineOrchestrator`，支持独立测试
 
 ### 配置项
 
