@@ -28,3 +28,4 @@ backend/api/__pycache__/
 backend/__pycache__/config.cpython-313.pyc
 backend/models/__pycache__/llm_config.cpython-313.pyc
 backend/models/__pycache__/transcript.cpython-313.pyc
+skills-lock.json

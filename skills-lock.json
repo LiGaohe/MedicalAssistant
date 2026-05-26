@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "baoyu-imagine": {
+      "source": "jimliu/baoyu-skills",
+      "sourceType": "github",
+      "skillPath": "skills/baoyu-imagine/SKILL.md",
+      "computedHash": "d22a25523fbb5c1b4f2d49329545c209e459c275b565f9ac51de6e03142a5b3e"
+    },
     "better-icons": {
       "source": "better-auth/better-icons",
       "sourceType": "github",
@@ -11,15 +17,28 @@
       "sourceType": "github",
       "computedHash": "9edba9a38684c060fdc38290f640e1dc0c37de286723ac9be73bacacf7cd6f3d"
     },
+    "infographic": {
+      "source": "markdown-viewer/skills",
+      "sourceType": "github",
+      "skillPath": "infographic/SKILL.md",
+      "computedHash": "204814a5de5161b3ce6dc854557a032e756398a0a9902d89e6a98c41b274f92c"
+    },
     "ljg-roundtable": {
       "source": "lijigang/ljg-skills",
       "sourceType": "github",
       "computedHash": "44cfdad0ae96a43216f6fd8ff2680fe36ab6c02b35499121894b57b7b7420931"
     },
     "slidev": {
-      "source": "antfu/skills",
+      "source": "slidevjs/slidev",
       "sourceType": "github",
-      "computedHash": "ecde2e0d684f770a50c8718ab036e5df5e1ead082cb608739673507079a524a3"
+      "skillPath": "skills/slidev/SKILL.md",
+      "computedHash": "400f1c88033325513a4d97d1eb5f0e4ff444e6f73c1635f91e6f1f31cf56ba0a"
+    },
+    "slidev-syntax-guide": {
+      "source": "yoanbernabeu/slidev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/content/slidev-syntax-guide/SKILL.md",
+      "computedHash": "e1030be676bd913ec1d58129f78df9a8a014748c65f7c72022c044e9ba244cf0"
     },
     "subagent-creator": {
       "source": "tech-leads-club/agent-skills",

@@ -1,5 +1,36 @@
 # 完成状态记录
 
+## 2026-05-23 修复 A/P 证据溯源丢失 —— JSON 嵌套解析 + per-field 兜底
+
+### 根因
+
+DEBUG 日志中 LLM AP 阶段原始输出（[app_20260523.log:L2405](file:///d:/practice/MedicalAssisstant/data/logs/app_20260523.log#L2405)）显示，LLM 将 `assessment_items` / `plan_items` **嵌套在了 `assessment` / `plan` 对象内部**，而非 prompt 要求的顶级字段：
+
+```json
+// 错误嵌套：
+{ "assessment": { "diagnosis": {...}, "assessment_items": [...] }, "plan": { "plan_items": {...} } }
+// 正确格式：
+{ "assessment": { "diagnosis": {...} }, "assessment_items": [...], "plan": {...}, "plan_items": {...} }
+```
+
+导致 `result.get("assessment_items", [])` 返回 `[]`，A/P 证据溯源永久为空。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 定位根因 | ✅ | 通过 DEBUG 日志捕获大模型原始 AP 输出，确认嵌套问题 |
+| 修复 soap_generation.py 解析 | ✅ | 合并/分离两种模式下，`assessment_items`/`plan_items` 在顶层为空时回退到从 `assessment`/`plan` 对象内读取 |
+| 修复 evidence_enricher.py | ✅ | A/P 证据优先读取 LLM 输出的 per-field `diagnosis.evidence_traces` / `treatment.evidence_traces` / `advice.evidence_traces`，空时回退到 `assessment_items` / `plan_items` |
+| 验证 | ✅ | 测试对话：diagnosis traces=2，treatment traces=3，advice traces=2 |
+
+### 修改文件
+
+- `backend/services/pipeline/stages/soap_generation.py` — 合并/分离模式均新增嵌套回退解析
+- `backend/services/pipeline/evidence_enricher.py` — A/P 新增 LLM per-field evidence_traces 优先读取，assessment_items/plan_items 为回退
+
+---
+
 ## 2026-05-23 LLMPipelineService 完整重构 —— SOLID 原则拆分
 
 ### 变更说明

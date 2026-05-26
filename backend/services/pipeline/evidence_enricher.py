@@ -196,34 +196,64 @@ class EvidenceEnricher:
                     objective_section[field]["evidence_traces"] = o_evidence_traces
 
         diagnosis_fact_ids = set()
-        for item in assessment_items:
-            if isinstance(item, dict):
-                sids = item.get("supporting_fact_ids", [])
-                diagnosis_fact_ids.update(sids)
+        assessment_section = dict(emr_result.get("assessment", {}))
+        if isinstance(assessment_section.get("diagnosis"), dict):
+            llm_traces = assessment_section["diagnosis"].get("evidence_traces", [])
+            if isinstance(llm_traces, list) and llm_traces:
+                for t in llm_traces:
+                    if isinstance(t, str):
+                        diagnosis_fact_ids.add(t)
+                    elif isinstance(t, dict):
+                        diagnosis_fact_ids.add(t.get("fact_id", ""))
+        if not diagnosis_fact_ids:
+            for item in assessment_items:
+                if isinstance(item, dict):
+                    sids = item.get("supporting_fact_ids", [])
+                    diagnosis_fact_ids.update(sids)
         a_evidence_traces = _b(
             diagnosis_fact_ids, fact_by_id, turn_by_index
         )
 
-        assessment_section = dict(emr_result.get("assessment", {}))
         if "diagnosis" in assessment_section and isinstance(assessment_section["diagnosis"], dict):
             assessment_section["diagnosis"]["evidence_traces"] = a_evidence_traces
 
         treatment_fact_ids = set()
         advice_fact_ids = set()
 
-        if isinstance(plan_items, dict):
-            for med in plan_items.get("medications", []):
-                if isinstance(med, dict):
-                    treatment_fact_ids.update(med.get("used_fact_ids", []))
-            for test in plan_items.get("tests", []):
-                if isinstance(test, dict):
-                    treatment_fact_ids.update(test.get("used_fact_ids", []))
-            follow_up = plan_items.get("follow_up", {})
-            if isinstance(follow_up, dict):
-                advice_fact_ids.update(follow_up.get("used_fact_ids", []))
-            education = plan_items.get("education", {})
-            if isinstance(education, dict):
-                advice_fact_ids.update(education.get("used_fact_ids", []))
+        plan_section = dict(emr_result.get("plan", {}))
+        if isinstance(plan_section.get("treatment"), dict):
+            llm_traces = plan_section["treatment"].get("evidence_traces", [])
+            if isinstance(llm_traces, list) and llm_traces:
+                for t in llm_traces:
+                    if isinstance(t, str):
+                        treatment_fact_ids.add(t)
+                    elif isinstance(t, dict):
+                        treatment_fact_ids.add(t.get("fact_id", ""))
+        if not treatment_fact_ids:
+            if isinstance(plan_items, dict):
+                for med in plan_items.get("medications", []):
+                    if isinstance(med, dict):
+                        treatment_fact_ids.update(med.get("used_fact_ids", []))
+                for test in plan_items.get("tests", []):
+                    if isinstance(test, dict):
+                        treatment_fact_ids.update(test.get("used_fact_ids", []))
+
+        if isinstance(plan_section.get("advice"), dict):
+            llm_traces = plan_section["advice"].get("evidence_traces", [])
+            if isinstance(llm_traces, list) and llm_traces:
+                for t in llm_traces:
+                    if isinstance(t, str):
+                        advice_fact_ids.add(t)
+                    elif isinstance(t, dict):
+                        advice_fact_ids.add(t.get("fact_id", ""))
+        if not advice_fact_ids:
+            if isinstance(plan_items, dict):
+                follow_up = plan_items.get("follow_up", {})
+                if isinstance(follow_up, dict):
+                    advice_fact_ids.update(follow_up.get("used_fact_ids", []))
+                education = plan_items.get("education", {})
+                if isinstance(education, dict):
+                    advice_fact_ids.update(education.get("used_fact_ids", []))
 
         t_evidence_traces = _b(
             treatment_fact_ids, fact_by_id, turn_by_index
@@ -232,7 +262,6 @@ class EvidenceEnricher:
             advice_fact_ids, fact_by_id, turn_by_index
         )
 
-        plan_section = dict(emr_result.get("plan", {}))
         if "treatment" in plan_section and isinstance(plan_section["treatment"], dict):
             plan_section["treatment"]["evidence_traces"] = t_evidence_traces
         if "advice" in plan_section and isinstance(plan_section["advice"], dict):

@@ -162,8 +162,12 @@ class SOAPGenerationStage(PipelineStage):
             if result:
                 assessment = result.get("assessment", {})
                 assessment_items = result.get("assessment_items", [])
+                if not assessment_items and isinstance(assessment, dict):
+                    assessment_items = assessment.get("assessment_items", [])
                 plan = result.get("plan", {})
                 plan_items = result.get("plan_items", {})
+                if (not plan_items or plan_items == {}) and isinstance(plan, dict):
+                    plan_items = plan.get("plan_items", {})
 
                 stage_time = time.time() - stage_start
                 logger.info(
@@ -226,6 +230,8 @@ class SOAPGenerationStage(PipelineStage):
 
             assessment = assessment_result.get("assessment", {})
             assessment_items = assessment_result.get("assessment_items", [])
+            if not assessment_items and isinstance(assessment, dict):
+                assessment_items = assessment.get("assessment_items", [])
             assessment_text = json.dumps(assessment, ensure_ascii=False, indent=2)
 
             logger.info(f"Assessment生成完成: {len(assessment_items)} 条评估项")
@@ -270,6 +276,8 @@ class SOAPGenerationStage(PipelineStage):
 
             plan = plan_result.get("plan", {})
             plan_items = plan_result.get("plan_items", {})
+            if (not plan_items or plan_items == {}) and isinstance(plan, dict):
+                plan_items = plan.get("plan_items", {})
 
             stage_time = time.time() - stage_start
             logger.info(f"AP分离生成完成，耗时: {stage_time:.2f}秒")
