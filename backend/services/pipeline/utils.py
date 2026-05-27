@@ -4,7 +4,18 @@ from typing import Dict, Any, Optional, List
 from ...utils.logger import logger
 
 
-def parse_json_response(response_text: str, stage_name: str = "") -> Optional[Dict[str, Any]]:
+class JSONParseError(Exception):
+    def __init__(self, stage_name: str, response_text: str, error_msg: str = ""):
+        self.stage_name = stage_name
+        self.response_text = response_text
+        self.error_msg = error_msg
+        super().__init__(f"JSON解析失败 [{stage_name}]: {error_msg}")
+
+    def get_full_response(self) -> str:
+        return self.response_text
+
+
+def parse_json_response(response_text: str, stage_name: str = "", raise_on_error: bool = False) -> Optional[Dict[str, Any]]:
     logger.info(f"开始解析JSON响应, 阶段: {stage_name}, 响应长度: {len(response_text)} 字符")
     logger.debug(f"原始响应内容:\n{response_text}")
 
@@ -78,6 +89,10 @@ def parse_json_response(response_text: str, stage_name: str = "") -> Optional[Di
     logger.error(f"无法从响应中提取有效JSON, 阶段: {stage_name}")
     logger.error(f"响应内容前500字符: {response_text[:500]}")
     logger.debug(f"完整响应内容:\n{response_text}")
+    
+    if raise_on_error:
+        raise JSONParseError(stage_name, response_text, "无法从响应中提取有效JSON")
+    
     return None
 
 

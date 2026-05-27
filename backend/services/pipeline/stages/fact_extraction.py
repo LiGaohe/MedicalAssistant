@@ -4,7 +4,7 @@ import uuid
 from typing import Dict, Any, List
 
 from ..base import PipelineContext, PipelineStage
-from ..utils import parse_json_response
+from ..utils import parse_json_response, JSONParseError
 from ..debug_interactor import DebugInteractor
 from ....models import AtomicFact
 from ....utils.logger import logger
@@ -76,7 +76,14 @@ class FactExtractionStage(PipelineStage):
                 logger.error(f"事实抽取LLM调用失败: {e}")
                 return {"facts": [], "fact_count": 0}
 
-        result = parse_json_response(response_text, "事实抽取")
+        try:
+            result = parse_json_response(response_text, "事实抽取", raise_on_error=True)
+        except JSONParseError as e:
+            logger.error(f"阶段2 JSON解析失败，停止后续执行")
+            logger.error(f"=== LLM完整响应内容 ===")
+            logger.error(e.get_full_response())
+            logger.error(f"=== 响应内容结束 ===")
+            raise
 
         facts = []
         if result and "facts" in result:

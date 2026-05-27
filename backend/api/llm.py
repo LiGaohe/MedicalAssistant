@@ -37,7 +37,7 @@ class ConfigCreate(BaseModel):
     is_active: bool = True
     json_mode: bool = False
     thinking_enabled: bool = False
-    thinking_effort: str = "high"
+    thinking_effort: str = "low"
 
 
 class ConfigUpdate(BaseModel):

@@ -57,7 +57,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
         if use_json_mode:
             payload["response_format"] = {"type": "json_object"}
         
-        use_thinking = request.thinking_enabled or self.thinking_enabled
+        use_thinking = request.thinking_enabled
         if use_thinking:
             effort = request.thinking_effort if request.thinking_enabled else self.thinking_effort
             payload["thinking"] = {
@@ -91,7 +91,21 @@ class OpenAICompatibleAdapter(LLMAdapter):
                         json=payload
                     )
                     response.raise_for_status()
-                    data = response.json()
+                    try:
+                        data = response.json()
+                    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                        logger.warning(f"默认编码解析响应失败: {e}，尝试GBK/GB18030编码")
+                        raw_bytes = response.content
+                        for enc in ['gbk', 'gb18030', 'latin-1']:
+                            try:
+                                text = raw_bytes.decode(enc)
+                                data = json.loads(text)
+                                logger.info(f"使用 {enc} 编码成功解析响应")
+                                break
+                            except Exception:
+                                continue
+                        else:
+                            raise RuntimeError(f"API响应解码失败(utf-8/gbk/gb18030/latin-1): {e}")
                     
                     logger.debug(f"LLM API原始响应: {json.dumps(data, ensure_ascii=False)[:2000]}")
                     
@@ -127,16 +141,20 @@ class OpenAICompatibleAdapter(LLMAdapter):
                         if reasoning_tokens > 0:
                             logger.warning(f"思考模式消耗reasoning_tokens: {reasoning_tokens}, 建议增大max_tokens")
                     
-                    if content is None:
-                        if thinking_content:
-                            logger.debug(f"LLM API返回reasoning字段, 尝试提取最终答案")
-                            content = self._extract_final_answer(thinking_content)
-                            if content:
-                                content = content.strip()
-                        
-                        if not content:
-                            logger.error(f"LLM API返回None content, message: {message}")
-                            raise RuntimeError(f"{self.provider_name} API returned None content")
+                    if not content:
+                        if thinking_content and finish_reason == "length" and attempt < self.max_retries - 1:
+                            current_max_tokens = payload.get("max_tokens", request.max_tokens)
+                            new_max_tokens = min(current_max_tokens * 2, 131072)
+                            if new_max_tokens > current_max_tokens:
+                                logger.warning(
+                                    f"内容为空且因max_tokens不足被截断(reasoning占用了token预算), "
+                                    f"max_tokens: {current_max_tokens} → {new_max_tokens}, 重试..."
+                                )
+                                payload["max_tokens"] = new_max_tokens
+                                time.sleep(self.retry_delay)
+                                continue
+                        logger.error(f"LLM API返回空content, finish_reason={finish_reason}, message: {message}")
+                        raise RuntimeError(f"{self.provider_name} API returned empty content (finish_reason={finish_reason})")
                     
                     if content and len(content) > 0:
                         stripped_len = len(content.replace(' ', '').replace('\t', '').replace('\n', ''))
@@ -178,43 +196,6 @@ class OpenAICompatibleAdapter(LLMAdapter):
         
         logger.error(f"LLM API调用失败, 已达到最大重试次数 {self.max_retries}")
         raise last_error
-    
-    def _extract_final_answer(self, reasoning: str) -> str:
-        import re
-        
-        if not reasoning:
-            return ""
-        
-        json_match = re.search(r'\{[\s\S]*\}', reasoning)
-        if json_match:
-            return json_match.group()
-        
-        json_array_match = re.search(r'\[[\s\S]*\]', reasoning)
-        if json_array_match:
-            return json_array_match.group()
-        
-        lines = reasoning.strip().split('\n')
-        
-        for line in reversed(lines):
-            line = line.strip()
-            if not line:
-                continue
-            
-            if line.startswith(('*', '-', '•', '1.', '2.', '3.', '4.', '5.')):
-                line = re.sub(r'^[*\-•\d.]\s*', '', line).strip()
-            
-            if line and len(line) < 200 and not line.startswith('Thinking') and not line.startswith('##'):
-                if re.search(r'[a-zA-Z\u4e00-\u9fff]', line):
-                    return line
-        
-        last_non_empty = ""
-        for line in reversed(lines):
-            line = line.strip()
-            if line and not line.startswith('Thinking') and not line.startswith('##'):
-                last_non_empty = line
-                break
-        
-        return last_non_empty
     
     def is_available(self) -> bool:
         try:

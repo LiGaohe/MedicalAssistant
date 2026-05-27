@@ -15,7 +15,7 @@ from ..terminology_service import TerminologyService
 from ..fact_service import FactService
 from ...config import settings
 from ...utils.logger import logger
-from .utils import parse_json_response
+from .utils import parse_json_response, JSONParseError
 from .base import PipelineContext
 from .speaker_handler import SpeakerHandler, FIELD_TYPE_MAPPING, FIELD_EXPECTED_ROLE
 from .debug_interactor import DebugInteractor
@@ -111,8 +111,20 @@ class PipelineOrchestrator:
         
         time.sleep(self.STAGE_DELAY)
         
-        fact_result = FactExtractionStage().execute(ctx)
-        logger.info(f"事实抽取阶段完成，共 {fact_result.get('fact_count', 0)} 条事实，耗时统计见上")
+        try:
+            fact_result = FactExtractionStage().execute(ctx)
+            logger.info(f"事实抽取阶段完成，共 {fact_result.get('fact_count', 0)} 条事实，耗时统计见上")
+        except JSONParseError as e:
+            logger.error(f"阶段2 JSON解析失败，停止后续处理: {visit_id}")
+            return {
+                "status": "failed",
+                "error": "JSON解析失败",
+                "stage": "fact_extraction",
+                "llm_response": e.get_full_response(),
+                "role_mapping": all_role_mappings,
+                "cleaned_turns": all_cleaned_turns,
+                "combined_text": combined_text
+            }
         
         time.sleep(self.STAGE_DELAY)
         
@@ -138,12 +150,27 @@ class PipelineOrchestrator:
         
         fact_records = fact_service.get_facts_by_visit(visit_id)
         ctx.fact_records = fact_records
-        soap_result = SOAPGenerationStage().execute(ctx)
-        emr_draft = ctx.emr_draft
-        so_used_fact_ids = emr_draft.get("so_used_fact_ids", [])
-        assessment_items = emr_draft.get("assessment_items", [])
-        plan_items = emr_draft.get("plan_items", {})
-        logger.info(f"病历生成阶段完成（SO/AP分节），S/O使用fact数={len(so_used_fact_ids)}, 评估项数={len(assessment_items)}")
+        
+        try:
+            soap_result = SOAPGenerationStage().execute(ctx)
+            emr_draft = ctx.emr_draft
+            so_used_fact_ids = emr_draft.get("so_used_fact_ids", [])
+            assessment_items = emr_draft.get("assessment_items", [])
+            plan_items = emr_draft.get("plan_items", {})
+            logger.info(f"病历生成阶段完成（SO/AP分节），S/O使用fact数={len(so_used_fact_ids)}, 评估项数={len(assessment_items)}")
+        except JSONParseError as e:
+            logger.error(f"阶段4 JSON解析失败，停止后续处理: {visit_id}")
+            return {
+                "status": "failed",
+                "error": "JSON解析失败",
+                "stage": "soap_generation",
+                "llm_response": e.get_full_response(),
+                "role_mapping": all_role_mappings,
+                "cleaned_turns": all_cleaned_turns,
+                "combined_text": combined_text,
+                "fact_result": fact_result,
+                "normalized_result": normalized_result
+            }
         
         time.sleep(self.STAGE_DELAY)
         
@@ -249,11 +276,18 @@ class PipelineOrchestrator:
         
         yield emit_progress(2, "事实抽取与证据绑定", "running", "正在抽取临床事实...")
         
-        fact_result = FactExtractionStage().execute(ctx)
-        logger.info(f"事实抽取阶段完成，共 {fact_result.get('fact_count', 0)} 条事实")
-        
-        yield emit_progress(2, "事实抽取与证据绑定", "completed", 
-                           f"抽取 {fact_result.get('fact_count', 0)} 条原子事实")
+        try:
+            fact_result = FactExtractionStage().execute(ctx)
+            logger.info(f"事实抽取阶段完成，共 {fact_result.get('fact_count', 0)} 条事实")
+            
+            yield emit_progress(2, "事实抽取与证据绑定", "completed", 
+                               f"抽取 {fact_result.get('fact_count', 0)} 条原子事实")
+        except JSONParseError as e:
+            logger.error(f"阶段2 JSON解析失败，停止后续处理: {visit_id}")
+            yield emit_progress(2, "事实抽取与证据绑定", "failed", 
+                               "JSON解析失败，请查看日志获取完整LLM响应",
+                               {"llm_response_preview": e.get_full_response()[:500]})
+            return
         
         time.sleep(self.STAGE_DELAY)
         
@@ -292,14 +326,21 @@ class PipelineOrchestrator:
         ctx.fact_records = fact_records
         yield emit_progress(4, "分节生成SOAP病历", "running", "正在生成主观和客观部分...")
         
-        soap_result = SOAPGenerationStage().execute(ctx)
-        emr_draft = ctx.emr_draft
-        so_used_fact_ids = emr_draft.get("so_used_fact_ids", [])
-        assessment_items = emr_draft.get("assessment_items", [])
-        plan_items = emr_draft.get("plan_items", {})
-        
-        yield emit_progress(4, "分节生成SOAP病历", "completed", 
-                           f"生成完成，S/O使用 {len(so_used_fact_ids)} 条事实")
+        try:
+            soap_result = SOAPGenerationStage().execute(ctx)
+            emr_draft = ctx.emr_draft
+            so_used_fact_ids = emr_draft.get("so_used_fact_ids", [])
+            assessment_items = emr_draft.get("assessment_items", [])
+            plan_items = emr_draft.get("plan_items", {})
+            
+            yield emit_progress(4, "分节生成SOAP病历", "completed", 
+                               f"生成完成，S/O使用 {len(so_used_fact_ids)} 条事实")
+        except JSONParseError as e:
+            logger.error(f"阶段4 JSON解析失败，停止后续处理: {visit_id}")
+            yield emit_progress(4, "分节生成SOAP病历", "failed", 
+                               "JSON解析失败，请查看日志获取完整LLM响应",
+                               {"llm_response_preview": e.get_full_response()[:500]})
+            return
         
         time.sleep(self.STAGE_DELAY)
         

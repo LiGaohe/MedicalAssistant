@@ -1,5 +1,36 @@
 # 完成状态记录
 
+## 2026-05-27 JSON解析失败时停止后续执行并输出LLM响应
+
+### 问题背景
+
+当LLM返回的JSON解析失败时（如 `finish_reason=length` 导致输出被截断），系统继续执行下一阶段，只返回空结果，无法定位错误原因。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 创建 JSONParseError 异常类 | ✅ | 在 `utils.py` 中创建自定义异常类，包含阶段名、原始响应内容、错误信息 |
+| 修改 parse_json_response | ✅ | 新增 `raise_on_error` 参数，失败时抛出异常而非返回 None |
+| 修改 FactExtractionStage | ✅ | JSON解析失败时输出完整LLM响应并抛出异常 |
+| 修改 SOAPGenerationStage | ✅ | SO生成和AP合并生成阶段添加异常处理 |
+| 修改 orchestrator.py | ✅ | `process_transcript` 和 `process_with_callback` 方法捕获异常并停止后续执行 |
+
+### 修改文件
+
+- `backend/services/pipeline/utils.py` — 新增 `JSONParseError` 异常类，`parse_json_response` 新增 `raise_on_error` 参数
+- `backend/services/pipeline/stages/fact_extraction.py` — JSON解析失败时输出完整响应并抛出异常
+- `backend/services/pipeline/stages/soap_generation.py` — SO/AP生成阶段添加异常处理
+- `backend/services/pipeline/orchestrator.py` — 阶段2和阶段4添加异常捕获，返回包含 `llm_response` 的错误结果
+
+### 行为变更
+
+**之前**：JSON解析失败 → 返回空结果 → 继续执行下一阶段
+
+**现在**：JSON解析失败 → 输出完整LLM响应到日志 → 抛出异常 → 停止后续执行 → 返回包含 `llm_response` 的错误结果
+
+---
+
 ## 2026-05-23 修复 A/P 证据溯源丢失 —— JSON 嵌套解析 + per-field 兜底
 
 ### 根因

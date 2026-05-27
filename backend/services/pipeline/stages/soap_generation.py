@@ -3,7 +3,7 @@ import time
 from typing import Dict, Any, List
 
 from ..base import PipelineContext, PipelineStage
-from ..utils import parse_json_response
+from ..utils import parse_json_response, JSONParseError
 from ..debug_interactor import DebugInteractor
 from ....models import AtomicFact
 from ....utils.logger import logger
@@ -99,15 +99,18 @@ class SOAPGenerationStage(PipelineStage):
                 logger.error(f"SO生成LLM调用失败: {e}")
                 return {"subjective": {}, "objective": {}, "used_fact_ids": []}
 
-        result = parse_json_response(response_text, "SO生成")
+        try:
+            result = parse_json_response(response_text, "SO生成", raise_on_error=True)
+        except JSONParseError as e:
+            logger.error(f"阶段4a JSON解析失败，停止后续执行")
+            logger.error(f"=== LLM完整响应内容 ===")
+            logger.error(e.get_full_response())
+            logger.error(f"=== 响应内容结束 ===")
+            raise
 
-        if result:
-            stage_time = time.time() - stage_start
-            logger.info(f"SO生成完成: 使用 {len(result.get('used_fact_ids', []))} 条事实, 耗时: {stage_time:.2f}秒")
-            return result
-
-        logger.warning("SO生成JSON解析失败，返回空结果")
-        return {"subjective": {}, "objective": {}, "used_fact_ids": []}
+        stage_time = time.time() - stage_start
+        logger.info(f"SO生成完成: 使用 {len(result.get('used_fact_ids', []))} 条事实, 耗时: {stage_time:.2f}秒")
+        return result
 
     def _generate_ap(
         self,
@@ -157,34 +160,37 @@ class SOAPGenerationStage(PipelineStage):
                     logger.error(f"AP合并生成LLM调用失败: {e}")
                     return {"assessment": {}, "plan": {}, "assessment_items": [], "plan_items": {}}
 
-            result = parse_json_response(response_text, "AP合并生成")
+            try:
+                result = parse_json_response(response_text, "AP合并生成", raise_on_error=True)
+            except JSONParseError as e:
+                logger.error(f"阶段4b JSON解析失败，停止后续执行")
+                logger.error(f"=== LLM完整响应内容 ===")
+                logger.error(e.get_full_response())
+                logger.error(f"=== 响应内容结束 ===")
+                raise
 
-            if result:
-                assessment = result.get("assessment", {})
-                assessment_items = result.get("assessment_items", [])
-                if not assessment_items and isinstance(assessment, dict):
-                    assessment_items = assessment.get("assessment_items", [])
-                plan = result.get("plan", {})
-                plan_items = result.get("plan_items", {})
-                if (not plan_items or plan_items == {}) and isinstance(plan, dict):
-                    plan_items = plan.get("plan_items", {})
+            assessment = result.get("assessment", {})
+            assessment_items = result.get("assessment_items", [])
+            if not assessment_items and isinstance(assessment, dict):
+                assessment_items = assessment.get("assessment_items", [])
+            plan = result.get("plan", {})
+            plan_items = result.get("plan_items", {})
+            if (not plan_items or plan_items == {}) and isinstance(plan, dict):
+                plan_items = plan.get("plan_items", {})
 
-                stage_time = time.time() - stage_start
-                logger.info(
-                    f"AP合并生成完成: 评估项={len(assessment_items)}, "
-                    f"计划项={len(plan_items.get('medications', [])) + len(plan_items.get('tests', []))}, "
-                    f"耗时: {stage_time:.2f}秒"
-                )
+            stage_time = time.time() - stage_start
+            logger.info(
+                f"AP合并生成完成: 评估项={len(assessment_items)}, "
+                f"计划项={len(plan_items.get('medications', [])) + len(plan_items.get('tests', []))}, "
+                f"耗时: {stage_time:.2f}秒"
+            )
 
-                return {
-                    "assessment": assessment,
-                    "plan": plan,
-                    "assessment_items": assessment_items,
-                    "plan_items": plan_items
-                }
-
-            logger.warning("AP合并生成JSON解析失败，返回空结果")
-            return {"assessment": {}, "plan": {}, "assessment_items": [], "plan_items": {}}
+            return {
+                "assessment": assessment,
+                "plan": plan,
+                "assessment_items": assessment_items,
+                "plan_items": plan_items
+            }
 
         else:
             logger.info(">>> 使用分离模式: 分两次LLM调用分别生成A和P")

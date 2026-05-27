@@ -3,7 +3,7 @@ from typing import Dict, Any, List, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
 from ..base import PipelineContext, PipelineStage
-from ..utils import parse_json_response
+from ..utils import parse_json_response, JSONParseError
 from ..speaker_handler import SpeakerHandler
 from ..debug_interactor import DebugInteractor
 from ....models import TranscriptTurn

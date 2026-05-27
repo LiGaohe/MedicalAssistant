@@ -98,6 +98,22 @@ backend/services/llm/openai_compatible_adapter.py
 backend/services/llm/prompts.py
 backend/services/medical_record_pipeline.py
 backend/services/normalizer.py
+backend/services/pipeline/__init__.py
+backend/services/pipeline/base.py
+backend/services/pipeline/debug_interactor.py
+backend/services/pipeline/emr_persistence.py
+backend/services/pipeline/evidence_enricher.py
+backend/services/pipeline/interactive.py
+backend/services/pipeline/orchestrator.py
+backend/services/pipeline/speaker_handler.py
+backend/services/pipeline/stages/__init__.py
+backend/services/pipeline/stages/fact_consolidation.py
+backend/services/pipeline/stages/fact_extraction.py
+backend/services/pipeline/stages/soap_generation.py
+backend/services/pipeline/stages/term_normalization.py
+backend/services/pipeline/stages/turn_cleaning.py
+backend/services/pipeline/stages/verification.py
+backend/services/pipeline/utils.py
 backend/services/postprocessor.py
 backend/services/speaker_role_classifier.py
 backend/services/term_rewriter.py
@@ -171,7 +187,6 @@ scripts/test_terminology_optimization.py
 scripts/test_translation_service.py
 scripts/test_umls_connection.py
 scripts/test_whisper_en.py
-skills-lock.json
 src/__init__.py
 src/asr/__init__.py
 src/asr/base.py
@@ -179,11 +194,6 @@ src/asr/factory.py
 src/asr/funasr_engine.py
 src/asr/medasr_engine.py
 src/asr/qwen3_asr_engine.py
-tests/midterm_results/midterm_test_r2_20260514_200239.json
-tests/midterm_results/midterm_test_r2_20260514_201846.json
-tests/midterm_results/midterm_test_results_20260514_193623.json
-tests/test_confidence_feature.py
-tests/test_llm_service.py
 </directory_structure>
 
 <files>
@@ -1375,6 +1385,980 @@ def contains_match(self, query: str, candidate: str) -> Tuple[bool, float]
 ratio = len(query) / len(candidate)
 ⋮----
 ratio = len(candidate) / len(query)
+</file>
+
+<file path="backend/services/pipeline/__init__.py">
+
+</file>
+
+<file path="backend/services/pipeline/base.py">
+@dataclass
+class PipelineContext
+⋮----
+db: Optional[Session] = None
+llm_service: Optional[Any] = None
+prompt_manager: Optional[Any] = None
+language: str = "zh"
+debug_mode: bool = False
+visit_id: str = ""
+turns: list = field(default_factory=list)
+segments: list = field(default_factory=list)
+all_role_mappings: dict = field(default_factory=dict)
+all_cleaned_turns: list = field(default_factory=list)
+combined_text: str = ""
+fact_records: list = field(default_factory=list)
+emr_draft: dict = field(default_factory=dict)
+emr_final: dict = field(default_factory=dict)
+save_evidence: bool = True
+fact_result: dict = field(default_factory=dict)
+consolidation_result: dict = field(default_factory=dict)
+normalized_result: dict = field(default_factory=dict)
+extraction_result: dict = field(default_factory=dict)
+verification_result: dict = field(default_factory=dict)
+⋮----
+class PipelineStage(ABC)
+⋮----
+@abstractmethod
+    def execute(self, ctx: PipelineContext) -> Dict[str, Any]
+⋮----
+@abstractmethod
+    def stage_name(self) -> str
+</file>
+
+<file path="backend/services/pipeline/debug_interactor.py">
+class DebugInteractor
+⋮----
+def __init__(self, llm_service=None)
+⋮----
+user_input = input("\n请选择操作：\n  y - 确认发送给大模型\n  n - 不发送，手动输入结果\n  q - 取消操作\n\n请输入选择: ").strip().lower()
+⋮----
+response = self.llm_service.generate(prompt)
+⋮----
+lines = []
+⋮----
+line = input()
+⋮----
+result = "\n".join(lines)
+</file>
+
+<file path="backend/services/pipeline/emr_persistence.py">
+class EMRPersistence
+⋮----
+def __init__(self, db: Session, validation_service)
+⋮----
+saved_count = 0
+⋮----
+evidence_traces = field_data.get("evidence_traces", [])
+⋮----
+field_value = None
+⋮----
+field_info = emr_result[section].get(field_name, {})
+⋮----
+field_value = field_info.get("value", "")
+⋮----
+field_value = field_info
+⋮----
+turn_id = trace.get("turn_id")
+turn_index = trace.get("turn_index")
+⋮----
+turn = self.db.query(TranscriptTurn).filter(
+⋮----
+turn_id = turn.turn_id
+⋮----
+evidence = EvidenceSpan(
+⋮----
+visit = self.db.query(Visit).filter(Visit.visit_id == visit_id).first()
+language = visit.language if visit and visit.language else "zh"
+⋮----
+validation_result = self.validation_service.validate(emr_result, language=language)
+validation_errors = self.validation_service.to_dict(validation_result)
+⋮----
+max_version = self.db.query(EMRRecord).filter(
+⋮----
+new_version = max_version + 1
+⋮----
+emr_record = EMRRecord(
+⋮----
+def normalize_format(self, emr_result: Dict[str, Any]) -> Dict[str, Any]
+⋮----
+"""
+        将分节生成的新格式归一化为前端兼容的旧格式。
+        
+        前端 displaySection() 期望每个子字段为 {value, evidence_traces} 格式。
+        新prompt输出的是直接字符串，需要包装。
+        Assessment 从 assessment_items 构建 diagnosis 字段。
+        Plan 从 plan_items 构建 treatment 和 advice 字段。
+        """
+result = dict(emr_result)
+⋮----
+subject_section = dict(result.get("subjective", {}))
+objective_section = dict(result.get("objective", {}))
+assessment_section = dict(result.get("assessment", {}))
+plan_section = dict(result.get("plan", {}))
+⋮----
+assessment_items = result.get("assessment_items", [])
+⋮----
+explicit_diags = [item for item in assessment_items if item.get("diagnosis_type") == "explicit_diagnosis"]
+suspected_diags = [item for item in assessment_items if item.get("diagnosis_type") == "suspected_diagnosis"]
+symptom_assessments = [item for item in assessment_items if item.get("diagnosis_type") == "symptom_based_assessment"]
+⋮----
+diagnosis_parts = []
+⋮----
+diagnosis_value = "；".join(filter(None, diagnosis_parts))
+⋮----
+plan_items = result.get("plan_items", {})
+⋮----
+medications = plan_items.get("medications", [])
+tests = plan_items.get("tests", [])
+follow_up = plan_items.get("follow_up", {})
+education = plan_items.get("education", {})
+⋮----
+treatment_parts = []
+⋮----
+parts = [med.get("name", "")]
+dosage = med.get("dosage", "")
+freq = med.get("frequency", "")
+duration = med.get("duration", "")
+detail = " ".join(filter(None, [dosage, freq, duration]))
+⋮----
+name = test.get("name", "")
+reason = test.get("reason", "")
+⋮----
+treatment_value = "；".join(filter(None, treatment_parts))
+⋮----
+advice_parts = []
+⋮----
+advice_value = "；".join(filter(None, advice_parts))
+⋮----
+field_to_section_name = {}
+⋮----
+section = emr_result.get(section_name, {})
+⋮----
+traces = field_data.get("evidence_traces", [])
+field_value = field_data.get("value", "")
+⋮----
+def get_value(section: str, field: str) -> str
+⋮----
+def get_evidence_traces(section: str, field: str) -> List[Dict[str, Any]]
+⋮----
+chief_complaint = get_value("subjective", "chief_complaint")
+history = get_value("subjective", "history_present_illness")
+past_history = get_value("subjective", "past_history")
+physical = get_value("objective", "physical_examination")
+auxiliary = get_value("objective", "auxiliary_examination")
+diagnosis = get_value("assessment", "diagnosis")
+treatment = get_value("plan", "treatment")
+advice = get_value("plan", "advice")
+⋮----
+subjective_text = []
+⋮----
+objective_text = []
+⋮----
+assessment_text = f"诊断：{diagnosis}" if diagnosis else "诊断：待定"
+⋮----
+plan_text = []
+⋮----
+result = {
+</file>
+
+<file path="backend/services/pipeline/interactive.py">
+class InteractivePipelineService
+⋮----
+def __init__(self, orchestrator: "PipelineOrchestrator")
+⋮----
+turns = self.orchestrator.db.query(TranscriptTurn).filter(
+⋮----
+segments = self.orchestrator._segment_turns(turns)
+total_segments = len(segments)
+⋮----
+segment_index = context.get("segment_index", 0)
+segment = segments[segment_index] if segment_index < len(segments) else segments[0]
+⋮----
+cleaning_result = self.orchestrator._parse_cleaning_response(user_response, segment)
+⋮----
+all_cleaned_turns = context.get("all_cleaned_turns", [])
+⋮----
+next_stage = None
+next_prompt = None
+next_segment_index = None
+next_description = None
+⋮----
+next_stage = "turn_cleaning"
+next_segment_index = segment_index + 1
+next_segment = segments[next_segment_index]
+next_prompt = self.orchestrator.prompt_manager.render(
+next_description = f"阶段1.{next_segment_index + 1}/{total_segments}: 转写清洗与角色纠错"
+⋮----
+next_stage = "fact_extraction"
+compact_turns = self._build_compact_turns(all_cleaned_turns)
+turns_json = json.dumps(compact_turns, ensure_ascii=False, indent=2)
+⋮----
+next_description = f"阶段2: 事实抽取与证据绑定 (共{len(all_cleaned_turns)}个轮次，{total_segments}段)"
+⋮----
+parsed = parse_json_response(user_response, "事实抽取")
+facts_data = parsed.get("facts", []) if parsed else []
+⋮----
+so_facts = [f for f in facts_data if f.get("section_candidate") in ("S", "O")]
+a_facts = [f for f in facts_data if f.get("section_candidate") == "A"]
+p_facts = [f for f in facts_data if f.get("section_candidate") == "P"]
+⋮----
+dialogue_parts = []
+⋮----
+mention = fact.get("normalized_term") or fact.get("mention", "")
+speaker = fact.get("speaker", "unknown")
+⋮----
+dialogue_summary = "\n".join(dialogue_parts)
+⋮----
+next_prompt_so = self.orchestrator.prompt_manager.render(
+⋮----
+facts = context.get("facts", [])
+⋮----
+parsed = parse_json_response(user_response, "SO生成")
+⋮----
+subjective = parsed.get("subjective", {}) if parsed else {}
+objective = parsed.get("objective", {}) if parsed else {}
+so_result = {"subjective": subjective, "objective": objective}
+⋮----
+a_facts = context.get("a_facts", [])
+subjective_text = json.dumps(subjective, ensure_ascii=False, indent=2)
+objective_text = json.dumps(objective, ensure_ascii=False, indent=2)
+⋮----
+next_prompt_assessment = self.orchestrator.prompt_manager.render(
+⋮----
+parsed = parse_json_response(user_response, "评估生成")
+assessment = parsed.get("assessment", {}) if parsed else {}
+assessment_items = parsed.get("assessment_items", []) if parsed else []
+assessment_text = json.dumps(assessment, ensure_ascii=False, indent=2)
+⋮----
+p_facts = context.get("p_facts", [])
+subjective_text = context.get("subjective_text", "{}")
+objective_text = context.get("objective_text", "{}")
+⋮----
+next_prompt_plan = self.orchestrator.prompt_manager.render(
+⋮----
+parsed = parse_json_response(user_response, "计划生成")
+plan = parsed.get("plan", {}) if parsed else {}
+plan_items = parsed.get("plan_items", {}) if parsed else {}
+⋮----
+subjective = context.get("subjective", {})
+objective = context.get("objective", {})
+assessment = context.get("assessment", {})
+⋮----
+draft_emr = json.dumps({
+⋮----
+facts_table = json.dumps(facts, ensure_ascii=False, indent=2)
+role_mapping = json.dumps(context.get("role_mapping", {}), ensure_ascii=False, indent=2)
+⋮----
+next_prompt_verify = self.orchestrator.prompt_manager.render(
+⋮----
+parsed = parse_json_response(user_response, "SOAP核查")
+soap_final = parsed.get("soap_final", {}) if parsed else {}
+issues = parsed.get("issues", {}) if parsed else {}
+⋮----
+plan = context.get("plan", {})
+assessment_items = context.get("assessment_items", [])
+plan_items = context.get("plan_items", {})
+⋮----
+emr_final = soap_final if soap_final else {
+⋮----
+emr_final = self.orchestrator.emr_persistence.normalize_format(emr_final)
+⋮----
+fact_service = FactService(self.orchestrator.db)
+fact_records = fact_service.get_facts_by_visit(visit_id)
+⋮----
+emr_final = EvidenceEnricher.enrich(emr_final, fact_records, turns)
+⋮----
+@staticmethod
+    def _build_compact_turns(all_cleaned_turns)
+⋮----
+compact = []
+</file>
+
+<file path="backend/services/pipeline/orchestrator.py">
+def run_async(coro)
+⋮----
+"""
+    在同步上下文中运行异步协程的辅助函数
+    
+    解决问题：在FastAPI的事件循环中不能使用asyncio.run()
+    
+    策略：
+    1. 尝试获取当前运行的事件循环
+    2. 如果存在事件循环且正在运行，使用ThreadPoolExecutor在新线程中运行
+    3. 如果不存在事件循环，使用asyncio.run()
+    """
+⋮----
+loop = asyncio.get_running_loop()
+⋮----
+loop = None
+⋮----
+future = executor.submit(asyncio.run, coro)
+⋮----
+class PipelineOrchestrator
+⋮----
+STAGE_DELAY = 0.5
+⋮----
+MAX_PARALLEL_SEGMENTS = 4
+⋮----
+def __init__(self, db: Session, llm_service: Optional[LLMService] = None, language: str = "zh")
+⋮----
+start_time = time.time()
+⋮----
+turns = self.db.query(TranscriptTurn).filter(
+⋮----
+ctx = PipelineContext(
+⋮----
+all_role_mappings = ctx.all_role_mappings
+all_cleaned_turns = ctx.all_cleaned_turns
+combined_text = ctx.combined_text
+⋮----
+fact_result = FactExtractionStage().execute(ctx)
+⋮----
+fact_service = FactService(self.db)
+fact_records = fact_service.get_facts_by_visit(visit_id)
+⋮----
+consolidation_result = FactConsolidationStage().execute(ctx)
+⋮----
+normalized_result = TermNormalizationStage().execute(ctx)
+⋮----
+extraction_result = fact_result
+⋮----
+soap_result = SOAPGenerationStage().execute(ctx)
+emr_draft = ctx.emr_draft
+so_used_fact_ids = emr_draft.get("so_used_fact_ids", [])
+assessment_items = emr_draft.get("assessment_items", [])
+plan_items = emr_draft.get("plan_items", {})
+⋮----
+verification_result = VerificationStage().execute(ctx)
+⋮----
+emr_final = verification_result.get("soap_final", emr_draft)
+⋮----
+emr_final = self.emr_persistence.normalize_format(emr_final)
+emr_final = EvidenceEnricher.enrich(emr_final, fact_records, turns)
+⋮----
+total_time = time.time() - start_time
+⋮----
+"""
+        带进度回调的处理方法，用于SSE实时推送进度。
+        
+        Args:
+            visit_id: 就诊ID
+            progress_callback: 进度回调函数，签名为 callback(stage_num, stage_name, status, detail, extra)
+            save_evidence: 是否保存证据
+        
+        Yields:
+            进度事件字典 {"stage": int, "name": str, "status": str, "detail": str, "extra": dict}
+        """
+def emit_progress(stage_num, stage_name, status, detail="", extra=None)
+⋮----
+event = {
+⋮----
+segment_start = time.time()
+⋮----
+resolved_count = consolidation_result.get("resolved_count", 0) if consolidation_result else 0
+⋮----
+qualifying_count = len([f for f in fact_records if f.normalization_needed and f.mention])
+⋮----
+result = {
+⋮----
+def _segment_turns(self, turns: List[TranscriptTurn]) -> List[List[TranscriptTurn]]
+⋮----
+segments = []
+current_segment = []
+⋮----
+def _format_segment(self, segment: List[TranscriptTurn]) -> str
+⋮----
+"""
+        格式化对话轮次为文本。
+        
+        输出格式包含turn_index，便于后续证据溯源时精确定位：
+        - 有标签：[#0] [spk0]: 对话内容
+        - 无标签：[#0] 对话内容
+        
+        turn_index是全局唯一的轮次索引，用于证据溯源时精确匹配原始转写。
+        """
+has_valid_speakers = False
+⋮----
+has_valid_speakers = True
+⋮----
+lines = []
+⋮----
+# DEPRECATED: replaced by _build_cleaning_prompt()
+def _lightweight_normalize(self, facts_data: List[Dict[str, Any]]) -> None
+⋮----
+"""轻量术语规范化：使用ChineseTerm本地库快速匹配，为事实添加normalized_term"""
+⋮----
+normalized_count = 0
+⋮----
+mention = fact.get("mention", "")
+⋮----
+result = self.terminology_service._normalize_by_chinese_term(
+⋮----
+def _save_atomic_facts(self, facts_data: List[Dict[str, Any]], visit_id: str) -> None
+⋮----
+saved_count = 0
+⋮----
+fact_id = f"fact_{visit_id}_{uuid.uuid4().hex[:12]}"
+atomic_fact = AtomicFact(
+⋮----
+def _parse_cleaning_response(self, response_text: str, segment: List[TranscriptTurn]) -> Dict[str, Any]
+⋮----
+stage = TurnCleaningStage()
+⋮----
+def _apply_asr_corrections(self, cleaning_result: Dict[str, Any], segment: List[TranscriptTurn])
+⋮----
+def get_all_prompts(self, turns: List[TranscriptTurn]) -> List[Dict[str, Any]]
+⋮----
+stages = []
+⋮----
+segments = self._segment_turns(turns)
+total_segments = len(segments)
+⋮----
+transcript_text = self._format_segment(segment)
+prompt = self.prompt_manager.render("turn_cleaning", transcript=transcript_text)
+</file>
+
+<file path="backend/services/pipeline/speaker_handler.py">
+FIELD_TYPE_MAPPING = {
+⋮----
+FIELD_EXPECTED_ROLE = {
+⋮----
+class SpeakerHandler
+⋮----
+def __init__(self, db: Optional[Session] = None)
+⋮----
+assignment_map = {}
+⋮----
+speaker_pattern = r'\[(医生|患者)\]:\s*([^\n\[]+)'
+matches = re.findall(speaker_pattern, annotated_text)
+⋮----
+turn_index = 0
+⋮----
+text_content = text_content.strip()
+⋮----
+turn = segment[turn_index]
+⋮----
+correction_map = {}
+⋮----
+turn_by_index = {turn.turn_index: turn for turn in segment}
+⋮----
+turn_index = correction.get("turn_index")
+original_speaker = correction.get("original_speaker")
+corrected_speaker = correction.get("corrected_speaker")
+reason = correction.get("reason", "")
+⋮----
+original_speaker = re.sub(r'^\[|\]$', '', original_speaker)
+⋮----
+turn = turn_by_index.get(turn_index)
+⋮----
+def fallback_role_annotation(self, segment: List[TranscriptTurn]) -> Dict[str, Any]
+⋮----
+role_mapping = self.infer_roles_by_rules(segment)
+⋮----
+turns = []
+⋮----
+def infer_roles_by_rules(self, segment: List[TranscriptTurn]) -> Dict[str, str]
+⋮----
+doctor_indicators = [
+⋮----
+patient_indicators = [
+⋮----
+speaker_scores = {}
+⋮----
+speaker = turn.speaker
+⋮----
+text = turn.text
+⋮----
+role_mapping = {}
+</file>
+
+<file path="backend/services/pipeline/stages/__init__.py">
+
+</file>
+
+<file path="backend/services/pipeline/stages/fact_consolidation.py">
+class FactConsolidationStage(PipelineStage)
+⋮----
+def stage_name(self) -> str
+⋮----
+def execute(self, ctx: PipelineContext) -> Dict[str, Any]
+⋮----
+stage_start = time.time()
+⋮----
+fact_records = ctx.fact_records
+visit_id = ctx.visit_id
+⋮----
+result = {"merged_count": 0, "conflict_count": 0, "resolved_count": 0, "final_fact_count": 0}
+⋮----
+facts_json = self._format_facts_for_prompt(fact_records, lightweight=True)
+⋮----
+prompt = ctx.prompt_manager.render("fact_consolidation", facts_json=facts_json)
+⋮----
+debug_interactor = DebugInteractor(ctx.llm_service)
+⋮----
+response_text = debug_interactor.interact(
+⋮----
+result = {"merged_count": 0, "conflict_count": 0, "resolved_count": 0, "final_fact_count": len(fact_records)}
+⋮----
+response = ctx.llm_service.generate(prompt, timeout=300.0, thinking_enabled=False)
+⋮----
+response_text = response.text
+⋮----
+parsed = parse_json_response(response_text, "事实收束")
+⋮----
+merged_count = 0
+conflict_count = 0
+resolved_count = 0
+⋮----
+merged_facts = parsed.get("merged_facts", [])
+conflict_facts = parsed.get("conflict_facts", [])
+resolved_facts = parsed.get("resolved_facts", [])
+⋮----
+merged_count = self._apply_fact_merges(ctx, merged_facts)
+⋮----
+conflict_count = self._mark_conflict_facts(ctx, conflict_facts)
+⋮----
+resolved_count = self._apply_fact_resolutions(ctx, resolved_facts)
+⋮----
+fact_service = FactService(ctx.db)
+final_facts = fact_service.get_facts_by_visit(visit_id)
+final_count = len(final_facts)
+⋮----
+stage_time = time.time() - stage_start
+⋮----
+result = {
+⋮----
+def _apply_fact_merges(self, ctx: PipelineContext, merged_facts: List[Dict]) -> int
+⋮----
+keep_fact_id = merge_info.get("fact_id")
+merged_from_ids = merge_info.get("merged_from", [])
+⋮----
+keep_fact = ctx.db.query(AtomicFact).filter(AtomicFact.fact_id == keep_fact_id).first()
+⋮----
+all_turn_ids = set(keep_fact.evidence_turn_ids or [])
+all_spans = keep_fact.evidence_spans or []
+⋮----
+from_fact = ctx.db.query(AtomicFact).filter(AtomicFact.fact_id == from_id).first()
+⋮----
+def _mark_conflict_facts(self, ctx: PipelineContext, conflict_facts: List[Dict]) -> int
+⋮----
+fact_id = conflict_info.get("fact_id")
+⋮----
+fact = ctx.db.query(AtomicFact).filter(AtomicFact.fact_id == fact_id).first()
+⋮----
+def _apply_fact_resolutions(self, ctx: PipelineContext, resolved_facts: List[Dict]) -> int
+⋮----
+fact_id = resolve_info.get("fact_id")
+resolved_field = resolve_info.get("resolved_field")
+resolved_value = resolve_info.get("resolved_value")
+⋮----
+@staticmethod
+    def _format_facts_for_prompt(fact_records: List[AtomicFact], lightweight: bool = True) -> str
+⋮----
+facts_data = []
+⋮----
+fact_item = {
+⋮----
+evidence_spans = fact.evidence_spans or []
+⋮----
+evidence_spans = [text[:20] if len(text) > 20 else text for text in fact.evidence_text[:3]]
+</file>
+
+<file path="backend/services/pipeline/stages/fact_extraction.py">
+class FactExtractionStage(PipelineStage)
+⋮----
+def stage_name(self) -> str
+⋮----
+def execute(self, ctx: PipelineContext) -> Dict[str, Any]
+⋮----
+stage_start = time.time()
+⋮----
+cleaned_turns = ctx.all_cleaned_turns
+role_mapping = ctx.all_role_mappings
+visit_id = ctx.visit_id
+⋮----
+new_turns_json = json.dumps(cleaned_turns, ensure_ascii=False, indent=2)
+⋮----
+existing_facts_summary = "[]"
+existing_facts_map = {}
+⋮----
+incremental = False
+⋮----
+fact_service = FactService(ctx.db)
+existing_facts = fact_service.get_facts_by_visit(visit_id)
+⋮----
+summary_items = []
+⋮----
+existing_facts_summary = json.dumps(summary_items, ensure_ascii=False, indent=2)
+⋮----
+prompt = ctx.prompt_manager.render(
+⋮----
+debug_interactor = DebugInteractor(ctx.llm_service)
+⋮----
+response_text = debug_interactor.interact(
+⋮----
+response = ctx.llm_service.generate(prompt, thinking_enabled=False)
+⋮----
+response_text = response.text
+⋮----
+result = parse_json_response(response_text, "事实抽取", raise_on_error=True)
+⋮----
+facts = []
+⋮----
+raw_facts = result.get("facts", [])
+⋮----
+facts = self._process_incremental_facts(ctx, raw_facts, existing_facts_map, visit_id)
+⋮----
+facts = self._deduplicate_facts(raw_facts)
+⋮----
+stage_time = time.time() - stage_start
+⋮----
+new_facts = []
+append_operations = []
+⋮----
+operation = fact.get("operation", "new")
+⋮----
+matched_fact_id = fact.get("matched_fact_id")
+⋮----
+def _apply_fact_appends(self, ctx: PipelineContext, append_operations: List[Dict])
+⋮----
+fact_id = op["fact_id"]
+fact = ctx.db.query(AtomicFact).filter(AtomicFact.fact_id == fact_id).first()
+⋮----
+existing_turn_ids = set(fact.evidence_turn_ids or [])
+new_turn_ids = set(op.get("new_evidence_turn_ids", []))
+⋮----
+existing_texts = fact.evidence_text or []
+new_texts = op.get("new_evidence_text", [])
+⋮----
+@staticmethod
+    def _deduplicate_facts(facts: List[Dict]) -> List[Dict]
+⋮----
+merged = {}
+⋮----
+mention = fact.get("mention", "").strip()
+section = fact.get("section_candidate", "")
+speaker = fact.get("speaker", "")
+⋮----
+key = f"{mention}|{section}|{speaker}"
+⋮----
+existing = merged[key]
+existing_turn_ids = set(existing.get("evidence_turn_ids", []))
+new_turn_ids = set(fact.get("evidence_turn_ids", []))
+⋮----
+existing_texts = existing.get("evidence_text", [])
+new_texts = fact.get("evidence_text", [])
+⋮----
+@staticmethod
+    def _save_atomic_facts(ctx: PipelineContext, facts: List[Dict], visit_id: str)
+⋮----
+saved_count = 0
+⋮----
+fact_id = f"fact_{visit_id}_{uuid.uuid4().hex[:12]}"
+⋮----
+atomic_fact = AtomicFact(
+</file>
+
+<file path="backend/services/pipeline/stages/term_normalization.py">
+class TermNormalizationStage(PipelineStage)
+⋮----
+def stage_name(self) -> str
+⋮----
+def execute(self, ctx: PipelineContext) -> Dict[str, Any]
+⋮----
+stage_start = time.time()
+⋮----
+fact_records = ctx.fact_records
+role_mapping = ctx.all_role_mappings
+visit_id = ctx.visit_id
+save_to_db = ctx.save_evidence
+⋮----
+qualifying_facts = [
+⋮----
+result = {
+⋮----
+terminology_service = TerminologyService(ctx.db, ctx.llm_service, language=ctx.language)
+⋮----
+terms_for_result = []
+processed_count = 0
+skipped_count = 0
+use_batch = True
+⋮----
+terms_to_normalize = [
+⋮----
+batch_results = terminology_service.batch_normalize_terms(
+⋮----
+result = batch_results.get(fact.mention)
+⋮----
+result = terminology_service.normalize_single_term(
+⋮----
+term_type = fact.concept_type or "unknown"
+⋮----
+stage_time = time.time() - stage_start
+</file>
+
+<file path="backend/services/pipeline/stages/turn_cleaning.py">
+class TurnCleaningStage(PipelineStage)
+⋮----
+MAX_PARALLEL_SEGMENTS = 4
+⋮----
+def stage_name(self) -> str
+⋮----
+def execute(self, ctx: PipelineContext) -> Dict[str, Any]
+⋮----
+stage_start = time.time()
+⋮----
+segments = self._segment_turns(ctx.turns)
+⋮----
+combined_text = self._build_text_from_cleaned_turns(all_cleaned_turns, ctx.turns)
+⋮----
+def _segment_turns(self, turns: List[TranscriptTurn]) -> List[List[TranscriptTurn]]
+⋮----
+segments = []
+current_segment = []
+segment_turns = settings.LLM_SEGMENT_TURNS
+⋮----
+parallel_start = time.time()
+⋮----
+all_role_mappings = {}
+all_cleaned_turns = []
+⋮----
+result = self._process_segment(ctx, segment, i)
+⋮----
+max_workers = min(len(segments), self.MAX_PARALLEL_SEGMENTS)
+⋮----
+results = [None] * len(segments)
+speaker_handler = SpeakerHandler(ctx.db)
+debug_interactor = DebugInteractor(ctx.llm_service)
+⋮----
+def process_single_segment(args)
+⋮----
+result = self._process_segment(ctx, segment, idx, speaker_handler, debug_interactor)
+⋮----
+futures = list(executor.map(
+⋮----
+fallback_result = speaker_handler.fallback_role_annotation(segments[idx])
+⋮----
+parallel_time = time.time() - parallel_start
+⋮----
+transcript_text = self._format_segment(segment)
+prompt = self._build_cleaning_prompt(ctx, transcript_text)
+⋮----
+response_text = debug_interactor.interact(
+⋮----
+response = ctx.llm_service.generate(prompt, timeout=300.0, thinking_enabled=False)
+⋮----
+response_text = response.text
+⋮----
+cleaning_result = self._parse_cleaning_response(ctx, response_text, segment, speaker_handler)
+⋮----
+@staticmethod
+    def _format_segment(segment: List[TranscriptTurn]) -> str
+⋮----
+has_valid_speakers = False
+⋮----
+has_valid_speakers = True
+⋮----
+lines = []
+⋮----
+@staticmethod
+    def _build_cleaning_prompt(ctx: PipelineContext, transcript: str) -> str
+⋮----
+prompt = ctx.prompt_manager.render("turn_cleaning", transcript=transcript)
+⋮----
+result = parse_json_response(response_text, "转写清洗")
+⋮----
+turns_data = result.get("turns", [])
+⋮----
+role_mapping = {}
+speaker_corrections = []
+⋮----
+turn_by_index = {turn.turn_index: turn for turn in segment}
+⋮----
+turn_id = turn_json.get("turn_id")
+speaker_role = turn_json.get("speaker_role")
+section_hint = turn_json.get("section_hint", [])
+⋮----
+turn = turn_by_index.get(turn_id)
+⋮----
+turn = segment[i]
+⋮----
+original_speaker = turn.speaker
+⋮----
+expected_label = "spk0" if original_speaker != "spk0" else original_speaker
+⋮----
+expected_label = "spk1" if original_speaker != "spk1" else original_speaker
+⋮----
+expected_label = f"spk_{turn_id}"
+⋮----
+turns_data = cleaning_result.get("turns", [])
+⋮----
+correction_map = {}
+applied_count = 0
+⋮----
+corrected_text = turn_json.get("corrected_text", "")
+changed_spans = turn_json.get("changed_spans", [])
+⋮----
+turn_text_map = {}
+⋮----
+tid = ct.get("turn_id")
+ct_text = ct.get("corrected_text", "")
+⋮----
+text = turn_text_map.get(turn.turn_index, turn.text)
+speaker = turn.corrected_speaker or turn.speaker
+⋮----
+combined = "\n".join(lines)
+⋮----
+speaker = turn.speaker
+</file>
+
+<file path="backend/services/pipeline/stages/verification.py">
+class VerificationStage(PipelineStage)
+⋮----
+def stage_name(self) -> str
+⋮----
+def execute(self, ctx: PipelineContext) -> Dict[str, Any]
+⋮----
+stage_start = time.time()
+⋮----
+draft_emr = ctx.emr_draft
+fact_records = ctx.fact_records
+role_mapping = ctx.all_role_mappings
+⋮----
+draft_emr_json = json.dumps(draft_emr, ensure_ascii=False, indent=2)
+⋮----
+fact_table_json = self._format_facts_for_prompt(fact_records)
+fact_table_count = len(fact_records)
+⋮----
+role_mapping_json = json.dumps(role_mapping, ensure_ascii=False, indent=2)
+⋮----
+prompt = ctx.prompt_manager.render(
+⋮----
+debug_interactor = DebugInteractor(ctx.llm_service)
+⋮----
+response_text = debug_interactor.interact(
+⋮----
+result = {"issues": {}, "soap_final": draft_emr}
+⋮----
+response = ctx.llm_service.generate(prompt)
+⋮----
+response_text = response.text
+⋮----
+parsed = parse_json_response(response_text, "核查修订")
+⋮----
+issues = parsed.get("issues", {})
+soap_final = parsed["soap_final"]
+⋮----
+unsupported_count = len(issues.get("unsupported_claims", []))
+missing_count = len(issues.get("missing_critical_facts", []))
+conflict_count = len(issues.get("internal_conflicts", []))
+certainty_error_count = len(issues.get("certainty_errors", []))
+⋮----
+stage_time = time.time() - stage_start
+⋮----
+result = {
+⋮----
+@staticmethod
+    def _format_facts_for_prompt(fact_records: List[AtomicFact], lightweight: bool = True) -> str
+⋮----
+facts_data = []
+⋮----
+fact_item = {
+⋮----
+evidence_spans = fact.evidence_spans or []
+⋮----
+evidence_spans = [text[:20] if len(text) > 20 else text for text in fact.evidence_text[:3]]
+</file>
+
+<file path="backend/services/pipeline/utils.py">
+class JSONParseError(Exception)
+⋮----
+def __init__(self, stage_name: str, response_text: str, error_msg: str = "")
+⋮----
+def get_full_response(self) -> str
+⋮----
+def parse_json_response(response_text: str, stage_name: str = "", raise_on_error: bool = False) -> Optional[Dict[str, Any]]
+⋮----
+response_text = response_text.strip()
+⋮----
+response_text = _remove_markdown_code_block(response_text)
+⋮----
+response_text = _remove_control_characters(response_text)
+⋮----
+json_start = response_text.find("{")
+json_end = response_text.rfind("}")
+⋮----
+json_str = response_text[json_start:json_end + 1]
+⋮----
+result = json.loads(json_str)
+⋮----
+fixed_json = _try_fix_json(json_str)
+⋮----
+all_jsons = _extract_all_json_objects(response_text)
+⋮----
+potential_json = response_text[:json_end + 1]
+⋮----
+potential_json = response_text
+⋮----
+json_str = "{" + potential_json
+⋮----
+colon_pos = potential_json.find('":')
+⋮----
+key = potential_json[:colon_pos]
+rest = potential_json[colon_pos + 1:]
+json_str = '{"' + key + '"' + rest
+⋮----
+def _remove_markdown_code_block(text: str) -> str
+⋮----
+text = re.sub(r'^```(?:json)?\s*\n?', '', text)
+text = re.sub(r'\n?```\s*$', '', text)
+⋮----
+def _remove_control_characters(text: str) -> str
+⋮----
+result = []
+in_string = False
+escape_next = False
+⋮----
+escape_next = True
+⋮----
+in_string = not in_string
+⋮----
+def _try_fix_json(json_str: str) -> Optional[Dict[str, Any]]
+⋮----
+fixed = json_str
+⋮----
+fixed = re.sub(r',\s*}', '}', fixed)
+fixed = re.sub(r',\s*]', ']', fixed)
+⋮----
+fixed = re.sub(r',\s*\n\s*"', ',', fixed)
+fixed = re.sub(r',\s*\n\s*}', '}', fixed)
+⋮----
+fixed = re.sub(r':\s*,', ': null,', fixed)
+fixed = re.sub(r':\s*}', ': null}', fixed)
+⋮----
+fixed = re.sub(r'"\s*,\s*,', '",', fixed)
+fixed = re.sub(r',\s*,', ',', fixed)
+⋮----
+fixed = re.sub(r'"\s*:\s*"', '": "', fixed)
+fixed = re.sub(r'"\s*:\s*\[', '": [', fixed)
+fixed = re.sub(r'"\s*:\s*\{', '": {', fixed)
+⋮----
+fixed = re.sub(r'(?<!\\)"(?=[a-zA-Z0-9_\u4e00-\u9fff])', '"', fixed)
+⋮----
+brace_count = fixed.count('{') - fixed.count('}')
+bracket_count = fixed.count('[') - fixed.count(']')
+⋮----
+def _extract_all_json_objects(text: str) -> List[Dict[str, Any]]
+⋮----
+results = []
+depth = 0
+start = -1
+⋮----
+start = i
+⋮----
+json_str = text[start:i+1]
+⋮----
+obj = json.loads(json_str)
 </file>
 
 <file path="backend/services/term_rewriter.py">
@@ -4039,2881 +5023,6 @@ end_ms = int(end_sample / sr * 1000)
 full_text = " ".join(all_text)
 </file>
 
-<file path="tests/midterm_results/midterm_test_r2_20260514_200239.json">
-{
-  "llm_post_correction": {
-    "test": "llm_post_correction",
-    "summary": {
-      "total_expected": 5,
-      "total_corrected": 5,
-      "accuracy": 1.0
-    },
-    "details": [
-      {
-        "name": "日常同音字",
-        "expected": [
-          "闲的食物→咸的食物"
-        ],
-        "corrections": [
-          {
-            "original": "闲",
-            "corrected": "咸",
-            "type": "同音字",
-            "reason": "闲与咸同音，但医嘱中常建议少吃咸的食物（高盐食物），而非闲的食物。"
-          }
-        ],
-        "matched": 1,
-        "total": 1
-      },
-      {
-        "name": "医学术语拼音错误",
-        "expected": [
-          "搞血压→高血压",
-          "阿莫希林→阿莫西林"
-        ],
-        "corrections": [
-          {
-            "original": "搞血压",
-            "corrected": "高血压",
-            "type": "同音字",
-            "reason": "“搞”与“高”同音，但“高血压”是正确医学术语。"
-          },
-          {
-            "original": "阿莫希林",
-            "corrected": "阿莫西林",
-            "type": "药物名",
-            "reason": "“希”与“西”同音，但正确药物名称为“阿莫西林”。"
-          }
-        ],
-        "matched": 2,
-        "total": 2
-      },
-      {
-        "name": "症状同音字",
-        "expected": [
-          "刻嗽→咳嗽",
-          "发骚→发烧"
-        ],
-        "corrections": [
-          {
-            "original": "刻嗽",
-            "corrected": "咳嗽",
-            "type": "同音字",
-            "reason": "“刻嗽”是“咳嗽”的同音字错误，咳嗽是常见症状术语。"
-          },
-          {
-            "original": "发骚",
-            "corrected": "发烧",
-            "type": "同音字",
-            "reason": "“发骚”是“发烧”的同音字错误，发烧是医学术语。"
-          }
-        ],
-        "matched": 2,
-        "total": 2
-      }
-    ]
-  },
-  "terminology_normalization": {
-    "test": "terminology_normalization",
-    "summary": {
-      "total_tested": 15,
-      "umls_hit": 0,
-      "llm_fallback": 0,
-      "no_match": 0,
-      "umls_rate": 0,
-      "semantic_match": 5,
-      "semantic_match_rate": 0.3333333333333333
-    },
-    "details": [
-      {
-        "colloquial": "拉肚子",
-        "expected": [
-          "腹泻"
-        ],
-        "normalized": "腹泻",
-        "source": "LLM",
-        "cui": "",
-        "confidence": 0.5,
-        "is_match": true
-      },
-      {
-        "colloquial": "肚子疼",
-        "expected": [
-          "腹痛",
-          "腹泻"
-        ],
-        "normalized": "腹痛",
-        "source": "LLM",
-        "cui": "",
-        "confidence": 0.5,
-        "is_match": true
-      },
-      {
-        "colloquial": "肚子痛",
-        "expected": [
-          "腹痛"
-        ],
-        "normalized": "Does your child complain of an upset stomach at night:Find:Pt:^Patient:Ord:PhenX",
-        "source": "UMLS",
-        "cui": "C3173270",
-        "confidence": 0.6,
-        "is_match": false
-      },
-      {
-        "colloquial": "头疼",
-        "expected": [
-          "头痛"
-        ],
-        "normalized": "Which statement best describes the pain of your severe headaches:Find:Pt:^Patient:Ord:PhenX",
-        "source": "UMLS",
-        "cui": "C3174220",
-        "confidence": 0.6,
-        "is_match": false
-      },
-      {
-        "colloquial": "头痛",
-        "expected": [
-          "头痛"
-        ],
-        "normalized": "Do you consider your severe headaches to be migraines:Find:Pt:^Patient:Ord:PhenX",
-        "source": "UMLS",
-        "cui": "C3175733",
-        "confidence": 0.6,
-        "is_match": false
-      },
-      {
-        "colloquial": "发高烧",
-        "expected": [
-          "发热",
-          "高热"
-        ],
-        "normalized": "高热",
-        "source": "LLM",
-        "cui": "",
-        "confidence": 0.5,
-        "is_match": true
-      },
-      {
-        "colloquial": "发低烧",
-        "expected": [
-          "发热",
-          "低热"
-        ],
-        "normalized": "低热",
-        "source": "LLM",
-        "cui": "",
-        "confidence": 0.5,
-        "is_match": true
-      },
-      {
-        "colloquial": "流鼻涕",
-        "expected": [
-          "鼻流涕",
-          "感冒"
-        ],
-        "normalized": "Have you ever had a problem with sneezing, or a runny or blocked nose, when you did not have a cold or the flu:Find:Pt:^Patient:Ord:PhenX",
-        "source": "UMLS",
-        "cui": "C3173781",
-        "confidence": 0.6,
-        "is_match": false
-      },
-      {
-        "colloquial": "鼻涕",
-        "expected": [
-          "鼻流涕"
-        ],
-        "normalized": "Have you ever had a problem with sneezing, or a runny or blocked nose, when you did not have a cold or the flu:Find:Pt:^Patient:Ord:PhenX",
-        "source": "UMLS",
-        "cui": "C3173781",
-        "confidence": 0.6,
-        "is_match": false
-      },
-      {
-        "colloquial": "咳嗽不止",
-        "expected": [
-          "咳嗽"
-        ],
-        "normalized": "Coughing",
-        "source": "UMLS",
-        "cui": "C0010200",
-        "confidence": 0.6,
-        "is_match": false
-      },
-      {
-        "colloquial": "干咳",
-        "expected": [
-          "干咳",
-          "咳嗽"
-        ],
-        "normalized": "In the last 12Mo, have you had a dry cough at night, apart from a cough associated with a cold or chest infection:Find:12Mo:^Patient:Ord:PhenX",
-        "source": "UMLS",
-        "cui": "C3173779",
-        "confidence": 0.6,
-        "is_match": false
-      },
-      {
-        "colloquial": "咳痰",
-        "expected": [
-          "咳痰",
-          "咳嗽"
-        ],
-        "normalized": "Do you usually bring up phlegm from your chest:Find:Pt:^Patient:Ord:PhenX",
-        "source": "UMLS",
-        "cui": "C3173639",
-        "confidence": 0.6,
-        "is_match": false
-      },
-      {
-        "colloquial": "嗓子疼",
-        "expected": [
-          "咽喉炎",
-          "咽喉不适"
-        ],
-        "normalized": "咽痛",
-        "source": "LLM",
-        "cui": "",
-        "confidence": 0.5,
-        "is_match": false
-      },
-      {
-        "colloquial": "嗓子沙哑",
-        "expected": [
-          "嗓子沙哑",
-          "声音嘶哑"
-        ],
-        "normalized": "声音嘶哑",
-        "source": "LLM",
-        "cui": "",
-        "confidence": 0.5,
-        "is_match": true
-      },
-      {
-        "colloquial": "声音哑",
-        "expected": [
-          "声音嘶哑"
-        ],
-        "normalized": "声嘶",
-        "source": "LLM",
-        "cui": "",
-        "confidence": 0.5,
-        "is_match": false
-      }
-    ]
-  },
-  "e2e_vs_multistage": {
-    "test": "e2e_vs_multistage",
-    "comparison": [
-      {
-        "field": "chief_complaint",
-        "ground_truth": "头疼3天",
-        "e2e_value": "头疼三天，早上明显",
-        "e2e_match": "partial",
-        "multi_value": "{'value': '', 'evidence_traces': []}",
-        "multi_match": "partial"
-      },
-      {
-        "field": "history_present_illness",
-        "ground_truth": "头疼3天，晨起加重，伴恶心，无呕吐",
-        "e2e_value": "患者三天前出现头疼，以晨起时为著，伴恶心，无呕吐",
-        "e2e_match": "partial",
-        "multi_value": "{'value': '', 'evidence_traces': []}",
-        "multi_match": "partial"
-      },
-      {
-        "field": "physical_examination",
-        "ground_truth": "血压145/95mmHg",
-        "e2e_value": "血压145/95mmHg",
-        "e2e_match": "match",
-        "multi_value": "{'value': '', 'evidence_traces': []}",
-        "multi_match": "partial"
-      },
-      {
-        "field": "diagnosis",
-        "ground_truth": "高血压",
-        "e2e_value": "高血压（考虑高血压引起头疼）",
-        "e2e_match": "match",
-        "multi_value": "{'value': '', 'evidence_traces': []}",
-        "multi_match": "partial"
-      },
-      {
-        "field": "treatment",
-        "ground_truth": "降压药，每日一次",
-        "e2e_value": "降压药，每日一次，晨起服用",
-        "e2e_match": "match",
-        "multi_value": "{'value': '', 'evidence_traces': []}",
-        "multi_match": "partial"
-      },
-      {
-        "field": "advice",
-        "ground_truth": "低盐饮食，注意休息，一周后复查",
-        "e2e_value": "低盐饮食，注意休息；一周后复查；若头疼加重及时就诊",
-        "e2e_match": "partial",
-        "multi_value": "{'value': '', 'evidence_traces': []}",
-        "multi_match": "partial"
-      }
-    ],
-    "e2e_time": 3.7328104972839355,
-    "multi_time": 9.038758993148804,
-    "e2e_match_count": 3,
-    "multi_match_count": 0,
-    "e2e_result": {
-      "subjective": {
-        "chief_complaint": "头疼三天，早上明显",
-        "history_present_illness": "患者三天前出现头疼，以晨起时为著，伴恶心，无呕吐",
-        "past_history": ""
-      },
-      "objective": {
-        "physical_examination": "血压145/95mmHg",
-        "auxiliary_examination": ""
-      },
-      "assessment": {
-        "diagnosis": "高血压（考虑高血压引起头疼）"
-      },
-      "plan": {
-        "treatment": "降压药，每日一次，晨起服用",
-        "advice": "低盐饮食，注意休息；一周后复查；若头疼加重及时就诊"
-      }
-    },
-    "multi_result": {
-      "subjective": {
-        "text": "",
-        "chief_complaint": {
-          "value": "",
-          "evidence_traces": []
-        },
-        "history_present_illness": {
-          "value": "",
-          "evidence_traces": []
-        },
-        "past_history": {
-          "value": "",
-          "evidence_traces": []
-        }
-      },
-      "objective": {
-        "text": "",
-        "physical_examination": {
-          "value": "",
-          "evidence_traces": []
-        },
-        "auxiliary_examination": {
-          "value": "",
-          "evidence_traces": []
-        }
-      },
-      "assessment": {
-        "text": "诊断：待定",
-        "diagnosis": {
-          "value": "",
-          "evidence_traces": []
-        }
-      },
-      "plan": {
-        "text": "",
-        "treatment": {
-          "value": "",
-          "evidence_traces": []
-        },
-        "advice": {
-          "value": "",
-          "evidence_traces": []
-        }
-      }
-    }
-  },
-  "ablation": {
-    "test": "ablation",
-    "term_comparison": [
-      {
-        "colloquial": "拉肚子",
-        "standard": "腹泻",
-        "e2e_uses_colloquial": false,
-        "e2e_uses_standard": true,
-        "multi_uses_colloquial": false,
-        "multi_uses_standard": false
-      },
-      {
-        "colloquial": "肚子疼",
-        "standard": "腹痛",
-        "e2e_uses_colloquial": false,
-        "e2e_uses_standard": true,
-        "multi_uses_colloquial": false,
-        "multi_uses_standard": false
-      },
-      {
-        "colloquial": "发低烧",
-        "standard": "低热",
-        "e2e_uses_colloquial": false,
-        "e2e_uses_standard": true,
-        "multi_uses_colloquial": false,
-        "multi_uses_standard": false
-      },
-      {
-        "colloquial": "恶心想吐",
-        "standard": "恶心、呕吐",
-        "e2e_uses_colloquial": false,
-        "e2e_uses_standard": false,
-        "multi_uses_colloquial": false,
-        "multi_uses_standard": false
-      }
-    ],
-    "e2e_standard_count": 3,
-    "multi_standard_count": 0,
-    "total_colloquial": 4,
-    "e2e_result": {
-      "subjective": {
-        "chief_complaint": "腹泻伴腹痛2天",
-        "history_present_illness": "患者2天前出现腹泻，伴有腹痛，低热（体温37.8℃），恶心呕吐，无寒战、里急后重等。",
-        "past_history": ""
-      },
-      "objective": {
-        "physical_examination": "体温37.8℃，腹部有压痛，无反跳痛及肌紧张。",
-        "auxiliary_examination": ""
-      },
-      "assessment": {
-        "diagnosis": "急性胃肠炎"
-      },
-      "plan": {
-        "treatment": "蒙脱石散、左氧氟沙星",
-        "advice": "多喝水，少食油腻食物，注意休息。"
-      }
-    },
-    "multi_result": {
-      "subjective": {
-        "text": "",
-        "chief_complaint": {
-          "value": "",
-          "evidence_traces": []
-        },
-        "history_present_illness": {
-          "value": "",
-          "evidence_traces": []
-        },
-        "past_history": {
-          "value": "",
-          "evidence_traces": []
-        }
-      },
-      "objective": {
-        "text": "",
-        "physical_examination": {
-          "value": "",
-          "evidence_traces": []
-        },
-        "auxiliary_examination": {
-          "value": "",
-          "evidence_traces": []
-        }
-      },
-      "assessment": {
-        "text": "诊断：待定",
-        "diagnosis": {
-          "value": "",
-          "evidence_traces": []
-        }
-      },
-      "plan": {
-        "text": "",
-        "treatment": {
-          "value": "",
-          "evidence_traces": []
-        },
-        "advice": {
-          "value": "",
-          "evidence_traces": []
-        }
-      }
-    },
-    "normalized_terms": []
-  },
-  "evaluation_pipeline": {
-    "test": "evaluation_pipeline",
-    "results": [
-      {
-        "record_id": 1,
-        "visit_id": "1df5213e-a7a5-4920-bfed-c3e83be108b4",
-        "overall_score": 0.60625,
-        "consistency_support_rate": 1.0,
-        "consistency_score": 1.0,
-        "completeness_recall_rate": 0.6875,
-        "quality_score": 10,
-        "safety_has_high_risk": true
-      },
-      {
-        "record_id": 2,
-        "visit_id": "66b589fe-d981-423f-8f13-bebed8432a58",
-        "overall_score": 0.7937500000000001,
-        "consistency_support_rate": 1.0,
-        "consistency_score": 1.0,
-        "completeness_recall_rate": 0.8125,
-        "quality_score": 10,
-        "safety_has_high_risk": false
-      }
-    ]
-  },
-  "existing_emr_quality": {
-    "test": "existing_emr_quality",
-    "field_stats": {
-      "chief_complaint": {
-        "filled": 13,
-        "total": 14
-      },
-      "history_present_illness": {
-        "filled": 14,
-        "total": 14
-      },
-      "past_history": {
-        "filled": 5,
-        "total": 14
-      },
-      "physical_examination": {
-        "filled": 14,
-        "total": 14
-      },
-      "auxiliary_examination": {
-        "filled": 7,
-        "total": 14
-      },
-      "diagnosis": {
-        "filled": 12,
-        "total": 14
-      },
-      "treatment": {
-        "filled": 14,
-        "total": 14
-      },
-      "advice": {
-        "filled": 14,
-        "total": 14
-      }
-    },
-    "term_stats": {
-      "total_terms": 156,
-      "umls_sourced": 0,
-      "llm_sourced": 0,
-      "with_cui": 116
-    },
-    "evidence_stats": {
-      "total_evidence": 138
-    }
-  },
-  "speaker_role_evolution": {
-    "test": "speaker_role_evolution",
-    "rule_accuracy": 0.7,
-    "rule_details": [
-      {
-        "text": "请问哪里不舒服？",
-        "expected": "doctor",
-        "predicted": "doctor",
-        "doc_score": 2,
-        "pat_score": 0,
-        "correct": true
-      },
-      {
-        "text": "我这几天一直头疼",
-        "expected": "patient",
-        "predicted": "patient",
-        "doc_score": 0,
-        "pat_score": 1,
-        "correct": true
-      },
-      {
-        "text": "头疼持续多长时间了？",
-        "expected": "doctor",
-        "predicted": "doctor",
-        "doc_score": 1,
-        "pat_score": 0,
-        "correct": true
-      },
-      {
-        "text": "大概三天了",
-        "expected": "patient",
-        "predicted": "patient",
-        "doc_score": 0,
-        "pat_score": 1,
-        "correct": true
-      },
-      {
-        "text": "我给您量一下血压",
-        "expected": "doctor",
-        "predicted": "unknown",
-        "doc_score": 0,
-        "pat_score": 0,
-        "correct": false
-      },
-      {
-        "text": "血压高会引起头疼吗？",
-        "expected": "patient",
-        "predicted": "doctor",
-        "doc_score": 2,
-        "pat_score": 0,
-        "correct": false
-      },
-      {
-        "text": "考虑是高血压引起的头疼",
-        "expected": "doctor",
-        "predicted": "unknown",
-        "doc_score": 0,
-        "pat_score": 0,
-        "correct": false
-      },
-      {
-        "text": "好的，谢谢医生",
-        "expected": "patient",
-        "predicted": "patient",
-        "doc_score": 0,
-        "pat_score": 1,
-        "correct": true
-      },
-      {
-        "text": "注意低盐饮食，一周后复查",
-        "expected": "doctor",
-        "predicted": "doctor",
-        "doc_score": 1,
-        "pat_score": 0,
-        "correct": true
-      },
-      {
-        "text": "我有时候会恶心",
-        "expected": "patient",
-        "predicted": "patient",
-        "doc_score": 0,
-        "pat_score": 2,
-        "correct": true
-      }
-    ]
-  }
-}
-</file>
-
-<file path="tests/midterm_results/midterm_test_r2_20260514_201846.json">
-{
-  "llm_post_correction": {
-    "test": "llm_post_correction",
-    "summary": {
-      "total_expected": 5,
-      "total_corrected": 5,
-      "accuracy": 1.0
-    },
-    "details": [
-      {
-        "name": "日常同音字",
-        "expected": [
-          "闲的食物→咸的食物"
-        ],
-        "corrections": [
-          {
-            "original": "闲",
-            "corrected": "咸",
-            "type": "同音字",
-            "reason": "根据语境，医生建议少吃含盐量高的食物，'闲'是'咸'的同音字错误。"
-          }
-        ],
-        "matched": 1,
-        "total": 1
-      },
-      {
-        "name": "医学术语拼音错误",
-        "expected": [
-          "搞血压→高血压",
-          "阿莫希林→阿莫西林"
-        ],
-        "corrections": [
-          {
-            "original": "搞血压",
-            "corrected": "高血压",
-            "type": "同音字",
-            "reason": "“搞”与“高”同音，但“高血压”是正确医学术语。"
-          },
-          {
-            "original": "阿莫希林",
-            "corrected": "阿莫西林",
-            "type": "药物名",
-            "reason": "“阿莫希林”为同音错误，正确药物名为“阿莫西林”。"
-          }
-        ],
-        "matched": 2,
-        "total": 2
-      },
-      {
-        "name": "症状同音字",
-        "expected": [
-          "刻嗽→咳嗽",
-          "发骚→发烧"
-        ],
-        "corrections": [
-          {
-            "original": "刻嗽",
-            "corrected": "咳嗽",
-            "type": "同音字",
-            "reason": "“刻嗽”为同音字错误，正确医学术语应为“咳嗽”"
-          },
-          {
-            "original": "发骚",
-            "corrected": "发烧",
-            "type": "同音字",
-            "reason": "“发骚”为同音字错误，正确医学术语应为“发烧”"
-          }
-        ],
-        "matched": 2,
-        "total": 2
-      }
-    ]
-  },
-  "terminology_normalization": {
-    "test": "terminology_normalization",
-    "summary": {
-      "total_tested": 15,
-      "chinese_term_hit": 15,
-      "umls_hit": 0,
-      "llm_fallback": 0,
-      "no_match": 0,
-      "chinese_term_rate": 1.0,
-      "semantic_match": 15,
-      "semantic_match_rate": 1.0
-    },
-    "details": [
-      {
-        "colloquial": "拉肚子",
-        "expected": [
-          "腹泻"
-        ],
-        "normalized": "腹泻",
-        "source": "ChineseTerm",
-        "cui": "",
-        "confidence": 0.95,
-        "code": "",
-        "code_system": "",
-        "is_match": true
-      },
-      {
-        "colloquial": "肚子疼",
-        "expected": [
-          "腹痛",
-          "腹泻"
-        ],
-        "normalized": "腹痛",
-        "source": "ChineseTerm",
-        "cui": "",
-        "confidence": 0.95,
-        "code": "",
-        "code_system": "",
-        "is_match": true
-      },
-      {
-        "colloquial": "肚子痛",
-        "expected": [
-          "腹痛"
-        ],
-        "normalized": "腹痛",
-        "source": "ChineseTerm",
-        "cui": "",
-        "confidence": 0.95,
-        "code": "",
-        "code_system": "",
-        "is_match": true
-      },
-      {
-        "colloquial": "头疼",
-        "expected": [
-          "头痛"
-        ],
-        "normalized": "头痛",
-        "source": "ChineseTerm",
-        "cui": "",
-        "confidence": 0.95,
-        "code": "",
-        "code_system": "",
-        "is_match": true
-      },
-      {
-        "colloquial": "头痛",
-        "expected": [
-          "头痛"
-        ],
-        "normalized": "头痛",
-        "source": "ChineseTerm",
-        "cui": "",
-        "confidence": 1.0,
-        "code": "",
-        "code_system": "",
-        "is_match": true
-      },
-      {
-        "colloquial": "发高烧",
-        "expected": [
-          "发热",
-          "高热"
-        ],
-        "normalized": "发热",
-        "source": "ChineseTerm",
-        "cui": "",
-        "confidence": 0.95,
-        "code": "",
-        "code_system": "",
-        "is_match": true
-      },
-      {
-        "colloquial": "发低烧",
-        "expected": [
-          "发热",
-          "低热"
-        ],
-        "normalized": "发热",
-        "source": "ChineseTerm",
-        "cui": "",
-        "confidence": 0.95,
-        "code": "",
-        "code_system": "",
-        "is_match": true
-      },
-      {
-        "colloquial": "流鼻涕",
-        "expected": [
-          "鼻流涕",
-          "感冒"
-        ],
-        "normalized": "鼻流涕",
-        "source": "ChineseTerm",
-        "cui": "",
-        "confidence": 0.95,
-        "code": "",
-        "code_system": "",
-        "is_match": true
-      },
-      {
-        "colloquial": "鼻涕",
-        "expected": [
-          "鼻流涕"
-        ],
-        "normalized": "鼻流涕",
-        "source": "ChineseTerm",
-        "cui": "",
-        "confidence": 0.95,
-        "code": "",
-        "code_system": "",
-        "is_match": true
-      },
-      {
-        "colloquial": "咳嗽不止",
-        "expected": [
-          "咳嗽"
-        ],
-        "normalized": "咳嗽",
-        "source": "ChineseTerm",
-        "cui": "",
-        "confidence": 0.95,
-        "code": "",
-        "code_system": "",
-        "is_match": true
-      },
-      {
-        "colloquial": "干咳",
-        "expected": [
-          "干咳",
-          "咳嗽"
-        ],
-        "normalized": "干咳",
-        "source": "ChineseTerm",
-        "cui": "",
-        "confidence": 1.0,
-        "code": "",
-        "code_system": "",
-        "is_match": true
-      },
-      {
-        "colloquial": "咳痰",
-        "expected": [
-          "咳痰",
-          "咳嗽"
-        ],
-        "normalized": "咳痰",
-        "source": "ChineseTerm",
-        "cui": "",
-        "confidence": 1.0,
-        "code": "",
-        "code_system": "",
-        "is_match": true
-      },
-      {
-        "colloquial": "嗓子疼",
-        "expected": [
-          "咽喉炎",
-          "咽喉不适"
-        ],
-        "normalized": "咽喉炎",
-        "source": "ChineseTerm",
-        "cui": "",
-        "confidence": 0.95,
-        "code": "",
-        "code_system": "",
-        "is_match": true
-      },
-      {
-        "colloquial": "嗓子沙哑",
-        "expected": [
-          "嗓子沙哑",
-          "声音嘶哑"
-        ],
-        "normalized": "嗓子沙哑",
-        "source": "ChineseTerm",
-        "cui": "",
-        "confidence": 1.0,
-        "code": "",
-        "code_system": "",
-        "is_match": true
-      },
-      {
-        "colloquial": "声音哑",
-        "expected": [
-          "声音嘶哑"
-        ],
-        "normalized": "声音嘶哑",
-        "source": "ChineseTerm",
-        "cui": "",
-        "confidence": 0.95,
-        "code": "",
-        "code_system": "",
-        "is_match": true
-      }
-    ]
-  },
-  "e2e_vs_multistage": {
-    "test": "e2e_vs_multistage",
-    "comparison": [
-      {
-        "field": "chief_complaint",
-        "ground_truth": "头疼3天",
-        "e2e_value": "头疼三天",
-        "e2e_match": "partial",
-        "multi_value": "{'value': '头痛3天，晨起加重。', 'evidence_traces': [{'turn_id': 287, 'turn_index': 1, 'turn_text': '医生，我这几天一",
-        "multi_match": "partial"
-      },
-      {
-        "field": "history_present_illness",
-        "ground_truth": "头疼3天，晨起加重，伴恶心，无呕吐",
-        "e2e_value": "患者三天前出现头疼，以晨起时明显，伴恶心，无呕吐。",
-        "e2e_match": "partial",
-        "multi_value": "{'value': '患者于3天前无明显诱因出现头痛，以晨起时为著，伴恶心，无呕吐。', 'evidence_traces': [{'turn_id': 289, 'turn_index': 3, '",
-        "multi_match": "partial"
-      },
-      {
-        "field": "physical_examination",
-        "ground_truth": "血压145/95mmHg",
-        "e2e_value": "血压145/95mmHg",
-        "e2e_match": "match",
-        "multi_value": "{'value': '血压145/95mmHg，偏高。', 'evidence_traces': [{'turn_id': 290, 'turn_index': 4, 'turn_text': '我给",
-        "multi_match": "match"
-      },
-      {
-        "field": "diagnosis",
-        "ground_truth": "高血压",
-        "e2e_value": "高血压病",
-        "e2e_match": "match",
-        "multi_value": "{'value': '高血压性头痛', 'evidence_traces': [{'turn_id': 292, 'turn_index': 6, 'turn_text': '是的，考虑是高血压引起的",
-        "multi_match": "match"
-      },
-      {
-        "field": "treatment",
-        "ground_truth": "降压药，每日一次",
-        "e2e_value": "降压药，每日一次，晨起服用",
-        "e2e_match": "match",
-        "multi_value": "{'value': '予降压药口服，每日一次，晨起服用。', 'evidence_traces': [{'turn_id': 292, 'turn_index': 6, 'turn_text': '是",
-        "multi_match": "partial"
-      },
-      {
-        "field": "advice",
-        "ground_truth": "低盐饮食，注意休息，一周后复查",
-        "e2e_value": "低盐饮食，注意休息；一周后复查；若头疼加重及时就诊",
-        "e2e_match": "partial",
-        "multi_value": "{'value': '低盐饮食，注意休息；一周后复查，如头痛加重及时就诊。', 'evidence_traces': [{'turn_id': 292, 'turn_index': 6, 'turn_",
-        "multi_match": "partial"
-      }
-    ],
-    "e2e_time": 3.5129618644714355,
-    "multi_time": 100.66372561454773,
-    "e2e_match_count": 3,
-    "multi_match_count": 2,
-    "e2e_result": {
-      "subjective": {
-        "chief_complaint": "头疼三天",
-        "history_present_illness": "患者三天前出现头疼，以晨起时明显，伴恶心，无呕吐。",
-        "past_history": ""
-      },
-      "objective": {
-        "physical_examination": "血压145/95mmHg",
-        "auxiliary_examination": ""
-      },
-      "assessment": {
-        "diagnosis": "高血压病"
-      },
-      "plan": {
-        "treatment": "降压药，每日一次，晨起服用",
-        "advice": "低盐饮食，注意休息；一周后复查；若头疼加重及时就诊"
-      }
-    },
-    "multi_result": {
-      "subjective": {
-        "text": "患者主诉头痛3天，以晨起为著，伴恶心，无呕吐。",
-        "chief_complaint": {
-          "value": "头痛3天，晨起加重。",
-          "evidence_traces": [
-            {
-              "turn_id": 287,
-              "turn_index": 1,
-              "turn_text": "医生，我这几天一直头疼，特别是早上起来的时候。",
-              "speaker": "患者",
-              "content": "我这几天一直头疼，特别是早上起来的时候。",
-              "start_char": 37,
-              "end_char": 66,
-              "confidence": 0.5
-            }
-          ]
-        },
-        "history_present_illness": {
-          "value": "患者于3天前无明显诱因出现头痛，以晨起时为著，伴恶心，无呕吐。",
-          "evidence_traces": [
-            {
-              "turn_id": 289,
-              "turn_index": 3,
-              "turn_text": "大概三天了，有时候会恶心，但没有呕吐。",
-              "speaker": "患者",
-              "content": "大概三天了，有时候会恶心，但没有呕吐。",
-              "start_char": 112,
-              "end_char": 142,
-              "confidence": 0.5
-            }
-          ]
-        },
-        "past_history": ""
-      },
-      "objective": {
-        "text": "体格检查：血压145/95mmHg，偏高。辅助检查：未见。",
-        "physical_examination": {
-          "value": "血压145/95mmHg，偏高。",
-          "evidence_traces": [
-            {
-              "turn_id": 290,
-              "turn_index": 4,
-              "turn_text": "我给您量一下血压。一百四十五九十五，血压偏高。",
-              "speaker": "医生",
-              "content": "一百四十五九十五，血压偏高。",
-              "start_char": 163,
-              "end_char": 190,
-              "confidence": 0.5
-            }
-          ]
-        },
-        "auxiliary_examination": ""
-      },
-      "assessment": {
-        "text": "考虑高血压引起的头痛。",
-        "diagnosis": {
-          "value": "高血压性头痛",
-          "evidence_traces": [
-            {
-              "turn_id": 292,
-              "turn_index": 6,
-              "turn_text": "是的，考虑是高血压引起的头疼。我给您开点降压药，每天一次，早上吃。注意少吃咸的食物，多休息。",
-              "speaker": "医生",
-              "content": "考虑是高血压引起的头疼。",
-              "start_char": 227,
-              "end_char": 248,
-              "confidence": 0.5
-            }
-          ]
-        }
-      },
-      "plan": {
-        "text": "治疗方案：予降压药口服，每日一次，晨起服用。医嘱：低盐饮食，注意休息；一周后复查，如头痛加重及时就诊。",
-        "treatment": {
-          "value": "予降压药口服，每日一次，晨起服用。",
-          "evidence_traces": [
-            {
-              "turn_id": 292,
-              "turn_index": 6,
-              "turn_text": "是的，考虑是高血压引起的头疼。我给您开点降压药，每天一次，早上吃。注意少吃咸的食物，多休息。",
-              "speaker": "医生",
-              "content": "我给您开点降压药，每天一次，早上吃。",
-              "start_char": 248,
-              "end_char": 275,
-              "confidence": 0.5
-            }
-          ]
-        },
-        "advice": {
-          "value": "低盐饮食，注意休息；一周后复查，如头痛加重及时就诊。",
-          "evidence_traces": [
-            {
-              "turn_id": 292,
-              "turn_index": 6,
-              "turn_text": "是的，考虑是高血压引起的头疼。我给您开点降压药，每天一次，早上吃。注意少吃咸的食物，多休息。",
-              "speaker": "医生",
-              "content": "注意少吃咸的食物，多休息。",
-              "start_char": 275,
-              "end_char": 297,
-              "confidence": 0.5
-            },
-            {
-              "turn_id": 294,
-              "turn_index": 8,
-              "turn_text": "一周后复查，如果头疼加重及时就诊。",
-              "speaker": "医生",
-              "content": "一周后复查，如果头疼加重及时就诊。",
-              "start_char": 333,
-              "end_char": 359,
-              "confidence": 0.5
-            }
-          ]
-        }
-      }
-    }
-  },
-  "ablation": {
-    "test": "ablation",
-    "term_comparison": [
-      {
-        "colloquial": "拉肚子",
-        "standard": "腹泻",
-        "e2e_uses_colloquial": false,
-        "e2e_uses_standard": true,
-        "multi_uses_colloquial": true,
-        "multi_uses_standard": true
-      },
-      {
-        "colloquial": "肚子疼",
-        "standard": "腹痛",
-        "e2e_uses_colloquial": false,
-        "e2e_uses_standard": true,
-        "multi_uses_colloquial": false,
-        "multi_uses_standard": true
-      },
-      {
-        "colloquial": "发低烧",
-        "standard": "低热",
-        "e2e_uses_colloquial": false,
-        "e2e_uses_standard": true,
-        "multi_uses_colloquial": true,
-        "multi_uses_standard": false
-      },
-      {
-        "colloquial": "恶心想吐",
-        "standard": "恶心、呕吐",
-        "e2e_uses_colloquial": false,
-        "e2e_uses_standard": false,
-        "multi_uses_colloquial": true,
-        "multi_uses_standard": false
-      }
-    ],
-    "e2e_standard_count": 3,
-    "multi_standard_count": 1,
-    "total_colloquial": 4,
-    "e2e_result": {
-      "subjective": {
-        "chief_complaint": "腹泻伴腹痛2天",
-        "history_present_illness": "患者2天前出现腹泻，伴腹痛，低热（体温37.8℃），恶心欲吐。",
-        "past_history": "无"
-      },
-      "objective": {
-        "physical_examination": "体温37.8℃，腹部有压痛。",
-        "auxiliary_examination": "无"
-      },
-      "assessment": {
-        "diagnosis": "急性胃肠炎"
-      },
-      "plan": {
-        "treatment": "蒙脱石散、左氧氟沙星",
-        "advice": "多喝水，少吃油腻食物"
-      }
-    },
-    "multi_result": {
-      "subjective": {
-        "text": "患者主诉“腹泻伴腹痛2天”。现病史：患者2天前出现腹泻，伴腹痛，同时有发热（体温37.8℃）、恶心。既往史无特殊。",
-        "chief_complaint": {
-          "value": "腹泻伴腹痛2天",
-          "evidence_traces": [
-            {
-              "turn_id": 287,
-              "turn_index": 1,
-              "turn_text": "医生，我拉肚子已经两天了，肚子也疼。",
-              "speaker": "患者",
-              "content": "医生，我拉肚子已经两天了，肚子也疼。",
-              "start_char": 34,
-              "end_char": 61,
-              "confidence": 0.5
-            }
-          ]
-        },
-        "history_present_illness": {
-          "value": "患者2天前出现腹泻，伴腹痛，同时有发热（体温37.8℃）、恶心。",
-          "evidence_traces": [
-            {
-              "turn_id": 289,
-              "turn_index": 3,
-              "turn_text": "有点发低烧，还恶心想吐。",
-              "speaker": "患者",
-              "content": "有点发低烧，还恶心想吐。",
-              "start_char": 99,
-              "end_char": 122,
-              "confidence": 0.5
-            }
-          ]
-        },
-        "past_history": ""
-      },
-      "objective": {
-        "text": "体格检查：体温37.8℃，腹部有压痛。辅助检查：未查。",
-        "physical_examination": {
-          "value": "体温37.8℃，腹部有压痛。",
-          "evidence_traces": [
-            {
-              "turn_id": 290,
-              "turn_index": 4,
-              "turn_text": "我给你检查一下。体温37.8度，腹部有压痛。",
-              "speaker": "医生",
-              "content": "我给你检查一下。体温37.8度，腹部有压痛。",
-              "start_char": 134,
-              "end_char": 169,
-              "confidence": 0.5
-            }
-          ]
-        },
-        "auxiliary_examination": ""
-      },
-      "assessment": {
-        "text": "初步诊断：急性胃肠炎。",
-        "diagnosis": {
-          "value": "急性胃肠炎",
-          "evidence_traces": [
-            {
-              "turn_id": 292,
-              "turn_index": 6,
-              "turn_text": "考虑是急性胃肠炎。我给你开点蒙脱石散和左氧氟沙星，注意多喝水，少吃油腻的。",
-              "speaker": "医生",
-              "content": "考虑是急性胃肠炎。",
-              "start_char": 197,
-              "end_char": 215,
-              "confidence": 0.5
-            }
-          ]
-        }
-      },
-      "plan": {
-        "text": "治疗方案：予蒙脱石散、左氧氟沙星口服。医嘱：注意多喝水，少吃油腻食物。",
-        "treatment": {
-          "value": "蒙脱石散、左氧氟沙星口服",
-          "evidence_traces": [
-            {
-              "turn_id": 292,
-              "turn_index": 6,
-              "turn_text": "考虑是急性胃肠炎。我给你开点蒙脱石散和左氧氟沙星，注意多喝水，少吃油腻的。",
-              "speaker": "医生",
-              "content": "我给你开点蒙脱石散和左氧氟沙星，",
-              "start_char": 215,
-              "end_char": 240,
-              "confidence": 0.5
-            }
-          ]
-        },
-        "advice": {
-          "value": "注意多喝水，少吃油腻食物。",
-          "evidence_traces": [
-            {
-              "turn_id": 292,
-              "turn_index": 6,
-              "turn_text": "考虑是急性胃肠炎。我给你开点蒙脱石散和左氧氟沙星，注意多喝水，少吃油腻的。",
-              "speaker": "医生",
-              "content": "注意多喝水，少吃油腻的。",
-              "start_char": 240,
-              "end_char": 261,
-              "confidence": 0.5
-            }
-          ]
-        }
-      }
-    },
-    "normalized_terms": [
-      {
-        "original": "拉肚子",
-        "normalized": "腹泻",
-        "category": "symptom",
-        "source": "ChineseTerm",
-        "confidence": 0.95,
-        "cui": null,
-        "code": null,
-        "code_system": null,
-        "is_colloquial": true
-      },
-      {
-        "original": "肚子疼",
-        "normalized": "腹痛",
-        "category": "symptom",
-        "source": "ChineseTerm",
-        "confidence": 0.95,
-        "cui": null,
-        "code": null,
-        "code_system": null,
-        "is_colloquial": true
-      },
-      {
-        "original": "发低烧",
-        "normalized": "发热",
-        "category": "symptom",
-        "source": "ChineseTerm",
-        "confidence": 0.95,
-        "cui": null,
-        "code": null,
-        "code_system": null,
-        "is_colloquial": true
-      },
-      {
-        "original": "恶心",
-        "normalized": "恶心",
-        "category": "symptom",
-        "source": "ChineseTerm",
-        "confidence": 1.0,
-        "cui": null,
-        "code": null,
-        "code_system": null,
-        "is_colloquial": false
-      },
-      {
-        "original": "想吐",
-        "normalized": "恶心",
-        "category": "symptom",
-        "source": "LLM",
-        "confidence": 0.5,
-        "cui": null,
-        "code": null,
-        "code_system": null,
-        "is_colloquial": true
-      },
-      {
-        "original": "发烧",
-        "normalized": "发热",
-        "category": "symptom",
-        "source": "ChineseTerm",
-        "confidence": 0.95,
-        "cui": null,
-        "code": null,
-        "code_system": null,
-        "is_colloquial": true
-      },
-      {
-        "original": "体温",
-        "normalized": "Body Temperature",
-        "category": "examination",
-        "source": "UMLS",
-        "confidence": 0.6,
-        "cui": "C0005903",
-        "code": null,
-        "code_system": null,
-        "is_colloquial": false
-      },
-      {
-        "original": "压痛",
-        "normalized": "Will the pain keep you from squeezing as hard as you can:Find:Pt:^Patient:Ord:PhenX",
-        "category": "symptom",
-        "source": "UMLS",
-        "confidence": 0.6,
-        "cui": "C3259095",
-        "code": null,
-        "code_system": null,
-        "is_colloquial": false
-      },
-      {
-        "original": "急性胃肠炎",
-        "normalized": "急性胃肠炎",
-        "category": "diagnosis",
-        "source": "ChineseTerm",
-        "confidence": 1.0,
-        "cui": null,
-        "code": null,
-        "code_system": null,
-        "is_colloquial": false
-      },
-      {
-        "original": "蒙脱石散",
-        "normalized": "蒙脱石散",
-        "category": "drug",
-        "source": "none",
-        "confidence": 0.3,
-        "cui": null,
-        "code": null,
-        "code_system": null,
-        "is_colloquial": false
-      },
-      {
-        "original": "左氧氟沙星",
-        "normalized": "左氧氟沙星",
-        "category": "drug",
-        "source": "ChineseTerm",
-        "confidence": 1.0,
-        "cui": null,
-        "code": "XM7KX7",
-        "code_system": "ICD-11",
-        "is_colloquial": false
-      }
-    ]
-  },
-  "evaluation_pipeline": {
-    "test": "evaluation_pipeline",
-    "results": [
-      {
-        "record_id": 1,
-        "visit_id": "1df5213e-a7a5-4920-bfed-c3e83be108b4",
-        "overall_score": 0.5862499999999999,
-        "consistency_support_rate": 1.0,
-        "consistency_score": 1.0,
-        "completeness_recall_rate": 0.6875,
-        "quality_score": 9,
-        "safety_has_high_risk": true
-      },
-      {
-        "record_id": 2,
-        "visit_id": "66b589fe-d981-423f-8f13-bebed8432a58",
-        "overall_score": 0.6466700000000002,
-        "consistency_support_rate": 1.0,
-        "consistency_score": 1.0,
-        "completeness_recall_rate": 0.8889,
-        "quality_score": 9,
-        "safety_has_high_risk": true
-      }
-    ]
-  },
-  "existing_emr_quality": {
-    "test": "existing_emr_quality",
-    "field_stats": {
-      "chief_complaint": {
-        "filled": 13,
-        "total": 14
-      },
-      "history_present_illness": {
-        "filled": 14,
-        "total": 14
-      },
-      "past_history": {
-        "filled": 5,
-        "total": 14
-      },
-      "physical_examination": {
-        "filled": 14,
-        "total": 14
-      },
-      "auxiliary_examination": {
-        "filled": 7,
-        "total": 14
-      },
-      "diagnosis": {
-        "filled": 12,
-        "total": 14
-      },
-      "treatment": {
-        "filled": 14,
-        "total": 14
-      },
-      "advice": {
-        "filled": 14,
-        "total": 14
-      }
-    },
-    "term_stats": {
-      "total_terms": 156,
-      "umls_sourced": 0,
-      "llm_sourced": 0,
-      "with_cui": 116
-    },
-    "evidence_stats": {
-      "total_evidence": 138
-    }
-  },
-  "speaker_role_evolution": {
-    "test": "speaker_role_evolution",
-    "rule_accuracy": 0.7,
-    "rule_details": [
-      {
-        "text": "请问哪里不舒服？",
-        "expected": "doctor",
-        "predicted": "doctor",
-        "doc_score": 2,
-        "pat_score": 0,
-        "correct": true
-      },
-      {
-        "text": "我这几天一直头疼",
-        "expected": "patient",
-        "predicted": "patient",
-        "doc_score": 0,
-        "pat_score": 1,
-        "correct": true
-      },
-      {
-        "text": "头疼持续多长时间了？",
-        "expected": "doctor",
-        "predicted": "doctor",
-        "doc_score": 1,
-        "pat_score": 0,
-        "correct": true
-      },
-      {
-        "text": "大概三天了",
-        "expected": "patient",
-        "predicted": "patient",
-        "doc_score": 0,
-        "pat_score": 1,
-        "correct": true
-      },
-      {
-        "text": "我给您量一下血压",
-        "expected": "doctor",
-        "predicted": "unknown",
-        "doc_score": 0,
-        "pat_score": 0,
-        "correct": false
-      },
-      {
-        "text": "血压高会引起头疼吗？",
-        "expected": "patient",
-        "predicted": "doctor",
-        "doc_score": 2,
-        "pat_score": 0,
-        "correct": false
-      },
-      {
-        "text": "考虑是高血压引起的头疼",
-        "expected": "doctor",
-        "predicted": "unknown",
-        "doc_score": 0,
-        "pat_score": 0,
-        "correct": false
-      },
-      {
-        "text": "好的，谢谢医生",
-        "expected": "patient",
-        "predicted": "patient",
-        "doc_score": 0,
-        "pat_score": 1,
-        "correct": true
-      },
-      {
-        "text": "注意低盐饮食，一周后复查",
-        "expected": "doctor",
-        "predicted": "doctor",
-        "doc_score": 1,
-        "pat_score": 0,
-        "correct": true
-      },
-      {
-        "text": "我有时候会恶心",
-        "expected": "patient",
-        "predicted": "patient",
-        "doc_score": 0,
-        "pat_score": 2,
-        "correct": true
-      }
-    ]
-  }
-}
-</file>
-
-<file path="tests/midterm_results/midterm_test_results_20260514_193623.json">
-{
-  "asr_correction": {
-    "test": "asr_correction",
-    "summary": {
-      "total": 10,
-      "correct": 9,
-      "accuracy": 0.9,
-      "by_type": {
-        "日常用语": {
-          "total": 1,
-          "correct": 0
-        },
-        "医学术语": {
-          "total": 1,
-          "correct": 1
-        },
-        "药物名": {
-          "total": 3,
-          "correct": 3
-        },
-        "同音字": {
-          "total": 2,
-          "correct": 2
-        },
-        "拼音相似": {
-          "total": 2,
-          "correct": 2
-        },
-        "病名": {
-          "total": 1,
-          "correct": 1
-        }
-      }
-    },
-    "details": [
-      {
-        "original": "闲的食物",
-        "expected": "咸的食物",
-        "type": "日常用语",
-        "corrected_text": "患者有闲的食物的症状",
-        "corrections": [],
-        "success": false
-      },
-      {
-        "original": "搞血压",
-        "expected": "高血压",
-        "type": "医学术语",
-        "corrected_text": "患者有高血压的症状",
-        "corrections": [
-          {
-            "original": "搞血压",
-            "corrected": "高血压",
-            "type": "medical_term",
-            "confidence": 0.9
-          }
-        ],
-        "success": true
-      },
-      {
-        "original": "阿莫希林",
-        "expected": "阿莫西林",
-        "type": "药物名",
-        "corrected_text": "患者有阿莫西林的症状",
-        "corrections": [
-          {
-            "original": "阿莫希林",
-            "corrected": "阿莫西林",
-            "type": "medical_term",
-            "confidence": 0.9
-          }
-        ],
-        "success": true
-      },
-      {
-        "original": "刻嗽",
-        "expected": "咳嗽",
-        "type": "同音字",
-        "corrected_text": "患者有咳嗽的症状",
-        "corrections": [
-          {
-            "original": "刻嗽",
-            "corrected": "咳嗽",
-            "type": "pinyin_similar",
-            "confidence": 0.8
-          }
-        ],
-        "success": true
-      },
-      {
-        "original": "发骚",
-        "expected": "发烧",
-        "type": "同音字",
-        "corrected_text": "患者有发烧的症状",
-        "corrections": [
-          {
-            "original": "发骚",
-            "corrected": "发烧",
-            "type": "pinyin_similar",
-            "confidence": 0.8
-          }
-        ],
-        "success": true
-      },
-      {
-        "original": "头疼",
-        "expected": "头痛",
-        "type": "拼音相似",
-        "corrected_text": "患者有头痛的症状",
-        "corrections": [
-          {
-            "original": "头疼",
-            "corrected": "头痛",
-            "type": "pinyin_similar",
-            "confidence": 0.8
-          }
-        ],
-        "success": true
-      },
-      {
-        "original": "夫泻",
-        "expected": "腹泻",
-        "type": "拼音相似",
-        "corrected_text": "患者有腹泻的症状",
-        "corrections": [
-          {
-            "original": "夫泻",
-            "corrected": "腹泻",
-            "type": "pinyin_similar",
-            "confidence": 0.8
-          }
-        ],
-        "success": true
-      },
-      {
-        "original": "青梅素",
-        "expected": "青霉素",
-        "type": "药物名",
-        "corrected_text": "患者有青霉素的症状",
-        "corrections": [
-          {
-            "original": "青梅素",
-            "corrected": "青霉素",
-            "type": "medical_term",
-            "confidence": 0.9
-          }
-        ],
-        "success": true
-      },
-      {
-        "original": "头包",
-        "expected": "头孢",
-        "type": "药物名",
-        "corrected_text": "患者有头孢的症状",
-        "corrections": [
-          {
-            "original": "头包",
-            "corrected": "头孢",
-            "type": "medical_term",
-            "confidence": 0.9
-          }
-        ],
-        "success": true
-      },
-      {
-        "original": "观心病",
-        "expected": "冠心病",
-        "type": "病名",
-        "corrected_text": "患者有冠心病的症状",
-        "corrections": [
-          {
-            "original": "观心病",
-            "corrected": "冠心病",
-            "type": "medical_term",
-            "confidence": 0.9
-          }
-        ],
-        "success": true
-      }
-    ]
-  },
-  "existing_emr_quality": {
-    "test": "existing_emr_quality",
-    "field_stats": {
-      "chief_complaint": {
-        "filled": 11,
-        "total": 12
-      },
-      "history_present_illness": {
-        "filled": 12,
-        "total": 12
-      },
-      "past_history": {
-        "filled": 3,
-        "total": 12
-      },
-      "physical_examination": {
-        "filled": 12,
-        "total": 12
-      },
-      "auxiliary_examination": {
-        "filled": 5,
-        "total": 12
-      },
-      "diagnosis": {
-        "filled": 10,
-        "total": 12
-      },
-      "treatment": {
-        "filled": 12,
-        "total": 12
-      },
-      "advice": {
-        "filled": 12,
-        "total": 12
-      }
-    },
-    "term_stats": {
-      "total_terms": 156,
-      "umls_sourced": 0,
-      "llm_sourced": 0,
-      "with_cui": 116
-    },
-    "evidence_stats": {
-      "total_evidence": 138,
-      "avg_score": 0.5
-    }
-  },
-  "speaker_role_evolution": {
-    "test": "speaker_role_evolution",
-    "rule_accuracy": 0.7,
-    "rule_details": [
-      {
-        "text": "请问哪里不舒服？",
-        "expected": "doctor",
-        "predicted": "doctor",
-        "doc_score": 2,
-        "pat_score": 0,
-        "correct": true
-      },
-      {
-        "text": "我这几天一直头疼",
-        "expected": "patient",
-        "predicted": "patient",
-        "doc_score": 0,
-        "pat_score": 1,
-        "correct": true
-      },
-      {
-        "text": "头疼持续多长时间了？",
-        "expected": "doctor",
-        "predicted": "doctor",
-        "doc_score": 1,
-        "pat_score": 0,
-        "correct": true
-      },
-      {
-        "text": "大概三天了",
-        "expected": "patient",
-        "predicted": "patient",
-        "doc_score": 0,
-        "pat_score": 1,
-        "correct": true
-      },
-      {
-        "text": "我给您量一下血压",
-        "expected": "doctor",
-        "predicted": "unknown",
-        "doc_score": 0,
-        "pat_score": 0,
-        "correct": false
-      },
-      {
-        "text": "血压高会引起头疼吗？",
-        "expected": "patient",
-        "predicted": "doctor",
-        "doc_score": 2,
-        "pat_score": 0,
-        "correct": false
-      },
-      {
-        "text": "考虑是高血压引起的头疼",
-        "expected": "doctor",
-        "predicted": "unknown",
-        "doc_score": 0,
-        "pat_score": 0,
-        "correct": false
-      },
-      {
-        "text": "好的，谢谢医生",
-        "expected": "patient",
-        "predicted": "patient",
-        "doc_score": 0,
-        "pat_score": 1,
-        "correct": true
-      },
-      {
-        "text": "注意低盐饮食，一周后复查",
-        "expected": "doctor",
-        "predicted": "doctor",
-        "doc_score": 1,
-        "pat_score": 0,
-        "correct": true
-      },
-      {
-        "text": "我有时候会恶心",
-        "expected": "patient",
-        "predicted": "patient",
-        "doc_score": 0,
-        "pat_score": 2,
-        "correct": true
-      }
-    ]
-  },
-  "terminology_normalization": {
-    "test": "terminology_normalization",
-    "summary": {
-      "total_tested": 20,
-      "umls_hit": 0,
-      "llm_fallback": 0,
-      "no_match": 20,
-      "umls_rate": 0.0,
-      "llm_fallback_rate": 0.0,
-      "match_count": 0,
-      "match_rate": 0.0
-    },
-    "details": [
-      {
-        "colloquial": "拉肚子",
-        "expected_standards": [
-          "腹泻"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      },
-      {
-        "colloquial": "肚子疼",
-        "expected_standards": [
-          "腹痛",
-          "腹泻"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      },
-      {
-        "colloquial": "肚子痛",
-        "expected_standards": [
-          "腹痛"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      },
-      {
-        "colloquial": "头疼",
-        "expected_standards": [
-          "头痛"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      },
-      {
-        "colloquial": "头痛",
-        "expected_standards": [
-          "头痛"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      },
-      {
-        "colloquial": "发高烧",
-        "expected_standards": [
-          "发热",
-          "高热"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      },
-      {
-        "colloquial": "发低烧",
-        "expected_standards": [
-          "发热",
-          "低热"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      },
-      {
-        "colloquial": "流鼻涕",
-        "expected_standards": [
-          "鼻流涕",
-          "感冒"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      },
-      {
-        "colloquial": "鼻涕",
-        "expected_standards": [
-          "鼻流涕"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      },
-      {
-        "colloquial": "咳嗽不止",
-        "expected_standards": [
-          "咳嗽"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      },
-      {
-        "colloquial": "干咳",
-        "expected_standards": [
-          "干咳",
-          "咳嗽"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      },
-      {
-        "colloquial": "咳痰",
-        "expected_standards": [
-          "咳痰",
-          "咳嗽"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      },
-      {
-        "colloquial": "嗓子疼",
-        "expected_standards": [
-          "咽喉炎",
-          "咽喉不适"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      },
-      {
-        "colloquial": "嗓子沙哑",
-        "expected_standards": [
-          "嗓子沙哑",
-          "声音嘶哑"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      },
-      {
-        "colloquial": "声音哑",
-        "expected_standards": [
-          "声音嘶哑"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      },
-      {
-        "colloquial": "喘气",
-        "expected_standards": [
-          "喘息",
-          "气喘"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      },
-      {
-        "colloquial": "气短",
-        "expected_standards": [
-          "呼吸困难"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      },
-      {
-        "colloquial": "喘不上气",
-        "expected_standards": [
-          "呼吸困难",
-          "气喘"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      },
-      {
-        "colloquial": "吐",
-        "expected_standards": [
-          "呕吐"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      },
-      {
-        "colloquial": "恶心想吐",
-        "expected_standards": [
-          "恶心",
-          "呕吐"
-        ],
-        "normalized": null,
-        "source": "error",
-        "error": "'NormalizedTerm' object has no attribute 'get'",
-        "is_match": false
-      }
-    ]
-  },
-  "e2e_vs_multistage": {
-    "test": "e2e_vs_multistage",
-    "comparison": {
-      "e2e_time": 3.2042813301086426,
-      "multi_time": 0.3924109935760498,
-      "e2e_result": {
-        "subjective": {
-          "chief_complaint": "头痛3天，晨起明显",
-          "history_present_illness": "患者3天前出现头痛，晨起时明显，伴恶心，无呕吐。",
-          "past_history": "未提及"
-        },
-        "objective": {
-          "physical_examination": "血压145/95mmHg",
-          "auxiliary_examination": "无"
-        },
-        "assessment": {
-          "diagnosis": "高血压病（血压偏高，考虑高血压性头痛）"
-        },
-        "plan": {
-          "treatment": "口服降压药，每日一次，晨起服用",
-          "advice": "低盐饮食，注意休息，一周后复查，如头痛加重及时就诊"
-        }
-      },
-      "multi_result": {
-        "error": "'LLMPipelineService' object has no attribute 'process_text'"
-      },
-      "ground_truth": {
-        "chief_complaint": "头疼3天",
-        "history_present_illness": "头疼3天，晨起加重，伴恶心，无呕吐",
-        "physical_examination": "血压145/95mmHg",
-        "diagnosis": "高血压",
-        "treatment": "降压药，每日一次",
-        "advice": "低盐饮食，注意休息，一周后复查"
-      },
-      "e2e_field_status": {
-        "chief_complaint": "partial",
-        "history_present_illness": "partial",
-        "physical_examination": "match",
-        "diagnosis": "match",
-        "treatment": "match",
-        "advice": "match"
-      },
-      "multi_field_status": {
-        "chief_complaint": "missing",
-        "history_present_illness": "missing",
-        "physical_examination": "missing",
-        "diagnosis": "missing",
-        "treatment": "missing",
-        "advice": "missing"
-      }
-    }
-  },
-  "evaluation_pipeline": {
-    "test": "evaluation_pipeline",
-    "results": [
-      {
-        "record_id": 1,
-        "visit_id": "1df5213e-a7a5-4920-bfed-c3e83be108b4",
-        "result": {
-          "record_id": 1,
-          "visit_id": "1df5213e-a7a5-4920-bfed-c3e83be108b4",
-          "consistency": {
-            "facts": [
-              {
-                "fact": "主诉为头痛",
-                "section": "subjective",
-                "is_supported": true,
-                "evidence_text": "我这几天一直头疼",
-                "reasoning": "患者明确表述头疼症状"
-              },
-              {
-                "fact": "血压高引起头痛",
-                "section": "subjective",
-                "is_supported": true,
-                "evidence_text": "血压高确实会引起头疼",
-                "reasoning": "医生确认血压高与头痛的因果关系"
-              },
-              {
-                "fact": "体格检查血压145/95mmHg",
-                "section": "objective",
-                "is_supported": true,
-                "evidence_text": "一百四十五九十五",
-                "reasoning": "医生测量并报告血压值"
-              },
-              {
-                "fact": "诊断高血压",
-                "section": "assessment",
-                "is_supported": true,
-                "evidence_text": "血压高",
-                "reasoning": "医生根据血压值和症状诊断为血压高，并开具降压药"
-              },
-              {
-                "fact": "给予降压药物治疗",
-                "section": "plan",
-                "is_supported": true,
-                "evidence_text": "我给你开一些降压药",
-                "reasoning": "医生明确表示开降压药"
-              },
-              {
-                "fact": "每日晨起口服降压药1片",
-                "section": "plan",
-                "is_supported": true,
-                "evidence_text": "每天早上吃一片",
-                "reasoning": "医生明确医嘱用药方法"
-              },
-              {
-                "fact": "注意休息",
-                "section": "plan",
-                "is_supported": true,
-                "evidence_text": "注意休息",
-                "reasoning": "医生明确建议"
-              },
-              {
-                "fact": "减少高盐饮食摄入",
-                "section": "plan",
-                "is_supported": true,
-                "evidence_text": "少吃咸的食物",
-                "reasoning": "医生明确建议"
-              },
-              {
-                "fact": "一周后复诊",
-                "section": "plan",
-                "is_supported": true,
-                "evidence_text": "一周后再来复查",
-                "reasoning": "医生明确建议"
-              }
-            ],
-            "summary": {
-              "total_facts": 9,
-              "supported_count": 9,
-              "unsupported_count": 0,
-              "support_rate": 1.0
-            },
-            "internal_conflicts": [],
-            "consistency_score": 1.0
-          },
-          "completeness": {
-            "coverage": [
-              {
-                "fact": "头疼持续3天，早上起床时加重",
-                "importance": "high",
-                "coverage_status": "partial",
-                "emr_text": "患者因血压高引起头痛就诊",
-                "reasoning": "病历中仅提及头痛，但未描述持续时间（3天）和加重时间（早上起床时），因此部分覆盖。"
-              },
-              {
-                "fact": "有时伴有恶心",
-                "importance": "medium",
-                "coverage_status": "none",
-                "emr_text": "",
-                "reasoning": "病历中未提及恶心症状。"
-              },
-              {
-                "fact": "否认呕吐",
-                "importance": "medium",
-                "coverage_status": "none",
-                "emr_text": "",
-                "reasoning": "病历中未提及呕吐或否认呕吐。"
-              },
-              {
-                "fact": "血压145/95 mmHg",
-                "importance": "high",
-                "coverage_status": "full",
-                "emr_text": "血压145/95mmHg",
-                "reasoning": "客观资料中明确记录血压值，完全覆盖。"
-              },
-              {
-                "fact": "高血压引起头疼",
-                "importance": "high",
-                "coverage_status": "full",
-                "emr_text": "患者因血压高引起头痛就诊",
-                "reasoning": "主观资料直接陈述因果关系，完全覆盖。"
-              },
-              {
-                "fact": "开具降压药，每天早上吃一片",
-                "importance": "high",
-                "coverage_status": "full",
-                "emr_text": "每日晨起口服降压药1片",
-                "reasoning": "计划中明确给出用药方案，完全覆盖。"
-              },
-              {
-                "fact": "注意休息，少吃咸的食物",
-                "importance": "low",
-                "coverage_status": "full",
-                "emr_text": "注意休息；减少高盐饮食摄入",
-                "reasoning": "计划中包含了休息和减少高盐饮食，与“少吃咸的食物”一致，完全覆盖。"
-              },
-              {
-                "fact": "一周后复查",
-                "importance": "low",
-                "coverage_status": "full",
-                "emr_text": "一周后复诊",
-                "reasoning": "计划中明确要求一周后复诊，完全覆盖。"
-              }
-            ],
-            "summary": {
-              "total_facts": 8,
-              "full_coverage_count": 5,
-              "partial_coverage_count": 1,
-              "none_coverage_count": 2,
-              "recall_rate": 0.6875,
-              "weighted_recall": 0.7069
-            }
-          },
-          "quality": {
-            "scores": {
-              "structure_completeness": {
-                "score": 2,
-                "reasoning": "SOAP四部分齐全，主观资料、客观资料、评估、计划均正确落在对应章节，无缺失或错放。"
-              },
-              "organization_clarity": {
-                "score": 2,
-                "reasoning": "顺序合理，从主诉到体格检查、诊断、治疗计划，逻辑清晰，易于阅读。"
-              },
-              "conciseness": {
-                "score": 2,
-                "reasoning": "无重复或冗余内容，表达精炼，每个部分信息量适当。"
-              },
-              "readability": {
-                "score": 2,
-                "reasoning": "句子通顺，代词指代清楚，无歧义，计划中的医嘱明确易懂。"
-              },
-              "terminology_appropriateness": {
-                "score": 1,
-                "reasoning": "大部分术语规范，但主观资料中“血压高”为口语化表达，客观资料中“血压偏高”亦不够严谨，且未明确降压药具体名称，建议使用标准医学术语。"
-              }
-            },
-            "total_score": 9,
-            "overall_assessment": "病历结构完整、逻辑清晰、表达简洁，但部分术语口语化，需进一步规范。"
-          },
-          "safety": {
-            "risks": [
-              {
-                "risk_type": "major_omission",
-                "severity": "high",
-                "description": "遗漏了患者明确提及的关键阳性症状：头痛持续3天、晨起加重、伴有恶心。",
-                "emr_location": "主观资料(S)",
-                "emr_content": "患者因血压高引起头痛就诊。",
-                "correct_content": "患者头痛3天，晨起时明显，伴恶心，无呕吐。",
-                "evidence_text": "对话中患者说'我这几天一直头疼，特别是早上起来的时候'，'大概三天了'，'有时候会恶心，但没有呕吐'。"
-              }
-            ],
-            "has_high_risk": true,
-            "high_risk_count": 1,
-            "total_risk_count": 1,
-            "safety_assessment": "病历遗漏了头痛的持续时间、晨起加重及恶心症状，可能影响对病情的全面评估，存在高风险。"
-          },
-          "overall_score": 0.5862499999999999,
-          "evaluation_id": 1
-        }
-      },
-      {
-        "record_id": 2,
-        "visit_id": "66b589fe-d981-423f-8f13-bebed8432a58",
-        "result": {
-          "record_id": 2,
-          "visit_id": "66b589fe-d981-423f-8f13-bebed8432a58",
-          "consistency": {
-            "facts": [
-              {
-                "fact": "主诉有头痛",
-                "section": "subjective",
-                "is_supported": true,
-                "evidence_text": "患者说“我这几天一直头疼”",
-                "reasoning": "对话中患者明确表述头疼，与病历主诉一致。"
-              },
-              {
-                "fact": "主诉有恶心",
-                "section": "subjective",
-                "is_supported": true,
-                "evidence_text": "患者说“有时候会恶心”",
-                "reasoning": "对话中患者承认有恶心症状，病历主诉包含恶心。"
-              },
-              {
-                "fact": "头痛持续三天",
-                "section": "subjective",
-                "is_supported": true,
-                "evidence_text": "患者说“大概三天了”",
-                "reasoning": "对话中患者明确头痛持续三天，与现病史一致。"
-              },
-              {
-                "fact": "伴随恶心但无呕吐",
-                "section": "subjective",
-                "is_supported": true,
-                "evidence_text": "患者说“有时候会恶心，但没有呕吐”",
-                "reasoning": "对话中患者明确恶心但无呕吐，与病历描述一致。"
-              },
-              {
-                "fact": "血压145/95 mmHg",
-                "section": "objective",
-                "is_supported": true,
-                "evidence_text": "医生说“一百四十五九十五”",
-                "reasoning": "对话中医生测量并报告血压值为145/95 mmHg，与病历一致。"
-              },
-              {
-                "fact": "诊断为高血压病",
-                "section": "assessment",
-                "is_supported": true,
-                "evidence_text": "医生说“血压高确实会引起头疼”并开降压药",
-                "reasoning": "对话中医生明确血压高并给予降压治疗，隐含高血压诊断，与病历诊断一致。"
-              },
-              {
-                "fact": "服用降压药每日一片",
-                "section": "plan",
-                "is_supported": true,
-                "evidence_text": "医生说“我给你开一些降压药，每天早上吃一片”",
-                "reasoning": "对话中医生明确开具降压药并指定每日一片，与治疗方案一致。"
-              },
-              {
-                "fact": "注意休息",
-                "section": "plan",
-                "is_supported": true,
-                "evidence_text": "医生说“注意休息”",
-                "reasoning": "对话中医生直接建议注意休息，与医嘱一致。"
-              },
-              {
-                "fact": "少吃咸的食物",
-                "section": "plan",
-                "is_supported": true,
-                "evidence_text": "医生说“少吃闲的食物”（咸的食物）",
-                "reasoning": "对话中医生建议少吃咸的食物，与医嘱一致。"
-              },
-              {
-                "fact": "一周后复诊",
-                "section": "plan",
-                "is_supported": true,
-                "evidence_text": "医生说“一周后再来复查”",
-                "reasoning": "对话中医生明确要求一周后复查，与医嘱一致。"
-              }
-            ],
-            "summary": {
-              "total_facts": 10,
-              "supported_count": 10,
-              "unsupported_count": 0,
-              "support_rate": 1.0
-            },
-            "internal_conflicts": [],
-            "consistency_score": 1.0
-          },
-          "completeness": {
-            "coverage": [
-              {
-                "fact": "患者主诉头疼3天，早晨加重",
-                "importance": "high",
-                "coverage_status": "partial",
-                "emr_text": "主诉：Headache, Nausea；现病史：Headache持续三天",
-                "reasoning": "病历中记录了头疼持续三天，但未提及“早晨加重”这一关键细节，因此部分覆盖。"
-              },
-              {
-                "fact": "伴有恶心症状",
-                "importance": "medium",
-                "coverage_status": "full",
-                "emr_text": "伴随Nausea",
-                "reasoning": "病历现病史中明确提到伴随Nausea，完全覆盖。"
-              },
-              {
-                "fact": "否认呕吐症状",
-                "importance": "medium",
-                "coverage_status": "full",
-                "emr_text": "但无呕吐",
-                "reasoning": "病历现病史中明确提到无呕吐，完全覆盖。"
-              },
-              {
-                "fact": "血压测量值为145/95 mmHg",
-                "importance": "high",
-                "coverage_status": "full",
-                "emr_text": "血压145/95 mmHg",
-                "reasoning": "病历体格检查中准确记录了血压值，完全覆盖。"
-              },
-              {
-                "fact": "医生判断头疼由高血压引起",
-                "importance": "high",
-                "coverage_status": "none",
-                "emr_text": "",
-                "reasoning": "病历诊断仅为Hypertensive disease，未明确表述头疼与高血压的因果关系，因此未覆盖。"
-              },
-              {
-                "fact": "开具降压药，每日早上服用一片",
-                "importance": "high",
-                "coverage_status": "partial",
-                "emr_text": "服用降压药，每日一片",
-                "reasoning": "病历记录了服用降压药每日一片，但缺少“早上”这一时间信息，因此部分覆盖。"
-              },
-              {
-                "fact": "建议注意休息",
-                "importance": "low",
-                "coverage_status": "full",
-                "emr_text": "注意休息",
-                "reasoning": "病历医嘱中明确包含注意休息，完全覆盖。"
-              },
-              {
-                "fact": "建议少吃咸的食物",
-                "importance": "low",
-                "coverage_status": "full",
-                "emr_text": "少吃咸的食物",
-                "reasoning": "病历医嘱中明确包含少吃咸的食物，完全覆盖。"
-              },
-              {
-                "fact": "建议一周后复查",
-                "importance": "low",
-                "coverage_status": "full",
-                "emr_text": "一周后复诊",
-                "reasoning": "病历医嘱中明确包含一周后复诊，完全覆盖。"
-              }
-            ],
-            "summary": {
-              "total_facts": 9,
-              "full_coverage_count": 6,
-              "partial_coverage_count": 2,
-              "none_coverage_count": 1,
-              "recall_rate": 0.7778,
-              "weighted_recall": 0.6721
-            }
-          },
-          "quality": {
-            "scores": {
-              "structure_completeness": {
-                "score": 2,
-                "reasoning": "SOAP四部分（主观、客观、评估、计划）齐全，且字段均落在正确章节，无缺失或错放。"
-              },
-              "organization_clarity": {
-                "score": 2,
-                "reasoning": "顺序合理，从主诉、现病史到体格检查、诊断、治疗方案，逻辑清晰，易于阅读。"
-              },
-              "conciseness": {
-                "score": 2,
-                "reasoning": "无重复或冗余信息，表达精炼，每个部分均简洁明了。"
-              },
-              "readability": {
-                "score": 1,
-                "reasoning": "句子基本通顺，但主诉和现病史使用英文（Headache, Nausea等），在中文病历中可能造成理解障碍，存在少量表达不清。"
-              },
-              "terminology_appropriateness": {
-                "score": 1,
-                "reasoning": "大部分术语规范（如血压145/95 mmHg、降压药），但主诉和现病史使用英文而非中文医学表达，且“少吃咸的食物”为口语化表述，不够专业。"
-              }
-            },
-            "total_score": 8,
-            "overall_assessment": "病历结构完整、逻辑清晰、简洁，但部分术语使用英文及口语化表达，规范性有待提升。"
-          },
-          "safety": {
-            "risks": [
-              {
-                "risk_type": "major_omission",
-                "severity": "high",
-                "description": "遗漏了患者明确提及的头痛在早晨加重的关键时间特征，该信息对高血压晨峰等鉴别诊断有重要意义。",
-                "emr_location": "现病史",
-                "emr_content": "Headache持续三天，伴随Nausea但无呕吐",
-                "correct_content": "Headache持续三天，早晨起床时加重，伴随Nausea但无呕吐",
-                "evidence_text": "患者陈述：“特别是早上起来的时候。”"
-              }
-            ],
-            "has_high_risk": true,
-            "high_risk_count": 1,
-            "total_risk_count": 1,
-            "safety_assessment": "病历遗漏了头痛在早晨加重的关键症状特征，可能影响高血压相关风险评估和治疗方案调整，存在高风险。"
-          },
-          "overall_score": 0.59334,
-          "evaluation_id": 2
-        }
-      },
-      {
-        "record_id": 3,
-        "visit_id": "test_pipeline_001",
-        "result": {
-          "record_id": 3,
-          "visit_id": "test_pipeline_001",
-          "consistency": {
-            "facts": [
-              {
-                "fact": "患者主诉头痛，尤其晨起时明显，病程约3天",
-                "section": "subjective",
-                "is_supported": true,
-                "evidence_text": "医生你好，我这几天一直头疼，特别是早上起来的时候。大概三天了。",
-                "reasoning": "对话中患者明确提到头痛晨起明显，持续三天，与病历一致。"
-              },
-              {
-                "fact": "伴间歇性恶心，无呕吐",
-                "section": "subjective",
-                "is_supported": true,
-                "evidence_text": "有时候会恶心，但没有呕吐。",
-                "reasoning": "对话中患者陈述恶心但无呕吐，与病历一致。"
-              },
-              {
-                "fact": "体格检查示血压145/95mmHg",
-                "section": "objective",
-                "is_supported": true,
-                "evidence_text": "我给您量一下血压。一百四十五九十五，血压偏高。",
-                "reasoning": "对话中医生测量血压为145/95mmHg，病历记录相同。"
-              },
-              {
-                "fact": "考虑高血压所致头痛",
-                "section": "assessment",
-                "is_supported": true,
-                "evidence_text": "是的，考虑是高血压引起的头疼。",
-                "reasoning": "对话中医生明确诊断高血压引起的头痛，与病历一致。"
-              },
-              {
-                "fact": "予降压药物治疗，每日晨服1次",
-                "section": "plan",
-                "is_supported": true,
-                "evidence_text": "我给您开点降压药，每天一次，早上吃。",
-                "reasoning": "对话中医生开具降压药并交代每日晨服一次，与病历一致。"
-              },
-              {
-                "fact": "建议低盐饮食，避免熬夜，1周后复查",
-                "section": "plan",
-                "is_supported": true,
-                "evidence_text": "注意低盐饮食，避免熬夜，一周后复查。",
-                "reasoning": "对话中医生给出低盐饮食、避免熬夜、一周后复查的医嘱，与病历一致。"
-              }
-            ],
-            "summary": {
-              "total_facts": 6,
-              "supported_count": 6,
-              "unsupported_count": 0,
-              "support_rate": 1.0
-            },
-            "internal_conflicts": [],
-            "consistency_score": 1.0
-          },
-          "completeness": {
-            "coverage": [
-              {
-                "fact": "患者主诉头疼3天，早上起床时明显",
-                "importance": "high",
-                "coverage_status": "full",
-                "emr_text": "患者主诉头痛，尤其晨起时明显。病程约3天",
-                "reasoning": "病历中明确描述了头痛、晨起明显、病程3天，与关键事实完全一致。"
-              },
-              {
-                "fact": "伴有恶心症状",
-                "importance": "medium",
-                "coverage_status": "full",
-                "emr_text": "伴间歇性恶心",
-                "reasoning": "病历中明确提到伴间歇性恶心，覆盖了恶心症状。"
-              },
-              {
-                "fact": "否认呕吐症状",
-                "importance": "medium",
-                "coverage_status": "full",
-                "emr_text": "无呕吐",
-                "reasoning": "病历中明确记录无呕吐，与否认呕吐一致。"
-              },
-              {
-                "fact": "血压测量结果为145/95mmHg，偏高",
-                "importance": "high",
-                "coverage_status": "full",
-                "emr_text": "体格检查示血压145/95mmHg，提示高血压",
-                "reasoning": "病历中完整记录了血压数值及偏高判断。"
-              },
-              {
-                "fact": "医生诊断为高血压引起的头疼",
-                "importance": "high",
-                "coverage_status": "full",
-                "emr_text": "考虑高血压所致头痛",
-                "reasoning": "病历中明确诊断高血压所致头痛，与关键事实一致。"
-              },
-              {
-                "fact": "开具降压药，每日一次，早上服用",
-                "importance": "high",
-                "coverage_status": "full",
-                "emr_text": "予降压药物治疗，每日晨服1次",
-                "reasoning": "病历中完整描述了降压药、每日一次、早上服用。"
-              },
-              {
-                "fact": "建议低盐饮食，避免熬夜",
-                "importance": "low",
-                "coverage_status": "full",
-                "emr_text": "建议低盐饮食，避免熬夜",
-                "reasoning": "病历中直接给出了相同的建议。"
-              },
-              {
-                "fact": "建议一周后复查",
-                "importance": "low",
-                "coverage_status": "full",
-                "emr_text": "1周后复查",
-                "reasoning": "病历中明确建议1周后复查，与关键事实一致。"
-              }
-            ],
-            "summary": {
-              "total_facts": 8,
-              "full_coverage_count": 8,
-              "partial_coverage_count": 0,
-              "none_coverage_count": 0,
-              "recall_rate": 1.0,
-              "weighted_recall": 1.0
-            }
-          },
-          "quality": {
-            "scores": {
-              "structure_completeness": {
-                "score": 2,
-                "reasoning": "SOAP四部分（S、O、A、P）齐全，且各字段均落在正确章节，无缺失或错放。"
-              },
-              "organization_clarity": {
-                "score": 2,
-                "reasoning": "顺序合理，从主观资料到客观资料、评估、计划，逻辑清晰，易于阅读。"
-              },
-              "conciseness": {
-                "score": 2,
-                "reasoning": "无重复或冗余信息，表达精炼，每个部分均简洁明了。"
-              },
-              "readability": {
-                "score": 2,
-                "reasoning": "句子通顺，代词指代清楚（如“患者”），无歧义，易于理解。"
-              },
-              "terminology_appropriateness": {
-                "score": 2,
-                "reasoning": "症状（头痛、恶心）、体征（血压145/95mmHg）、诊断（高血压）、治疗（降压药物、低盐饮食）等术语规范，符合医学表达习惯。"
-              }
-            },
-            "total_score": 10,
-            "overall_assessment": "病历质量优秀，SOAP结构完整，内容清晰规范，无任何缺陷。"
-          },
-          "safety": {
-            "risks": [],
-            "has_high_risk": false,
-            "high_risk_count": 0,
-            "total_risk_count": 0,
-            "safety_assessment": "病历记录完整准确，与对话内容一致，未发现高风险错误。"
-          },
-          "overall_score": 0.85,
-          "evaluation_id": 3
-        }
-      }
-    ]
-  }
-}
-</file>
-
-<file path="tests/test_confidence_feature.py">
-@pytest.fixture
-def db_session()
-⋮----
-engine = create_engine("sqlite:///:memory:")
-⋮----
-Session = sessionmaker(bind=engine)
-session = Session()
-⋮----
-@pytest.fixture
-def evidence_service(db_session)
-⋮----
-service = EvidenceService(db_session)
-⋮----
-class TestTranscriptTurnConfidence
-⋮----
-"""测试 TranscriptTurn 模型的置信度字段"""
-⋮----
-def test_create_turn_with_confidence(self, db_session)
-⋮----
-visit = Visit(visit_id="test_visit_001", audio_path="test.wav")
-⋮----
-turn = TranscriptTurn(
-⋮----
-saved_turn = db_session.query(TranscriptTurn).filter(
-⋮----
-def test_create_turn_without_confidence(self, db_session)
-⋮----
-visit = Visit(visit_id="test_visit_002", audio_path="test.wav")
-⋮----
-class TestEvidenceServiceConfidence
-⋮----
-"""测试证据选择服务的置信度过滤功能"""
-⋮----
-def test_filter_low_confidence_turns(self, evidence_service, db_session)
-⋮----
-visit = Visit(visit_id="test_visit_003", audio_path="test.wav")
-⋮----
-turns = [
-⋮----
-evidence = evidence_service.select_evidence_by_rules(
-⋮----
-def test_confidence_affects_score(self, evidence_service, db_session)
-⋮----
-visit = Visit(visit_id="test_visit_004", audio_path="test.wav")
-⋮----
-turn_high = TranscriptTurn(
-turn_low = TranscriptTurn(
-⋮----
-score_high = evidence_service._calculate_turn_score(
-score_low = evidence_service._calculate_turn_score(
-⋮----
-def test_zero_confidence_turn_filtered(self, evidence_service, db_session)
-⋮----
-visit = Visit(visit_id="test_visit_005", audio_path="test.wav")
-⋮----
-score = evidence_service._calculate_turn_score(
-⋮----
-def test_evidence_inherits_turn_confidence(self, evidence_service, db_session)
-⋮----
-visit = Visit(visit_id="test_visit_006", audio_path="test.wav")
-⋮----
-class TestASRServiceConfidence
-⋮----
-"""测试 ASR 服务的置信度传递"""
-⋮----
-def test_funasr_turns_include_confidence(self)
-⋮----
-mock_engine = MagicMock()
-mock_result = MagicMock()
-⋮----
-service = ASRService({"engine_type": "funasr"})
-⋮----
-result = service._transcribe_funasr_with_diarization("test.wav")
-⋮----
-def test_qwen3_asr_turns_include_default_confidence(self)
-⋮----
-service = ASRService({"engine_type": "qwen3-asr"})
-⋮----
-result = service._transcribe_qwen3_asr("test.wav")
-</file>
-
-<file path="tests/test_llm_service.py">
-def test_llm_request_dataclass()
-⋮----
-request = LLMRequest(
-⋮----
-def test_llm_response_dataclass()
-⋮----
-response = LLMResponse(
-⋮----
-def test_prompt_manager_render()
-⋮----
-manager = PromptManager()
-prompt = manager.render(
-⋮----
-def test_prompt_manager_missing_var()
-⋮----
-@patch('httpx.Client')
-def test_openai_compatible_adapter_generate(mock_client)
-⋮----
-mock_response = Mock()
-⋮----
-mock_client_instance = MagicMock()
-⋮----
-adapter = OpenAICompatibleAdapter({
-⋮----
-request = LLMRequest(prompt="测试")
-response = adapter.generate(request)
-⋮----
-@patch('httpx.Client')
-def test_openai_compatible_adapter_with_api_key(mock_client)
-⋮----
-def test_llm_service_generate_json()
-⋮----
-mock_db = Mock()
-mock_config = Mock()
-⋮----
-service = LLMService(mock_db)
-⋮----
-mock_adapter = Mock()
-⋮----
-result = service.generate_json("测试提示", "test-config")
-⋮----
-def test_llm_service_no_adapters()
-</file>
-
 <file path=".repomixignore">
 # Add patterns to ignore here, one per line
 # Example:
@@ -6937,6 +5046,7 @@ def test_llm_service_no_adapters()
 /docs
 README.md
 CLAUDE.md
+tests/
 </file>
 
 <file path="backend/api/upload.py">
@@ -7108,6 +5218,223 @@ existing = aggregated[section][field]
 
 <file path="backend/services/llm/__init__.py">
 __all__ = ["LLMAdapter", "LLMRequest", "LLMResponse", "OpenAICompatibleAdapter", "LLMService"]
+</file>
+
+<file path="backend/services/pipeline/evidence_enricher.py">
+class EvidenceEnricher
+⋮----
+traces = []
+seen_turn_ids = set()
+⋮----
+fact = fact_by_id.get(fid)
+⋮----
+turn_ids = fact.evidence_turn_ids or []
+evidence_texts = fact.evidence_text or []
+⋮----
+turn = turn_by_index.get(tid)
+⋮----
+trace = {
+⋮----
+enrichment_start = time.time()
+⋮----
+fact_by_id = {f.fact_id: f for f in fact_records}
+turn_by_index = {t.turn_index: t for t in turns}
+⋮----
+so_used_fact_ids = emr_result.get("so_used_fact_ids", [])
+assessment_items = emr_result.get("assessment_items", [])
+plan_items = emr_result.get("plan_items", {})
+⋮----
+_b = EvidenceEnricher.build_traces_from_fact_ids
+⋮----
+s_fact_ids = set()
+o_fact_ids = set()
+⋮----
+s_has_subsection = any(
+o_has_subsection = any(
+⋮----
+llm_s_field_fact_ids = {}
+s_field_names = [
+subject_section = dict(emr_result.get("subjective", {}))
+⋮----
+field_data = subject_section.get(field)
+⋮----
+traces = field_data.get("evidence_traces", [])
+⋮----
+fids = set()
+⋮----
+field_fids = llm_s_field_fact_ids.get(field, set())
+⋮----
+s_field_fact_ids = {}
+⋮----
+field_fids = s_field_fact_ids.get(field, set())
+⋮----
+s_evidence_traces = _b(
+⋮----
+llm_o_field_fact_ids = {}
+o_field_names = ["physical_examination", "auxiliary_examination"]
+objective_section = dict(emr_result.get("objective", {}))
+⋮----
+field_data = objective_section.get(field)
+⋮----
+field_fids = llm_o_field_fact_ids.get(field, set())
+⋮----
+o_field_fact_ids = {}
+⋮----
+field_fids = o_field_fact_ids.get(field, set())
+⋮----
+o_evidence_traces = _b(
+⋮----
+diagnosis_fact_ids = set()
+assessment_section = dict(emr_result.get("assessment", {}))
+⋮----
+llm_traces = assessment_section["diagnosis"].get("evidence_traces", [])
+⋮----
+sids = item.get("supporting_fact_ids", [])
+⋮----
+a_evidence_traces = _b(
+⋮----
+treatment_fact_ids = set()
+advice_fact_ids = set()
+⋮----
+plan_section = dict(emr_result.get("plan", {}))
+⋮----
+llm_traces = plan_section["treatment"].get("evidence_traces", [])
+⋮----
+llm_traces = plan_section["advice"].get("evidence_traces", [])
+⋮----
+follow_up = plan_items.get("follow_up", {})
+⋮----
+education = plan_items.get("education", {})
+⋮----
+t_evidence_traces = _b(
+adv_evidence_traces = _b(
+⋮----
+s_total = sum(
+o_total = sum(
+total_traces = (
+</file>
+
+<file path="backend/services/pipeline/stages/soap_generation.py">
+class SOAPGenerationStage(PipelineStage)
+⋮----
+STAGE_DELAY = 0.5
+⋮----
+def stage_name(self) -> str
+⋮----
+def execute(self, ctx: PipelineContext) -> Dict[str, Any]
+⋮----
+stage_start = time.time()
+⋮----
+fact_records = ctx.fact_records
+role_mapping = ctx.all_role_mappings
+⋮----
+so_result = self._generate_so(ctx, fact_records, role_mapping)
+ap_result = self._generate_ap(ctx, so_result, fact_records, role_mapping)
+⋮----
+emr_draft = {
+⋮----
+so_used_fact_ids = emr_draft.get("so_used_fact_ids", [])
+assessment_items = emr_draft.get("assessment_items", [])
+⋮----
+so_facts = self._filter_facts_by_section(fact_records, ["S", "O"])
+⋮----
+facts_json = self._format_facts_for_prompt(so_facts)
+⋮----
+dialogue_parts = []
+⋮----
+mention = fact.normalized_term or fact.mention
+speaker_label = fact.speaker or "unknown"
+⋮----
+dialogue_summary = "\n".join(dialogue_parts)
+⋮----
+prompt = ctx.prompt_manager.render(
+⋮----
+debug_interactor = DebugInteractor(ctx.llm_service)
+⋮----
+response_text = debug_interactor.interact(
+⋮----
+response = ctx.llm_service.generate(prompt, thinking_enabled=False)
+⋮----
+response_text = response.text
+⋮----
+result = parse_json_response(response_text, "SO生成", raise_on_error=True)
+⋮----
+stage_time = time.time() - stage_start
+⋮----
+ap_facts = self._filter_facts_by_section(fact_records, ["A", "P"])
+⋮----
+subjective_text = json.dumps(so_result.get("subjective", {}), ensure_ascii=False, indent=2)
+objective_text = json.dumps(so_result.get("objective", {}), ensure_ascii=False, indent=2)
+facts_json = self._format_facts_for_prompt(ap_facts)
+⋮----
+response = ctx.llm_service.generate(prompt)
+⋮----
+result = parse_json_response(response_text, "AP合并生成", raise_on_error=True)
+⋮----
+assessment = result.get("assessment", {})
+assessment_items = result.get("assessment_items", [])
+⋮----
+assessment_items = assessment.get("assessment_items", [])
+plan = result.get("plan", {})
+plan_items = result.get("plan_items", {})
+⋮----
+plan_items = plan.get("plan_items", {})
+⋮----
+a_facts = self._filter_facts_by_section(fact_records, ["A"])
+p_facts = self._filter_facts_by_section(fact_records, ["P"])
+⋮----
+assessment_facts_json = self._format_facts_for_prompt(a_facts)
+assessment_prompt = ctx.prompt_manager.render(
+⋮----
+assessment_response_text = debug_interactor.interact(
+⋮----
+response = ctx.llm_service.generate(assessment_prompt)
+⋮----
+assessment_response_text = response.text
+⋮----
+assessment_result = parse_json_response(assessment_response_text, "Assessment生成")
+⋮----
+assessment_result = {}
+⋮----
+assessment = assessment_result.get("assessment", {})
+assessment_items = assessment_result.get("assessment_items", [])
+⋮----
+assessment_text = json.dumps(assessment, ensure_ascii=False, indent=2)
+⋮----
+plan_facts_json = self._format_facts_for_prompt(p_facts)
+plan_prompt = ctx.prompt_manager.render(
+⋮----
+plan_response_text = debug_interactor.interact(
+⋮----
+response = ctx.llm_service.generate(plan_prompt)
+⋮----
+plan_response_text = response.text
+⋮----
+plan_result = parse_json_response(plan_response_text, "Plan生成")
+⋮----
+plan_result = {}
+⋮----
+plan = plan_result.get("plan", {})
+plan_items = plan_result.get("plan_items", {})
+⋮----
+@staticmethod
+    def _format_facts_for_prompt(fact_records: List[AtomicFact], lightweight: bool = True) -> str
+⋮----
+facts_data = []
+⋮----
+fact_item = {
+⋮----
+evidence_spans = fact.evidence_spans or []
+⋮----
+evidence_spans = [text[:20] if len(text) > 20 else text for text in fact.evidence_text[:3]]
+⋮----
+context_items = []
+⋮----
+label = f.normalized_term or f.mention
+⋮----
+speaker = f.speaker or ""
+⋮----
+context_items = context_items[:max_items] + [f"... 共 {len(fact_records)} 条事实"]
 </file>
 
 <file path="backend/services/postprocessor.py">
@@ -7782,7 +6109,7 @@ def convert_to_wav(audio_path: str | Path, output_path: str | Path) -> Path
                 
                 <div class="form-group">
                     <label for="maxTokens">最大Token数</label>
-                    <input type="number" id="maxTokens" name="max_tokens" value="2048" min="100" max="8192">
+                    <input type="number" id="maxTokens" name="max_tokens" value="2048" min="100" max="131072">
                 </div>
                 
                 <div class="form-group">
@@ -8851,7 +7178,7 @@ temperature: str = "0.7"
 is_active: bool = True
 json_mode: bool = False
 thinking_enabled: bool = False
-thinking_effort: str = "high"
+thinking_effort: str = "low"
 ⋮----
 class ConfigUpdate(BaseModel)
 ⋮----
@@ -8925,7 +7252,7 @@ model_name = Column(String(100), nullable=False)
 api_key = Column(String(200), nullable=True)
 api_endpoint = Column(String(200), nullable=True)
 is_active = Column(Boolean, default=True)
-max_tokens = Column(Integer, default=8192)
+max_tokens = Column(Integer, default=32768)
 temperature = Column(String(10), default="0.7")
 json_mode = Column(Boolean, default=False)
 thinking_enabled = Column(Boolean, default=False)
@@ -9869,54 +8196,6 @@ torch>=2.0.0
 sentencepiece>=0.1.99
 </file>
 
-<file path="skills-lock.json">
-{
-  "version": 1,
-  "skills": {
-    "better-icons": {
-      "source": "better-auth/better-icons",
-      "sourceType": "github",
-      "computedHash": "b16a2f5830f3db40695fdd58d415a631e9fb6170a0cc5d3b56469d17e53596bc"
-    },
-    "finishing-a-development-branch": {
-      "source": "obra/superpowers",
-      "sourceType": "github",
-      "computedHash": "9edba9a38684c060fdc38290f640e1dc0c37de286723ac9be73bacacf7cd6f3d"
-    },
-    "ljg-roundtable": {
-      "source": "lijigang/ljg-skills",
-      "sourceType": "github",
-      "computedHash": "44cfdad0ae96a43216f6fd8ff2680fe36ab6c02b35499121894b57b7b7420931"
-    },
-    "slidev": {
-      "source": "antfu/skills",
-      "sourceType": "github",
-      "computedHash": "ecde2e0d684f770a50c8718ab036e5df5e1ead082cb608739673507079a524a3"
-    },
-    "subagent-creator": {
-      "source": "tech-leads-club/agent-skills",
-      "sourceType": "github",
-      "computedHash": "82d90e24f541907d701917fd7face6dfa45ccf6afb610b77669ef665b766a3d9"
-    },
-    "subagent-driven-development": {
-      "source": "obra/superpowers",
-      "sourceType": "github",
-      "computedHash": "a197f8e5fba5ea59013e1adbaa90dd42db35de8f074feca200c8038de584a83b"
-    },
-    "using-git-worktrees": {
-      "source": "obra/superpowers",
-      "sourceType": "github",
-      "computedHash": "52bbb4b6e80918e83e92a1514f3b3757712154c2a8a42de24919e48a794c54fc"
-    },
-    "writing-plans": {
-      "source": "obra/superpowers",
-      "sourceType": "github",
-      "computedHash": "bfaed11054ad8021c66860244e2d2e0d1eca483ae9f5fbfcb956e99c61f5c3d7"
-    }
-  }
-}
-</file>
-
 <file path="backend/database.py">
 engine = create_engine(
 ⋮----
@@ -10375,7 +8654,7 @@ messages = []
 ⋮----
 payload = {
 ⋮----
-use_thinking = request.thinking_enabled or self.thinking_enabled
+use_thinking = request.thinking_enabled
 ⋮----
 effort = request.thinking_effort if request.thinking_enabled else self.thinking_effort
 ⋮----
@@ -10391,6 +8670,11 @@ response = client.post(
 ⋮----
 data = response.json()
 ⋮----
+raw_bytes = response.content
+⋮----
+text = raw_bytes.decode(enc)
+data = json.loads(text)
+⋮----
 choices = data.get("choices", [])
 ⋮----
 error_info = data.get("error", {})
@@ -10404,9 +8688,8 @@ finish_reason = choices[0].get("finish_reason", "stop")
 ⋮----
 reasoning_tokens = usage.get("completion_tokens_details", {}).get("reasoning_tokens", 0)
 ⋮----
-content = self._extract_final_answer(thinking_content)
-⋮----
-content = content.strip()
+current_max_tokens = payload.get("max_tokens", request.max_tokens)
+new_max_tokens = min(current_max_tokens * 2, 131072)
 ⋮----
 stripped_len = len(content.replace(' ', '').replace('\t', '').replace('\n', ''))
 ⋮----
@@ -10424,22 +8707,6 @@ last_error = RuntimeError(f"Invalid {self.provider_name} response format: {str(e
 last_error = e
 ⋮----
 wait_time = self.retry_delay * (attempt + 1)
-⋮----
-def _extract_final_answer(self, reasoning: str) -> str
-⋮----
-json_match = re.search(r'\{[\s\S]*\}', reasoning)
-⋮----
-json_array_match = re.search(r'\[[\s\S]*\]', reasoning)
-⋮----
-lines = reasoning.strip().split('\n')
-⋮----
-line = line.strip()
-⋮----
-line = re.sub(r'^[*\-•\d.]\s*', '', line).strip()
-⋮----
-last_non_empty = ""
-⋮----
-last_non_empty = line
 ⋮----
 def is_available(self) -> bool
 ⋮----
@@ -10838,7 +9105,7 @@ template = self.get_template(template_name)
                                 <div class="config-field-half">
                                     <div class="config-field">
                                         <label for="maxTokens">最大Token数</label>
-                                        <input type="number" id="maxTokens" name="max_tokens" value="2048" min="100" max="8192">
+                                        <input type="number" id="maxTokens" name="max_tokens" value="2048" min="100" max="131072">
                                     </div>
                                     <div class="config-field">
                                         <label for="temperature">Temperature</label>
@@ -11754,39 +10021,6 @@ async function loadDebugPrompts()
 function displayCurrentStage()
 </file>
 
-<file path=".gitignore">
-%TEMP%install-qwen.bat
-/.qwen
-/.trae
-*.0
-/.agents
-/data
-/output
-/.agents
-/_bmad
-/backend/services/correction/__pycache__
-/backend/services/llm/__pycache__
-/docs
-/src/asr/__pycache__
-/tests/test_correction/__pycache__
-/backend/__pycache__
-/tests/__pycache__
-.env
-.env
-*__pycache__
-/backend/api/__pycache__
-/backend/services/__pycache__
-/backend/models/__pycache__
-/data/database
-/backend/services/evaluation/__pycache__
-/data/logs
-backend/__pycache__/
-backend/api/__pycache__/
-backend/__pycache__/config.cpython-313.pyc
-backend/models/__pycache__/llm_config.cpython-313.pyc
-backend/models/__pycache__/transcript.cpython-313.pyc
-</file>
-
 <file path="frontend/css/style.css">
 :root {
 ⋮----
@@ -12147,19 +10381,42 @@ h3 {
 ::selection {
 </file>
 
+<file path=".gitignore">
+%TEMP%install-qwen.bat
+/.qwen
+/.trae
+*.0
+/.agents
+/data
+/output
+/.agents
+/_bmad
+/backend/services/correction/__pycache__
+/backend/services/llm/__pycache__
+/docs
+/src/asr/__pycache__
+/tests/test_correction/__pycache__
+/backend/__pycache__
+/tests/__pycache__
+.env
+.env
+*__pycache__
+/backend/api/__pycache__
+/backend/services/__pycache__
+/backend/models/__pycache__
+/data/database
+/backend/services/evaluation/__pycache__
+/data/logs
+backend/__pycache__/
+backend/api/__pycache__/
+backend/__pycache__/config.cpython-313.pyc
+backend/models/__pycache__/llm_config.cpython-313.pyc
+backend/models/__pycache__/transcript.cpython-313.pyc
+skills-lock.json
+</file>
+
 <file path="backend/services/llm_pipeline_service.py">
 def run_async(coro)
-⋮----
-"""
-    在同步上下文中运行异步协程的辅助函数
-    
-    解决问题：在FastAPI的事件循环中不能使用asyncio.run()
-    
-    策略：
-    1. 尝试获取当前运行的事件循环
-    2. 如果存在事件循环且正在运行，使用ThreadPoolExecutor在新线程中运行
-    3. 如果不存在事件循环，使用asyncio.run()
-    """
 ⋮----
 loop = asyncio.get_running_loop()
 ⋮----
@@ -12169,1367 +10426,17 @@ future = executor.submit(asyncio.run, coro)
 ⋮----
 class LLMPipelineService
 ⋮----
-FIELD_TYPE_MAPPING = {
-⋮----
-STAGE_DELAY = 0.5
-⋮----
-MAX_PARALLEL_SEGMENTS = 4
+"""向后兼容包装类，委托给 PipelineOrchestrator"""
 ⋮----
 def __init__(self, db: Session, llm_service: Optional[LLMService] = None, language: str = "zh")
 ⋮----
-def _extract_json_from_response(self, response_text: str, stage_name: str = "") -> Optional[Dict[str, Any]]
+def process_transcript(self, visit_id: str, save_evidence: bool = True) -> Dict[str, Any]
 ⋮----
-"""
-        从LLM响应中提取JSON对象。
-        
-        处理以下情况：
-        1. 标准JSON：{...}
-        2. Markdown代码块包裹：```json ... ```
-        3. 缺少开头 { 的JSON：直接以 "key": 开头
-        4. 缺少开头 {" 的JSON：直接以 key": 开头
-        5. 末尾有多余文字
-        6. 开头有多余文字
-        7. JSON中有语法错误（缺少逗号、引号不匹配、控制字符等）
-        
-        Args:
-            response_text: LLM返回的原始文本
-            stage_name: 阶段名称，用于日志
-        
-        Returns:
-            解析后的字典，失败返回None
-        """
+def process_with_callback(self, visit_id: str, progress_callback=None, save_evidence: bool = True)
 ⋮----
-response_text = response_text.strip()
+def get_all_prompts(self, turns: List) -> List[Dict[str, Any]]
 ⋮----
-response_text = self._remove_markdown_code_block(response_text)
-⋮----
-response_text = self._remove_control_characters(response_text)
-⋮----
-json_start = response_text.find("{")
-json_end = response_text.rfind("}")
-⋮----
-json_str = response_text[json_start:json_end + 1]
-⋮----
-result = json.loads(json_str)
-⋮----
-fixed_json = self._try_fix_json(json_str)
-⋮----
-all_jsons = self._extract_all_json_objects(response_text)
-⋮----
-potential_json = response_text[:json_end + 1]
-⋮----
-potential_json = response_text
-⋮----
-json_str = "{" + potential_json
-⋮----
-colon_pos = potential_json.find('":')
-⋮----
-key = potential_json[:colon_pos]
-rest = potential_json[colon_pos + 1:]
-json_str = '{"' + key + '"' + rest
-⋮----
-def _remove_markdown_code_block(self, text: str) -> str
-⋮----
-"""移除markdown代码块标记"""
-⋮----
-text = re.sub(r'^```(?:json)?\s*\n?', '', text)
-text = re.sub(r'\n?```\s*$', '', text)
-⋮----
-def _remove_control_characters(self, text: str) -> str
-⋮----
-"""移除JSON中的无效控制字符"""
-⋮----
-result = []
-in_string = False
-escape_next = False
-⋮----
-escape_next = True
-⋮----
-in_string = not in_string
-⋮----
-def _try_fix_json(self, json_str: str) -> Optional[Dict[str, Any]]
-⋮----
-"""尝试修复常见的JSON语法错误"""
-⋮----
-fixed = json_str
-⋮----
-fixed = re.sub(r',\s*}', '}', fixed)
-fixed = re.sub(r',\s*]', ']', fixed)
-⋮----
-fixed = re.sub(r',\s*\n\s*"', ',', fixed)
-fixed = re.sub(r',\s*\n\s*}', '}', fixed)
-⋮----
-fixed = re.sub(r':\s*,', ': null,', fixed)
-fixed = re.sub(r':\s*}', ': null}', fixed)
-⋮----
-fixed = re.sub(r'"\s*,\s*,', '",', fixed)
-fixed = re.sub(r',\s*,', ',', fixed)
-⋮----
-fixed = re.sub(r'"\s*:\s*"', '": "', fixed)
-fixed = re.sub(r'"\s*:\s*\[', '": [', fixed)
-fixed = re.sub(r'"\s*:\s*\{', '": {', fixed)
-⋮----
-fixed = re.sub(r'(?<!\\)"(?=[a-zA-Z0-9_\u4e00-\u9fff])', '"', fixed)
-⋮----
-brace_count = fixed.count('{') - fixed.count('}')
-bracket_count = fixed.count('[') - fixed.count(']')
-⋮----
-def _extract_all_json_objects(self, text: str) -> List[Dict[str, Any]]
-⋮----
-"""从文本中提取所有完整的JSON对象"""
-⋮----
-results = []
-depth = 0
-start = -1
-⋮----
-start = i
-⋮----
-json_str = text[start:i+1]
-⋮----
-obj = json.loads(json_str)
-⋮----
-start_time = time.time()
-⋮----
-turns = self.db.query(TranscriptTurn).filter(
-⋮----
-segments = self._segment_turns(turns)
-⋮----
-segment_start = time.time()
-⋮----
-combined_text = self._build_text_from_cleaned_turns(all_cleaned_turns, turns)
-⋮----
-fact_start = time.time()
-fact_result = self._fact_extraction_stage(all_cleaned_turns, all_role_mappings, visit_id)
-⋮----
-fact_service = FactService(self.db)
-fact_records = fact_service.get_facts_by_visit(visit_id)
-⋮----
-consolidation_start = time.time()
-consolidation_result = self._fact_consolidation_stage(fact_records, visit_id)
-⋮----
-normalize_start = time.time()
-⋮----
-normalized_result = self._normalize_terms_stage(fact_records, all_role_mappings, visit_id, save_evidence)
-⋮----
-# DEPRECATED: _extract_fields_stage() 已被阶段2(fact_extraction)替代
-# 事实表本身已是结构化数据，不再需要从文本中抽取字段
-# extraction_result 现在直接来自 fact_result
-# extract_start = time.time()
-# extraction_result = self._extract_fields_stage(
-#     normalized_result.get("normalized_text", combined_text),
-#     all_role_mappings,
-#     []
-# )
-# logger.info(f"字段抽取阶段完成，耗时: {time.time() - extract_start:.2f}秒")
-extraction_result = fact_result
-⋮----
-emr_start = time.time()
-so_result = self._generate_so_stage(fact_records, all_role_mappings)
-ap_result = self._generate_ap_stage(so_result, fact_records, all_role_mappings)
-emr_draft = {
-so_used_fact_ids = emr_draft.get("so_used_fact_ids", [])
-assessment_items = emr_draft.get("assessment_items", [])
-plan_items = emr_draft.get("plan_items", {})
-⋮----
-verify_start = time.time()
-⋮----
-verification_result = self._verification_stage(emr_draft, fact_records, all_role_mappings)
-⋮----
-emr_final = verification_result.get("soap_final", emr_draft)
-⋮----
-emr_final = self._normalize_emr_format(emr_final)
-emr_final = self._enrich_evidence_traces(emr_final, fact_records, turns)
-⋮----
-# self._run_evaluation(dialogue_text, emr_result)  # 暂时禁用评估，评估标准需要改进
-⋮----
-total_time = time.time() - start_time
-⋮----
-"""
-        带进度回调的处理方法，用于SSE实时推送进度。
-        
-        Args:
-            visit_id: 就诊ID
-            progress_callback: 进度回调函数，签名为 callback(stage_num, stage_name, status, detail, extra)
-            save_evidence: 是否保存证据
-        
-        Yields:
-            进度事件字典 {"stage": int, "name": str, "status": str, "detail": str, "extra": dict}
-        """
-def emit_progress(stage_num, stage_name, status, detail="", extra=None)
-⋮----
-event = {
-⋮----
-resolved_count = consolidation_result.get("resolved_count", 0) if consolidation_result else 0
-⋮----
-qualifying_count = len([f for f in fact_records if f.normalization_needed and f.mention])
-⋮----
-result = {
-⋮----
-def _run_evaluation(self, dialogue_text: str, emr_result: Dict[str, Any])
-⋮----
-"""运行评估并输出结果到日志"""
-⋮----
-matched = self.evaluation_service.find_matching_test_sample(dialogue_text)
-⋮----
-sample_id = matched["sample_id"]
-test_sample = matched["test_sample"]
-⋮----
-eval_result = self.evaluation_service.evaluate(emr_result, test_sample)
-⋮----
-ground_truth_diagnosis = test_sample.get("diagnosis", "")
-ground_truth_symptoms = self.evaluation_service._extract_symptoms_from_test(test_sample)
-predicted_diagnosis = self.evaluation_service._extract_diagnosis_from_emr(emr_result)
-predicted_symptoms = self.evaluation_service._extract_symptoms_from_emr(emr_result)
-⋮----
-def _segment_turns(self, turns: List[TranscriptTurn]) -> List[List[TranscriptTurn]]
-⋮----
-segments = []
-current_segment = []
-⋮----
-"""
-        并行处理所有段落，使用线程池实现LLM调用的并行化。
-        
-        Args:
-            segments: 段落列表，每个段落是一个turn列表
-            
-        Returns:
-            (all_role_mappings, all_cleaned_turns) 元组
-        """
-⋮----
-parallel_start = time.time()
-⋮----
-all_role_mappings = {}
-all_cleaned_turns = []
-⋮----
-result = self._process_segment(segment, i)
-⋮----
-max_workers = min(len(segments), self.MAX_PARALLEL_SEGMENTS)
-⋮----
-results = [None] * len(segments)
-⋮----
-def process_single_segment(args)
-⋮----
-result = self._process_segment(segment, idx)
-⋮----
-futures = list(executor.map(
-⋮----
-fallback_result = self._fallback_role_annotation(segments[idx])
-⋮----
-parallel_time = time.time() - parallel_start
-⋮----
-"""
-        从清洗后的turn JSON构建合并文本，供后续阶段使用。
-        
-        优先使用 corrected_text，没有修正时使用原始文本。
-        
-        Args:
-            cleaned_turns: 阶段1输出的清洗后turn列表
-            original_turns: 原始数据库turn列表（用于回退）
-        
-        Returns:
-            合并后的文本字符串
-        """
-⋮----
-turn_text_map = {}
-⋮----
-tid = ct.get("turn_id")
-ct_text = ct.get("corrected_text", "")
-⋮----
-lines = []
-⋮----
-text = turn_text_map.get(turn.turn_index, turn.text)
-speaker = turn.corrected_speaker or turn.speaker
-⋮----
-combined = "\n".join(lines)
-⋮----
-speaker = turn.speaker
-⋮----
-transcript_text = self._format_segment(segment)
-⋮----
-prompt = self._build_cleaning_prompt(transcript_text)
-⋮----
-response_text = self._debug_interact(
-⋮----
-response = self.llm_service.generate(prompt, timeout=300.0, thinking_enabled=False)
-⋮----
-response_text = response.text
-⋮----
-cleaning_result = self._parse_cleaning_response(response_text, segment)
-⋮----
-def _format_segment(self, segment: List[TranscriptTurn]) -> str
-⋮----
-"""
-        格式化对话轮次为文本。
-        
-        输出格式包含turn_index，便于后续证据溯源时精确定位：
-        - 有标签：[#0] [spk0]: 对话内容
-        - 无标签：[#0] 对话内容
-        
-        turn_index是全局唯一的轮次索引，用于证据溯源时精确匹配原始转写。
-        """
-has_valid_speakers = False
-⋮----
-has_valid_speakers = True
-⋮----
-# DEPRECATED: replaced by _build_cleaning_prompt()
-def _build_role_annotation_prompt(self, transcript: str) -> str
-⋮----
-def _build_cleaning_prompt(self, transcript: str) -> str
-⋮----
-"""
-        构建阶段1转写清洗与角色纠错提示词。
-        
-        使用 prompt_manager 中的 turn_cleaning 模板，仅包含角色纠错和ASR清洗，
-        不再包含证据标注（证据标注已移至阶段2）。
-        
-        Args:
-            transcript: 格式化的对话文本
-        
-        Returns:
-            渲染后的提示词字符串
-        """
-⋮----
-prompt = self.prompt_manager.render("turn_cleaning", transcript=transcript)
-⋮----
-# DEPRECATED: replaced by _parse_cleaning_response()
-⋮----
-result = self._extract_json_from_response(response_text, "角色标注")
-⋮----
-dialog_format = result.get("dialog_format", "labeled")
-role_mapping = result.get("role_mapping", {})
-annotated_text = result.get("annotated_text", "")
-corrections = result.get("corrections", [])
-speakers_found = result.get("speakers_found", [])
-⋮----
-correction_map = self._assign_speakers_from_unlabeled(
-⋮----
-correction_map = self._apply_speaker_corrections(corrections, segment)
-⋮----
-evidence_traces = self._extract_evidence_traces(
-⋮----
-"""
-        解析阶段1的转写清洗LLM响应。
-        
-        解析LLM返回的turn JSON列表，提取角色映射和清理后的turn数据。
-        如果JSON解析失败，回退到 _fallback_role_annotation()。
-        
-        Args:
-            response_text: LLM返回的原始文本
-            segment: 对话轮次列表
-        
-        Returns:
-            {
-                "turns": [...],           # 清洗后的turn JSON列表
-                "role_mapping": {...},     # 角色映射
-                "speaker_corrections": [...] # 说话人纠正记录
-            }
-        """
-⋮----
-result = self._extract_json_from_response(response_text, "转写清洗")
-⋮----
-turns_data = result.get("turns", [])
-⋮----
-role_mapping = {}
-speaker_corrections = []
-⋮----
-turn_by_index = {turn.turn_index: turn for turn in segment}
-⋮----
-turn_id = turn_json.get("turn_id")
-speaker_role = turn_json.get("speaker_role")
-section_hint = turn_json.get("section_hint", [])
-⋮----
-turn = turn_by_index.get(turn_id)
-⋮----
-turn = segment[i]
-⋮----
-original_speaker = turn.speaker
-⋮----
-expected_label = "spk0" if original_speaker != "spk0" else original_speaker
-⋮----
-expected_label = "spk1" if original_speaker != "spk1" else original_speaker
-⋮----
-expected_label = f"spk_{turn_id}"
-⋮----
-"""
-        将清洗结果中的ASR修正应用到数据库。
-        
-        遍历 cleaning_result 中的 turns 列表，对于每个 changed_spans 非空的turn，
-        将 corrected_text 更新到数据库的 TranscriptTurn.corrected_text 字段。
-        
-        Args:
-            cleaning_result: _parse_cleaning_response 的返回结果
-            segment: 对话轮次列表
-        
-        Returns:
-            {turn_index: corrected_text} 修正映射
-        """
-⋮----
-turns_data = cleaning_result.get("turns", [])
-⋮----
-correction_map = {}
-applied_count = 0
-⋮----
-corrected_text = turn_json.get("corrected_text", "")
-changed_spans = turn_json.get("changed_spans", [])
-⋮----
-stage_start = time.time()
-⋮----
-new_turns_json = json.dumps(cleaned_turns, ensure_ascii=False, indent=2)
-⋮----
-existing_facts_summary = "[]"
-existing_facts_map = {}
-⋮----
-existing_facts = fact_service.get_facts_by_visit(visit_id)
-⋮----
-summary_items = []
-⋮----
-existing_facts_summary = json.dumps(summary_items, ensure_ascii=False, indent=2)
-⋮----
-prompt = self.prompt_manager.render(
-⋮----
-response = self.llm_service.generate(prompt, thinking_enabled=False)
-⋮----
-result = self._extract_json_from_response(response_text, "事实抽取")
-⋮----
-facts = []
-⋮----
-raw_facts = result.get("facts", [])
-⋮----
-facts = self._process_incremental_facts(raw_facts, existing_facts_map, visit_id)
-⋮----
-facts = self._deduplicate_facts(raw_facts)
-⋮----
-stage_time = time.time() - stage_start
-⋮----
-new_facts = []
-append_operations = []
-⋮----
-operation = fact.get("operation", "new")
-⋮----
-matched_fact_id = fact.get("matched_fact_id")
-⋮----
-def _apply_fact_appends(self, append_operations: List[Dict])
-⋮----
-fact_id = op["fact_id"]
-fact = self.db.query(AtomicFact).filter(AtomicFact.fact_id == fact_id).first()
-⋮----
-existing_turn_ids = set(fact.evidence_turn_ids or [])
-new_turn_ids = set(op.get("new_evidence_turn_ids", []))
-⋮----
-existing_texts = fact.evidence_text or []
-new_texts = op.get("new_evidence_text", [])
-⋮----
-def _deduplicate_facts(self, facts: List[Dict]) -> List[Dict]
-⋮----
-merged = {}
-⋮----
-mention = fact.get("mention", "").strip()
-section = fact.get("section_candidate", "")
-speaker = fact.get("speaker", "")
-⋮----
-key = f"{mention}|{section}|{speaker}"
-⋮----
-existing = merged[key]
-existing_turn_ids = set(existing.get("evidence_turn_ids", []))
-new_turn_ids = set(fact.get("evidence_turn_ids", []))
-⋮----
-existing_texts = existing.get("evidence_text", [])
-new_texts = fact.get("evidence_text", [])
-⋮----
-def _save_atomic_facts(self, facts: List[Dict], visit_id: str)
-⋮----
-saved_count = 0
-⋮----
-fact_id = f"fact_{visit_id}_{uuid.uuid4().hex[:12]}"
-⋮----
-atomic_fact = AtomicFact(
-⋮----
-"""
-        从无标签对话的标注结果中提取说话人分配。
-        
-        当原始对话没有说话人标签时，LLM会为每句话分配[医生]或[患者]标签。
-        此方法解析标注文本，更新数据库中的说话人信息。
-        
-        Args:
-            annotated_text: LLM标注后的文本（包含[医生]/[患者]标签）
-            segment: 对话轮次列表
-            role_mapping: 角色映射（如 {"医生": "doctor", "患者": "patient"}）
-        
-        Returns:
-            说话人分配映射 {turn_index: assigned_speaker}
-        """
-assignment_map = {}
-⋮----
-speaker_pattern = r'\[(医生|患者)\]:\s*([^\n\[]+)'
-matches = re.findall(speaker_pattern, annotated_text)
-⋮----
-turn_index = 0
-⋮----
-text_content = text_content.strip()
-⋮----
-turn = segment[turn_index]
-⋮----
-"""
-        应用说话人纠正到对话轮次。
-        
-        Args:
-            corrections: 纠正列表，每项包含 turn_index, original_speaker, corrected_speaker, reason
-            segment: 对话轮次列表
-        
-        Returns:
-            纠正映射字典 {turn_index: corrected_speaker}
-        """
-⋮----
-turn_index = correction.get("turn_index")
-original_speaker = correction.get("original_speaker")
-corrected_speaker = correction.get("corrected_speaker")
-reason = correction.get("reason", "")
-⋮----
-original_speaker = re.sub(r'^\[|\]$', '', original_speaker)
-⋮----
-turn = turn_by_index.get(turn_index)
-⋮----
-FIELD_EXPECTED_ROLE = {
-⋮----
-# DEPRECATED: 证据标注职责已移交给阶段2(fact_extraction)，此方法将在后续版本中移除。
-# 当前仅保留以防兼容性需要，不再在新流程中使用。
-⋮----
-"""
-        从标注文本中提取证据溯源信息。
-        
-        优先从标注文本中解析turn_index（格式：[#N]），确保证据与原始转写精确对应。
-        
-        Args:
-            annotated_text: LLM标注后的文本，格式如：[#0] [spk0]: 你好，<主诉>...</主诉>
-            segment: 对话轮次列表
-            role_mapping: 角色映射字典
-            correction_map: 说话人纠正映射 {turn_index: corrected_speaker}
-        
-        Returns:
-            证据溯源列表
-        """
-evidence_traces = []
-correction_map = correction_map or {}
-role_mapping = role_mapping or {}
-⋮----
-tag_pattern = r'<(主诉|现病史|既往史|体格检查|辅助检查|诊断|治疗|医嘱|其他)>(.*?)</\1>'
-turn_index_pattern = r'\[#(\d+)\]'
-⋮----
-turn_by_index = {}
-⋮----
-field_type_cn = match.group(1)
-content = match.group(2).strip()
-⋮----
-field_type = self.FIELD_TYPE_MAPPING.get(field_type_cn, "other")
-⋮----
-start_char = match.start()
-end_char = match.end()
-⋮----
-speaker = None
-original_speaker = None
-turn_id = None
-turn_index = None
-turn_text = None
-matched_turns = []
-⋮----
-turn_index_matches = re.findall(turn_index_pattern, content)
-⋮----
-line_start = annotated_text.rfind('\n', 0, start_char) + 1
-line_end = annotated_text.find('\n', start_char)
-⋮----
-line_end = len(annotated_text)
-line = annotated_text[line_start:line_end]
-turn_index_matches = re.findall(turn_index_pattern, line)
-⋮----
-idx = int(idx_str)
-⋮----
-turn = turn_by_index[idx]
-⋮----
-first_turn = matched_turns[0]
-turn_id = first_turn.turn_id
-turn_index = first_turn.turn_index
-original_speaker = first_turn.speaker
-speaker = correction_map.get(first_turn.turn_index, first_turn.speaker)
-⋮----
-turn_text = first_turn.text
-⋮----
-turn_text = "\n".join([
-⋮----
-matched_turns = self._fallback_match_turns(
-⋮----
-evidence_trace = {
-⋮----
-"""
-        后备匹配方法：当无法从标注文本中解析turn_index时，通过内容匹配找到对应的turn。
-        """
-turn_by_speaker = {}
-⋮----
-effective_speaker = correction_map.get(turn.turn_index, turn.speaker)
-⋮----
-role_to_speaker = {}
-⋮----
-def find_turns_by_role_label(label: str) -> List[TranscriptTurn]
-⋮----
-speaker_markers = re.findall(r'\[(spk\d+|医生|患者)\]:\s*([^[]+)', content)
-⋮----
-text_part = text_part.strip().rstrip('，。,')
-⋮----
-candidate_turns = find_turns_by_role_label(spk_label)
-⋮----
-clean_content = re.sub(r'<[^>]+>', '', content)
-clean_content = re.sub(r'\[#\d+\]\s*', '', clean_content)
-clean_content = re.sub(r'\[(spk\d+|医生|患者)\]:\s*', '', clean_content)
-clean_content = clean_content.strip()
-⋮----
-expected_role = self.FIELD_EXPECTED_ROLE.get(field_type)
-candidate_turns_for_fallback = []
-⋮----
-candidate_turns_for_fallback = segment
-⋮----
-best_match_turn = None
-best_match_score = 0
-⋮----
-turn_text_clean = turn.text.strip()
-⋮----
-match_score = len(clean_content) / len(turn_text_clean) if turn_text_clean else 0
-⋮----
-best_match_score = match_score
-best_match_turn = turn
-⋮----
-def _fallback_role_annotation(self, segment: List[TranscriptTurn]) -> Dict[str, Any]
-⋮----
-role_mapping = self._infer_roles_by_rules(segment)
-⋮----
-turns = []
-⋮----
-def _infer_roles_by_rules(self, segment: List[TranscriptTurn]) -> Dict[str, str]
-⋮----
-doctor_indicators = [
-⋮----
-patient_indicators = [
-⋮----
-speaker_scores = {}
-⋮----
-text = turn.text
-⋮----
-# DEPRECATED: _normalize_terms_stage() has been replaced by a new version that
-# accepts AtomicFact records instead of full text. The old implementation is
-# preserved as _normalize_terms_stage_legacy() for backward compatibility.
-⋮----
-identified_terms = self.terminology_service.identify_colloquial_terms(annotated_text)
-⋮----
-seen_terms = set()
-unique_terms = []
-⋮----
-term = term_info.get("term", "")
-⋮----
-normalized_terms = []
-terms_for_result = []
-⋮----
-parallel_enabled = getattr(settings, 'TERMINOLOGY_PARALLEL_ENABLED', True)
-⋮----
-normalized_terms = run_async(
-⋮----
-normalized_terms = self._normalize_terms_serial(unique_terms)
-⋮----
-term_info = unique_terms[i] if i < len(unique_terms) else {}
-⋮----
-term_type = term_info.get("term_type", "unknown")
-is_colloquial = term_info.get("is_colloquial", True)
-⋮----
-normalized_text = annotated_text
-⋮----
-original = term_result["original"]
-normalized = term_result["normalized"]
-⋮----
-normalized = str(normalized)
-⋮----
-normalized_text = normalized_text.replace(original, normalized)
-⋮----
-"""
-        阶段2.5: 事实收束。
-        
-        解决重复事实合并、冲突事实标记、未判断项补判。
-        
-        Args:
-            fact_records: 原子事实列表
-            visit_id: 就诊ID
-        
-        Returns:
-            {
-                "merged_count": 合并数量,
-                "conflict_count": 冲突数量,
-                "resolved_count": 补判数量,
-                "final_fact_count": 最终事实数量
-            }
-        """
-⋮----
-facts_json = self._format_facts_for_prompt(fact_records, lightweight=True)
-⋮----
-prompt = self.prompt_manager.render("fact_consolidation", facts_json=facts_json)
-⋮----
-result = self._extract_json_from_response(response_text, "事实收束")
-⋮----
-merged_count = 0
-conflict_count = 0
-resolved_count = 0
-⋮----
-merged_facts = result.get("merged_facts", [])
-conflict_facts = result.get("conflict_facts", [])
-resolved_facts = result.get("resolved_facts", [])
-⋮----
-merged_count = self._apply_fact_merges(merged_facts)
-⋮----
-conflict_count = self._mark_conflict_facts(conflict_facts)
-⋮----
-resolved_count = self._apply_fact_resolutions(resolved_facts)
-⋮----
-final_facts = fact_service.get_facts_by_visit(visit_id)
-final_count = len(final_facts)
-⋮----
-def _apply_fact_merges(self, merged_facts: List[Dict]) -> int
-⋮----
-"""应用事实合并结果"""
-⋮----
-keep_fact_id = merge_info.get("fact_id")
-merged_from_ids = merge_info.get("merged_from", [])
-⋮----
-keep_fact = self.db.query(AtomicFact).filter(AtomicFact.fact_id == keep_fact_id).first()
-⋮----
-all_turn_ids = set(keep_fact.evidence_turn_ids or [])
-all_spans = keep_fact.evidence_spans or []
-⋮----
-from_fact = self.db.query(AtomicFact).filter(AtomicFact.fact_id == from_id).first()
-⋮----
-def _mark_conflict_facts(self, conflict_facts: List[Dict]) -> int
-⋮----
-"""标记冲突事实"""
-⋮----
-fact_id = conflict_info.get("fact_id")
-⋮----
-def _apply_fact_resolutions(self, resolved_facts: List[Dict]) -> int
-⋮----
-"""应用事实补判结果"""
-⋮----
-fact_id = resolve_info.get("fact_id")
-resolved_field = resolve_info.get("resolved_field")
-resolved_value = resolve_info.get("resolved_value")
-⋮----
-qualifying_facts = [
-⋮----
-processed_count = 0
-skipped_count = 0
-⋮----
-terms_to_normalize = [
-⋮----
-batch_results = self.terminology_service.batch_normalize_terms(
-⋮----
-result = batch_results.get(fact.mention)
-⋮----
-result = self.terminology_service.normalize_single_term(
-⋮----
-term_type = fact.concept_type or "unknown"
-⋮----
-# DEPRECATED: _normalize_terms_serial() is part of the old full-text
-# normalization pipeline. Preserved for backward compatibility, replaced
-# by the selective per-fact approach in the new _normalize_terms_stage().
-def _normalize_terms_serial(self, unique_terms: List[Dict[str, Any]]) -> List[Any]
-⋮----
-"""串行规范化术语（旧版，已弃用）"""
-⋮----
-context = term_info.get("context", "")
-⋮----
-normalized = self.terminology_service.normalize_term(term, context, term_type)
-⋮----
-async def _normalize_terms_parallel(self, unique_terms: List[Dict[str, Any]], context: str) -> List[Any]
-⋮----
-"""并行规范化术语（旧版，已弃用） - 优先使用中文术语搜索"""
-⋮----
-terms = [t.get("term", "") for t in unique_terms]
-contexts = {t.get("term", ""): t.get("context", context) for t in unique_terms}
-term_types = {t.get("term", ""): t.get("term_type", "unknown") for t in unique_terms}
-⋮----
-chinese_results = {}
-⋮----
-chinese_start = time.time()
-chinese_results = self.terminology_service.chinese_term_client.batch_search(terms)
-matched_count = sum(1 for r in chinese_results.values() if r is not None)
-⋮----
-umls_results = {}
-⋮----
-unmatched_terms = [t for t in terms if t not in chinese_results or chinese_results[t] is None]
-⋮----
-search_start = time.time()
-umls_results = await self.terminology_service.async_umls_client.batch_search(
-⋮----
-term_candidates = {}
-⋮----
-result = umls_results.get(term)
-⋮----
-selections = {}
-⋮----
-select_start = time.time()
-selections = self.terminology_service._batch_select_candidates(term_candidates, contexts, {})
-⋮----
-code_tasks = {}
-⋮----
-code_results = {}
-⋮----
-code_start = time.time()
-code_results_list = await asyncio.gather(*code_tasks.values(), return_exceptions=True)
-⋮----
-term_type = term_types.get(term, "unknown")
-⋮----
-normalized = term
-confidence = 0.3
-reasoning = "无法规范化，保留原术语"
-code = None
-code_system = None
-source = "none"
-candidates_data = None
-cui = None
-⋮----
-chinese_result = chinese_results[term]
-normalized = chinese_result.matched_term
-confidence = chinese_result.confidence
-code = chinese_result.code
-code_system = chinese_result.code_system
-source = "ChineseTerm"
-⋮----
-match_type_desc = "精确匹配" if chinese_result.match_type == "exact" else "同义词匹配" if chinese_result.match_type == "synonym" else "模糊匹配"
-reasoning = f"中文术语库{match_type_desc}: {term} -> {normalized}"
-⋮----
-candidates_data = [
-⋮----
-best_candidate = selections[term]
-⋮----
-candidates = term_candidates.get(term, [])
-⋮----
-confidence = min(0.95, 0.6 + best_candidate.score * 0.35)
-reasoning = f"UMLS匹配: {term} -> {best_candidate.term} (CUI: {best_candidate.cui})"
-source = "UMLS"
-cui = best_candidate.cui
-normalized = best_candidate.term
-⋮----
-llm_result = self.terminology_service._normalize_by_llm(term, contexts.get(term, ""))
-⋮----
-source = "LLM"
-⋮----
-is_risky = confidence < 0.5
-⋮----
-normalized_term = NormalizedTerm(
-⋮----
-# DEPRECATED: _build_normalization_prompt() was used in the old full-text
-# normalization pipeline. Now replaced by the selective per-fact approach
-# in the new _normalize_terms_stage() which calls normalize_single_term().
-def _build_normalization_prompt(self, annotated_text: str) -> str
-⋮----
-result = self._extract_json_from_response(response_text, "术语规范化")
-⋮----
-# DEPRECATED: 阶段3字段抽取已被阶段2(fact_extraction)替代。
-# 事实表本身已是结构化数据，不再需要从文本中抽取字段。
-⋮----
-prompt = self._build_extraction_prompt(normalized_text, role_mapping)
-⋮----
-role_desc = "\n".join([f"- {spk}: {role}" for spk, role in role_mapping.items()])
-⋮----
-result = self._extract_json_from_response(response_text, "字段抽取")
-⋮----
-result = self._attach_evidence_traces(result, evidence_traces)
-⋮----
-field_to_section = {
-⋮----
-field_type = trace.get("field_type")
-section = field_to_section.get(field_type)
-⋮----
-field_data = extraction_result[section].get(field_type, {})
-⋮----
-# DEPRECATED: _generate_emr_stage() has been replaced by _generate_so_stage() and _generate_ap_stage().
-# The new approach splits SOAP generation into two steps: (4a) S+O first, then (4b) A+P based on S+O.
-# This method is preserved for backward compatibility.
-⋮----
-prompt = self._build_emr_generation_prompt(extraction_result, role_mapping, dialogue_text)
-⋮----
-response = self.llm_service.generate(prompt)
-⋮----
-# DEPRECATED: _build_emr_generation_prompt() has been replaced by the new prompt templates
-# emr_generation_so, emr_generation_assessment, and emr_generation_plan.
-# These new templates enable the three-level diagnosis strategy and structured plan.
-⋮----
-extraction_json = json.dumps(extraction_result, ensure_ascii=False, indent=2)
-⋮----
-result = self._extract_json_from_response(response_text, "病历生成")
-⋮----
-result = self._attach_evidence_to_emr(result, extraction_result)
-⋮----
-evidence_traces = field_data["evidence_traces"]
-⋮----
-evidence_traces = field_data.get("evidence_traces", [])
-⋮----
-field_value = None
-⋮----
-field_info = emr_result[section].get(field_name, {})
-⋮----
-field_value = field_info.get("value", "")
-⋮----
-field_value = field_info
-⋮----
-turn_id = trace.get("turn_id")
-turn_index = trace.get("turn_index")
-⋮----
-turn = self.db.query(TranscriptTurn).filter(
-⋮----
-turn_id = turn.turn_id
-⋮----
-evidence = EvidenceSpan(
-⋮----
-visit = self.db.query(Visit).filter(Visit.visit_id == visit_id).first()
-language = visit.language if visit and visit.language else "zh"
-⋮----
-validation_result = self.validation_service.validate(emr_result, language=language)
-validation_errors = self.validation_service.to_dict(validation_result)
-⋮----
-max_version = self.db.query(EMRRecord).filter(
-⋮----
-new_version = max_version + 1
-⋮----
-emr_record = EMRRecord(
-⋮----
-def _normalize_emr_format(self, emr_result: Dict[str, Any]) -> Dict[str, Any]
-⋮----
-"""
-        将分节生成的新格式归一化为前端兼容的旧格式。
-        
-        前端 displaySection() 期望每个子字段为 {value, evidence_traces} 格式。
-        新prompt输出的是直接字符串，需要包装。
-        Assessment 从 assessment_items 构建 diagnosis 字段。
-        Plan 从 plan_items 构建 treatment 和 advice 字段。
-        """
-result = dict(emr_result)
-⋮----
-subject_section = dict(result.get("subjective", {}))
-objective_section = dict(result.get("objective", {}))
-assessment_section = dict(result.get("assessment", {}))
-plan_section = dict(result.get("plan", {}))
-⋮----
-assessment_items = result.get("assessment_items", [])
-⋮----
-explicit_diags = [item for item in assessment_items if item.get("diagnosis_type") == "explicit_diagnosis"]
-suspected_diags = [item for item in assessment_items if item.get("diagnosis_type") == "suspected_diagnosis"]
-symptom_assessments = [item for item in assessment_items if item.get("diagnosis_type") == "symptom_based_assessment"]
-⋮----
-diagnosis_parts = []
-⋮----
-diagnosis_value = "；".join(filter(None, diagnosis_parts))
-⋮----
-plan_items = result.get("plan_items", {})
-⋮----
-medications = plan_items.get("medications", [])
-tests = plan_items.get("tests", [])
-follow_up = plan_items.get("follow_up", {})
-education = plan_items.get("education", {})
-⋮----
-treatment_parts = []
-⋮----
-parts = [med.get("name", "")]
-dosage = med.get("dosage", "")
-freq = med.get("frequency", "")
-duration = med.get("duration", "")
-detail = " ".join(filter(None, [dosage, freq, duration]))
-⋮----
-name = test.get("name", "")
-reason = test.get("reason", "")
-⋮----
-treatment_value = "；".join(filter(None, treatment_parts))
-⋮----
-advice_parts = []
-⋮----
-advice_value = "；".join(filter(None, advice_parts))
-⋮----
-traces = []
-seen_turn_ids = set()
-⋮----
-fact = fact_by_id.get(fid)
-⋮----
-turn_ids = fact.evidence_turn_ids or []
-evidence_texts = fact.evidence_text or []
-⋮----
-turn = turn_by_index.get(tid)
-⋮----
-trace = {
-⋮----
-enrichment_start = time.time()
-⋮----
-fact_by_id = {f.fact_id: f for f in fact_records}
-turn_by_index = {t.turn_index: t for t in turns}
-⋮----
-so_used_fact_ids = emr_result.get("so_used_fact_ids", [])
-assessment_items = emr_result.get("assessment_items", [])
-plan_items = emr_result.get("plan_items", {})
-⋮----
-s_fact_ids = set()
-o_fact_ids = set()
-⋮----
-s_has_subsection = any(
-o_has_subsection = any(
-⋮----
-llm_s_field_fact_ids = {}
-s_field_names = [
-subject_section = dict(emr_result.get("subjective", {}))
-⋮----
-field_data = subject_section.get(field)
-⋮----
-traces = field_data.get("evidence_traces", [])
-⋮----
-fids = set()
-⋮----
-field_fids = llm_s_field_fact_ids.get(field, set())
-⋮----
-s_field_fact_ids = {}
-⋮----
-field_fids = s_field_fact_ids.get(field, set())
-⋮----
-s_evidence_traces = self._build_evidence_traces_from_fact_ids(
-⋮----
-llm_o_field_fact_ids = {}
-o_field_names = ["physical_examination", "auxiliary_examination"]
-objective_section = dict(emr_result.get("objective", {}))
-⋮----
-field_data = objective_section.get(field)
-⋮----
-field_fids = llm_o_field_fact_ids.get(field, set())
-⋮----
-o_field_fact_ids = {}
-⋮----
-field_fids = o_field_fact_ids.get(field, set())
-⋮----
-o_evidence_traces = self._build_evidence_traces_from_fact_ids(
-⋮----
-diagnosis_fact_ids = set()
-⋮----
-sids = item.get("supporting_fact_ids", [])
-⋮----
-a_evidence_traces = self._build_evidence_traces_from_fact_ids(
-⋮----
-assessment_section = dict(emr_result.get("assessment", {}))
-⋮----
-treatment_fact_ids = set()
-advice_fact_ids = set()
-⋮----
-t_evidence_traces = self._build_evidence_traces_from_fact_ids(
-adv_evidence_traces = self._build_evidence_traces_from_fact_ids(
-⋮----
-plan_section = dict(emr_result.get("plan", {}))
-⋮----
-s_total = sum(
-o_total = sum(
-total_traces = (
-⋮----
-field_to_section_name = {}
-⋮----
-section = emr_result.get(section_name, {})
-⋮----
-field_value = field_data.get("value", "")
-⋮----
-def get_value(section: str, field: str) -> str
-⋮----
-def get_evidence_traces(section: str, field: str) -> List[Dict[str, Any]]
-⋮----
-chief_complaint = get_value("subjective", "chief_complaint")
-history = get_value("subjective", "history_present_illness")
-past_history = get_value("subjective", "past_history")
-physical = get_value("objective", "physical_examination")
-auxiliary = get_value("objective", "auxiliary_examination")
-diagnosis = get_value("assessment", "diagnosis")
-treatment = get_value("plan", "treatment")
-advice = get_value("plan", "advice")
-⋮----
-subjective_text = []
-⋮----
-objective_text = []
-⋮----
-assessment_text = f"诊断：{diagnosis}" if diagnosis else "诊断：待定"
-⋮----
-plan_text = []
-⋮----
-def _format_facts_for_prompt(self, fact_records: List[AtomicFact], lightweight: bool = True) -> str
-⋮----
-"""
-        将AtomicFact记录格式化为prompt用的JSON字符串。
-
-        Args:
-            fact_records: 原子事实列表
-            lightweight: 是否使用轻量模式（不传完整evidence_text）
-
-        Returns:
-            JSON字符串
-        """
-facts_data = []
-⋮----
-fact_item = {
-⋮----
-evidence_spans = fact.evidence_spans or []
-⋮----
-evidence_spans = [text[:20] if len(text) > 20 else text for text in fact.evidence_text[:3]]
-⋮----
-"""过滤指定section的事实"""
-⋮----
-"""构建紧凑的上下文摘要，列出关键事实，用于减少后续阶段的输入长度"""
-context_items = []
-⋮----
-label = f.normalized_term or f.mention
-⋮----
-speaker = f.speaker or ""
-⋮----
-context_items = context_items[:max_items] + [f"... 共 {len(fact_records)} 条事实"]
-⋮----
-def _lightweight_normalize(self, facts_data: List[Dict[str, Any]]) -> None
-⋮----
-"""轻量术语规范化：使用ChineseTerm本地库快速匹配，为事实添加normalized_term"""
-⋮----
-normalized_count = 0
-⋮----
-mention = fact.get("mention", "")
-⋮----
-result = self.terminology_service._normalize_by_chinese_term(
-⋮----
-"""
-        阶段4a：分节生成SO（主观数据 + 客观数据）。
-
-        使用 emr_generation_so 模板，只生成 S 和 O 部分，不生成诊断和计划。
-        仅传入 section_candidate 为 S 或 O 的事实。
-
-        Args:
-            fact_records: 规范化后的原子事实列表
-            role_mapping: 角色映射
-
-        Returns:
-            {"subjective": {...}, "objective": {...}, "used_fact_ids": [...]}
-        """
-⋮----
-so_facts = self._filter_facts_by_section(fact_records, ["S", "O"])
-⋮----
-facts_json = self._format_facts_for_prompt(so_facts)
-⋮----
-dialogue_parts = []
-⋮----
-mention = fact.normalized_term or fact.mention
-speaker_label = fact.speaker or "unknown"
-⋮----
-dialogue_summary = "\n".join(dialogue_parts)
-⋮----
-result = self._extract_json_from_response(response_text, "SO生成")
-⋮----
-"""
-        阶段4b：分节生成AP（评估 + 计划）。
-
-        Args:
-            so_result: 阶段4a的输出，包含 subjective, objective, used_fact_ids
-            fact_records: 规范化后的原子事实列表
-            role_mapping: 角色映射
-            merged: 是否使用合并模式（单次LLM调用同时生成A和P）
-
-        Returns:
-            {"assessment": {...}, "plan": {...}, "assessment_items": [...], "plan_items": {...}}
-        """
-⋮----
-ap_facts = self._filter_facts_by_section(fact_records, ["A", "P"])
-⋮----
-subjective_text = json.dumps(so_result.get("subjective", {}), ensure_ascii=False, indent=2)
-objective_text = json.dumps(so_result.get("objective", {}), ensure_ascii=False, indent=2)
-facts_json = self._format_facts_for_prompt(ap_facts)
-⋮----
-result = self._extract_json_from_response(response_text, "AP合并生成")
-⋮----
-assessment = result.get("assessment", {})
-⋮----
-plan = result.get("plan", {})
-⋮----
-a_facts = self._filter_facts_by_section(fact_records, ["A"])
-p_facts = self._filter_facts_by_section(fact_records, ["P"])
-⋮----
-assessment_facts_json = self._format_facts_for_prompt(a_facts)
-assessment_prompt = self.prompt_manager.render(
-⋮----
-assessment_response_text = self._debug_interact(
-⋮----
-response = self.llm_service.generate(assessment_prompt)
-⋮----
-assessment_response_text = response.text
-⋮----
-assessment_result = self._extract_json_from_response(assessment_response_text, "Assessment生成")
-⋮----
-assessment_result = {}
-⋮----
-assessment = assessment_result.get("assessment", {})
-assessment_items = assessment_result.get("assessment_items", [])
-assessment_text = json.dumps(assessment, ensure_ascii=False, indent=2)
-⋮----
-plan_facts_json = self._format_facts_for_prompt(p_facts)
-plan_prompt = self.prompt_manager.render(
-⋮----
-plan_response_text = self._debug_interact(
-⋮----
-response = self.llm_service.generate(plan_prompt)
-⋮----
-plan_response_text = response.text
-⋮----
-plan_result = self._extract_json_from_response(plan_response_text, "Plan生成")
-⋮----
-plan_result = {}
-⋮----
-plan = plan_result.get("plan", {})
-plan_items = plan_result.get("plan_items", {})
-⋮----
-draft_emr_json = json.dumps(draft_emr, ensure_ascii=False, indent=2)
-⋮----
-fact_table_json = self._format_facts_for_prompt(fact_records)
-fact_table_count = len(fact_records)
-⋮----
-role_mapping_json = json.dumps(role_mapping, ensure_ascii=False, indent=2)
-⋮----
-result = self._extract_json_from_response(response_text, "核查修订")
-⋮----
-issues = result.get("issues", {})
-soap_final = result["soap_final"]
-⋮----
-unsupported_count = len(issues.get("unsupported_claims", []))
-missing_count = len(issues.get("missing_critical_facts", []))
-conflict_count = len(issues.get("internal_conflicts", []))
-certainty_error_count = len(issues.get("certainty_errors", []))
-⋮----
-user_input = input("\n请选择操作：\n  y - 确认发送给大模型\n  n - 不发送，手动输入结果\n  q - 取消操作\n\n请输入选择: ").strip().lower()
-⋮----
-line = input()
-⋮----
-result = "\n".join(lines)
-⋮----
-def get_all_prompts(self, turns: List[TranscriptTurn]) -> List[Dict[str, Any]]
-⋮----
-stages = []
-⋮----
-total_segments = len(segments)
-⋮----
-prompt = self.prompt_manager.render("turn_cleaning", transcript=transcript_text)
-⋮----
-segment_index = context.get("segment_index", 0)
-segment = segments[segment_index] if segment_index < len(segments) else segments[0]
-⋮----
-cleaning_result = self._parse_cleaning_response(user_response, segment)
-⋮----
-all_cleaned_turns = context.get("all_cleaned_turns", [])
-⋮----
-next_stage = None
-next_prompt = None
-next_segment_index = None
-next_description = None
-⋮----
-next_stage = "turn_cleaning"
-next_segment_index = segment_index + 1
-next_segment = segments[next_segment_index]
-next_prompt = self.prompt_manager.render(
-next_description = f"阶段1.{next_segment_index + 1}/{total_segments}: 转写清洗与角色纠错"
-⋮----
-next_stage = "fact_extraction"
-compact_turns = self._build_compact_turns(all_cleaned_turns)
-turns_json = json.dumps(compact_turns, ensure_ascii=False, indent=2)
-⋮----
-next_description = f"阶段2: 事实抽取与证据绑定 (共{len(all_cleaned_turns)}个轮次，{total_segments}段)"
-⋮----
-parsed = self._extract_json_from_response(user_response, "事实抽取")
-facts_data = parsed.get("facts", []) if parsed else []
-⋮----
-so_facts = [f for f in facts_data if f.get("section_candidate") in ("S", "O")]
-a_facts = [f for f in facts_data if f.get("section_candidate") == "A"]
-p_facts = [f for f in facts_data if f.get("section_candidate") == "P"]
-⋮----
-mention = fact.get("normalized_term") or fact.get("mention", "")
-speaker = fact.get("speaker", "unknown")
-⋮----
-next_prompt_so = self.prompt_manager.render(
-⋮----
-facts = context.get("facts", [])
-⋮----
-parsed = self._extract_json_from_response(user_response, "SO生成")
-⋮----
-subjective = parsed.get("subjective", {}) if parsed else {}
-objective = parsed.get("objective", {}) if parsed else {}
-so_result = {"subjective": subjective, "objective": objective}
-⋮----
-a_facts = context.get("a_facts", [])
-subjective_text = json.dumps(subjective, ensure_ascii=False, indent=2)
-objective_text = json.dumps(objective, ensure_ascii=False, indent=2)
-⋮----
-next_prompt_assessment = self.prompt_manager.render(
-⋮----
-parsed = self._extract_json_from_response(user_response, "评估生成")
-assessment = parsed.get("assessment", {}) if parsed else {}
-assessment_items = parsed.get("assessment_items", []) if parsed else []
-⋮----
-p_facts = context.get("p_facts", [])
-subjective_text = context.get("subjective_text", "{}")
-objective_text = context.get("objective_text", "{}")
-⋮----
-next_prompt_plan = self.prompt_manager.render(
-⋮----
-parsed = self._extract_json_from_response(user_response, "计划生成")
-plan = parsed.get("plan", {}) if parsed else {}
-plan_items = parsed.get("plan_items", {}) if parsed else {}
-⋮----
-subjective = context.get("subjective", {})
-objective = context.get("objective", {})
-assessment = context.get("assessment", {})
-⋮----
-draft_emr = json.dumps({
-⋮----
-facts_table = json.dumps(facts, ensure_ascii=False, indent=2)
-role_mapping = json.dumps(context.get("role_mapping", {}), ensure_ascii=False, indent=2)
-⋮----
-next_prompt_verify = self.prompt_manager.render(
-⋮----
-parsed = self._extract_json_from_response(user_response, "SOAP核查")
-soap_final = parsed.get("soap_final", {}) if parsed else {}
-issues = parsed.get("issues", {}) if parsed else {}
-⋮----
-plan = context.get("plan", {})
-assessment_items = context.get("assessment_items", [])
-plan_items = context.get("plan_items", {})
-⋮----
-emr_final = soap_final if soap_final else {
-⋮----
-def _build_compact_turns(self, all_cleaned_turns)
-⋮----
-compact = []
-⋮----
-def _legacy_role_annotation_stage(self, stage, user_response, context, segments, total_segments)
-⋮----
-result = self._parse_role_annotation_response(user_response, segment)
-all_annotated_texts = context.get("all_annotated_texts", [])
-⋮----
-next_stage = "role_annotation"
-⋮----
-next_prompt = self._build_role_annotation_prompt(self._format_segment(segments[next_segment_index]))
-next_description = f"阶段1.{next_segment_index + 1}/{total_segments}: 角色识别与证据标注"
-⋮----
-next_stage = "term_normalization"
-next_prompt = self._build_normalization_prompt("\n\n".join(all_annotated_texts))
-next_description = "阶段2: 术语规范化"
-⋮----
-def _legacy_term_normalization_stage(self, stage, user_response, context, segments)
-⋮----
-combined = "\n\n".join(all_annotated_texts) if all_annotated_texts else "\n\n".join([self._format_segment(s) for s in segments])
-result = self._parse_normalization_response(user_response, combined)
-normalized_text = result.get("normalized_text", combined)
-⋮----
-def _legacy_field_extraction_stage(self, stage, user_response, context, segments)
-⋮----
-normalized_text = context.get("normalized_text", "")
-result = self._parse_extraction_response(user_response, context.get("all_evidence_traces", []))
-⋮----
-def _legacy_emr_generation_stage(self, stage, user_response, context, segments)
-⋮----
-extraction_result = context.get("extraction_result", {})
-result = self._parse_emr_response(user_response, extraction_result, context.get("visit_id", ""), True)
+def process_stage_with_user_input(self, visit_id: str, stage: str, user_response: str, context: Dict[str, Any]) -> Dict[str, Any]
 </file>
 
 </files>
