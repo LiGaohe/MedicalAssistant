@@ -289,10 +289,8 @@ document.addEventListener('DOMContentLoaded', async function() {
                         <span class="evidence-turn">轮次 ${turnIndex}</span>
                     </div>
                     <div class="evidence-detail">
-                        <div class="evidence-label">LLM标注片段：</div>
-                        <div class="evidence-content">${createExpandableText(content, 150)}</div>
                         ${turnText ? `
-                        <div class="evidence-label">完整转写文本：</div>
+                        <div class="evidence-label">原始对话转写：</div>
                         <div class="evidence-turn-text">${createExpandableText(turnText, 150)}</div>
                         ` : ''}
                     </div>
@@ -515,18 +513,16 @@ document.addEventListener('DOMContentLoaded', async function() {
             list.innerHTML = '<p class="empty">暂无证据溯源数据</p>';
         } else {
             let html = '<table class="evidence-table"><thead><tr>';
-            html += '<th>字段类型</th><th>最终病历</th><th>标注片段</th><th>原始转写</th><th>说话人</th><th>轮次</th>';
+            html += '<th>字段类型</th><th>最终病历</th><th>原始转写</th><th>说话人</th><th>轮次</th>';
             html += '</tr></thead><tbody>';
             
             evidenceData.forEach((ev, idx) => {
                 const turnText = ev.turn_text || '-';
                 const fieldValue = ev.field_value || '-';
-                const content = ev.content || '-';
                 
                 html += `<tr>
                     <td>${getFieldName(ev.field_type)}</td>
                     <td class="evidence-value-cell" title="${escapeHtml(fieldValue)}">${createExpandableText(fieldValue, 100)}</td>
-                    <td class="evidence-content-cell" title="${escapeHtml(content)}">${createExpandableText(content, 100)}</td>
                     <td class="evidence-turn-cell" title="${escapeHtml(turnText)}">${createExpandableText(turnText, 100)}</td>
                     <td>${ev.speaker || '-'}</td>
                     <td>${ev.turn_index !== null ? ev.turn_index : '-'}</td>

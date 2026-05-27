@@ -1,3 +1,4 @@
+# DEPRECATED: 六阶段流水线已重构为四阶段。事实抽取阶段不再使用，证据溯源由 DirectSOAPGenerationStage._build_evidence_traces() 替代。
 import json
 import time
 import uuid

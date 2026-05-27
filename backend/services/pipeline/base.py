@@ -17,15 +17,12 @@ class PipelineContext:
     all_role_mappings: dict = field(default_factory=dict)
     all_cleaned_turns: list = field(default_factory=list)
     combined_text: str = ""
-    fact_records: list = field(default_factory=list)
     emr_draft: dict = field(default_factory=dict)
     emr_final: dict = field(default_factory=dict)
     save_evidence: bool = True
-    fact_result: dict = field(default_factory=dict)
-    consolidation_result: dict = field(default_factory=dict)
-    normalized_result: dict = field(default_factory=dict)
     extraction_result: dict = field(default_factory=dict)
     verification_result: dict = field(default_factory=dict)
+    verification_issues: dict = field(default_factory=dict)
 
 
 class PipelineStage(ABC):

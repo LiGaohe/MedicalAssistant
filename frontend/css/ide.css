@@ -1812,6 +1812,21 @@ html, body {
 }
 
 /* ================================================================
+   Close EMR View Button
+   ================================================================ */
+
+.editor-btn-close {
+    color: var(--ide-text-secondary);
+    border: 1px solid var(--ide-btn-secondary);
+}
+
+.editor-btn-close:hover {
+    color: var(--ide-text);
+    background: var(--ide-btn-secondary-hover);
+    border-color: var(--ide-btn-secondary-hover);
+}
+
+/* ================================================================
    Sidebar Header Refresh Button
    ================================================================ */
 

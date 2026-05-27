@@ -1,3 +1,4 @@
+# DEPRECATED: 六阶段流水线已重构为四阶段。事实收束阶段不再使用。
 import json
 import time
 from typing import Dict, Any, List

@@ -68,11 +68,10 @@ async def process_visit(
                 pipeline = LLMPipelineService(db, llm_service)
             result = pipeline.process_transcript(request.visit_id)
             
-            fact_result = result.get("fact_result", {})
-            fact_count = fact_result.get("fact_count", 0) if isinstance(fact_result, dict) else 0
-            normalized_terms_count = len(result.get("normalized_result", {}).get("terms", []))
-            verification_result = result.get("verification_result", {})
-            verification_issues = verification_result.get("issues") if isinstance(verification_result, dict) else None
+            # 四阶段流水线后，以下字段已不再生成，设为0保持向后兼容
+            fact_count = 0
+            normalized_terms_count = 0
+            verification_issues = result.get("verification_issues", {})
             
             emr_result = result.get("emr_result", {})
             
@@ -204,8 +203,23 @@ async def process_visit_stream(
                 
                 yield f"event: stage_update\ndata: {json.dumps(event_data, ensure_ascii=False)}\n\n"
                 
-                if event.get("status") == "completed" and event.get("stage") == 0:
-                    result = event.get("extra", {}).get("result", {})
+                if event.get("is_draft_ready"):
+                    draft_data = {
+                        "emr_draft": event.get("emr_draft", {})
+                    }
+                    emr_draft_obj = event.get("emr_draft", {})
+                    fields_in_draft = {}
+                    for section_name in ["subjective", "objective", "assessment", "plan"]:
+                        section = emr_draft_obj.get(section_name, {})
+                        if section:
+                            fields_in_draft[section_name] = list(section.keys())[:5]
+                    logger.info(f"SSE draft_ready: emr_draft字段={fields_in_draft}")
+                    draft_json = json.dumps(draft_data, ensure_ascii=False)
+                    logger.debug(f"SSE draft_ready JSON长度: {len(draft_json)}")
+                    yield f"event: draft_ready\ndata: {draft_json}\n\n"
+                
+                if event.get("status") == "completed" and "emr_result" in event:
+                    result = event
                     
                     latest_emr = db.query(EMRRecord).filter(
                         EMRRecord.visit_id == request.visit_id
@@ -223,13 +237,15 @@ async def process_visit_stream(
                         }
                     }
                     
+                    verification_issues = result.get("verification_issues", {})
                     complete_data = {
                         "status": "completed",
                         "emr_record": emr_record,
                         "role_mapping": result.get("role_mapping"),
-                        "fact_count": result.get("fact_result", {}).get("fact_count", 0),
+                        "verification_issues": verification_issues,
                         "processing_time": result.get("processing_time", 0)
                     }
+                    logger.info(f"SSE complete: record_id={emr_record['record_id']}, version={emr_record['version']}")
                     yield f"event: complete\ndata: {json.dumps(complete_data, ensure_ascii=False)}\n\n"
             
         except Exception as e:

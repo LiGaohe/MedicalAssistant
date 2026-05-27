@@ -1,3 +1,4 @@
+# DEPRECATED: 六阶段流水线已重构为四阶段。选择性术语规范化不再使用，术语规范融入直接草稿生成prompt。
 import time
 from typing import Dict, Any, List
 

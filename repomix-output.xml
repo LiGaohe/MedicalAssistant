@@ -107,8 +107,11 @@ backend/services/pipeline/interactive.py
 backend/services/pipeline/orchestrator.py
 backend/services/pipeline/speaker_handler.py
 backend/services/pipeline/stages/__init__.py
+backend/services/pipeline/stages/claim_verification.py
+backend/services/pipeline/stages/direct_soap_generation.py
 backend/services/pipeline/stages/fact_consolidation.py
 backend/services/pipeline/stages/fact_extraction.py
+backend/services/pipeline/stages/field_revision.py
 backend/services/pipeline/stages/soap_generation.py
 backend/services/pipeline/stages/term_normalization.py
 backend/services/pipeline/stages/turn_cleaning.py
@@ -198,6 +201,324 @@ src/asr/qwen3_asr_engine.py
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="backend/services/pipeline/stages/claim_verification.py">
+class ClaimVerificationStage(PipelineStage)
+⋮----
+"""后置核查阶段：对SOAP草稿进行Claim核查、Checklist核查和硬规则核查。"""
+⋮----
+def stage_name(self) -> str
+⋮----
+def execute(self, ctx: PipelineContext) -> Dict[str, Any]
+⋮----
+stage_start = time.time()
+⋮----
+draft_emr = ctx.emr_draft
+combined_text = ctx.combined_text
+⋮----
+draft_emr_json = json.dumps(draft_emr, ensure_ascii=False, indent=2)
+⋮----
+unsupported_claims: List[Dict] = []
+not_addressed_claims: List[Dict] = []
+missing_items: List[Dict] = []
+hard_rule_violations: List[Dict] = []
+⋮----
+# ---- 步骤A: Claim核查 ----
+⋮----
+# ---- 步骤B: Checklist核查 ----
+⋮----
+missing_items = self._step_checklist_verification(
+⋮----
+# ---- 步骤C: 硬规则核查 ----
+⋮----
+hard_rule_violations = self._check_hard_rules(draft_emr)
+⋮----
+# ---- 步骤D: 确定性核查 ----
+⋮----
+certainty_errors = self._step_certainty_verification(
+⋮----
+# ---- 汇总 ----
+issues = {
+⋮----
+total_issues = (
+stage_time = time.time() - stage_start
+⋮----
+"""调用LLM进行逐claim核查，返回 (unsupported_claims, not_addressed_claims)"""
+⋮----
+prompt = ctx.prompt_manager.render(
+⋮----
+debug_interactor = DebugInteractor(ctx.llm_service)
+⋮----
+response_text = debug_interactor.interact(
+⋮----
+response = ctx.llm_service.generate(prompt)
+⋮----
+response_text = response.text
+⋮----
+parsed = parse_json_response(response_text, "Claim核查")
+⋮----
+unsupported = parsed.get("unsupported_claims", [])
+not_addressed = parsed.get("not_addressed_claims", [])
+⋮----
+"""调用LLM进行checklist核查，返回missing_items列表"""
+⋮----
+parsed = parse_json_response(response_text, "Checklist核查")
+⋮----
+missing = parsed.get("missing_items", [])
+⋮----
+# ---- 步骤C: 硬规则核查（纯Python实现，不调用LLM） ----
+⋮----
+@staticmethod
+    def _check_hard_rules(draft: dict) -> List[Dict]
+⋮----
+"""对SOAP草稿执行确定性硬规则核查，返回violations列表。"""
+violations: List[Dict] = []
+⋮----
+# 提取所有文本
+all_text = ""
+⋮----
+section = draft.get(section_name, {})
+⋮----
+# --- 检查部位矛盾 ---
+⋮----
+body_parts = ["肺", "胸", "眼", "耳", "手", "脚", "腿", "臂", "肾"]
+⋮----
+left = f"左{part}" in all_text
+right = f"右{part}" in all_text
+⋮----
+# --- 检查否定冲突 ---
+# 在S/O section中收集被否定的症状
+negated_terms: List[str] = []
+⋮----
+text = value.get("value", "")
+neg_matches = re.findall(
+⋮----
+# 提取否定表述中的核心症状词
+⋮----
+core = re.sub(r'^[无否认未]+', '', neg_term).strip()
+⋮----
+# 检查在assessment中是否有肯定表述（A中不应出现与S/O否定矛盾的症状）
+assessment_section = draft.get("assessment", {})
+⋮----
+a_text = value.get("value", "")
+⋮----
+"""调用LLM进行确定性层级核查，检查诊断确定性是否被拔高。
+
+        提取草稿中assessment_items的诊断声明，与对话原文对比，
+        判定diagnosis_type和certainty_level是否与实际证据力度匹配。
+        只检查拔高（suspected → explicit），不检查降级。
+        """
+⋮----
+draft_dict = json.loads(draft_emr_json)
+⋮----
+assessment = draft_dict.get("assessment", {})
+⋮----
+assessment_items = assessment.get("assessment_items", [])
+diagnosis = assessment.get("diagnosis", {})
+⋮----
+assessment_json = json.dumps(assessment, ensure_ascii=False, indent=2)
+⋮----
+parsed = parse_json_response(response_text, "确定性核查")
+⋮----
+errors = parsed.get("certainty_errors", [])
+summary = parsed.get("summary", {})
+</file>
+
+<file path="backend/services/pipeline/stages/direct_soap_generation.py">
+class DirectSOAPGenerationStage(PipelineStage)
+⋮----
+"""直接根据清洗后的对话全文生成SOAP草稿。
+
+    与 SOAPGenerationStage 不同，本阶段不依赖事实抽取和分节流程，
+    而是直接将完整对话文本送入LLM，一次性生成完整的SOAP病历草稿。
+    """
+⋮----
+STAGE_DELAY = 0.5
+⋮----
+def stage_name(self) -> str
+⋮----
+def execute(self, ctx: PipelineContext) -> Dict[str, Any]
+⋮----
+stage_start = time.time()
+⋮----
+combined_text = ctx.combined_text
+⋮----
+empty_draft = self._empty_draft()
+⋮----
+prompt = ctx.prompt_manager.render(
+⋮----
+debug_interactor = DebugInteractor(ctx.llm_service)
+⋮----
+response_text = debug_interactor.interact(
+⋮----
+response = ctx.llm_service.generate(prompt, thinking_enabled=False)
+⋮----
+response_text = response.text
+⋮----
+draft = parse_json_response(response_text, "直接草稿生成", raise_on_error=True)
+⋮----
+draft = self._build_evidence_traces(draft, ctx.turns)
+⋮----
+stage_time = time.time() - stage_start
+⋮----
+@staticmethod
+    def _build_evidence_traces(draft: Dict[str, Any], turns: List) -> Dict[str, Any]
+⋮----
+"""将LLM输出的 source_turn_indices 转换为 evidence_traces。
+
+        遍历 subjective/objective/assessment/plan 每个section的每个子字段，
+        将 source_turn_indices 中的 turn_index 匹配到 turns 列表中的具体轮次，
+        构建包含对话原文证据的 evidence_trace 对象。
+
+        Args:
+            draft: LLM生成的SOAP草稿，每个子字段格式为
+                   {"value": "...", "source_turn_indices": [...]}
+            turns: 转写对话轮次列表（TranscriptTurn对象列表）
+
+        Returns:
+            转换后的草稿，source_turn_indices 被替换为 evidence_traces
+        """
+⋮----
+turn_map = {}
+⋮----
+sections = ["subjective", "objective", "assessment", "plan"]
+total_traces = 0
+⋮----
+section = draft.get(section_name, {})
+⋮----
+source_indices = field_value.get("source_turn_indices", None)
+⋮----
+evidence_traces = []
+⋮----
+turn = turn_map.get(idx)
+⋮----
+turn_text = turn.corrected_text or turn.text
+evidence_trace = {
+⋮----
+@staticmethod
+    def _empty_draft() -> Dict[str, Any]
+⋮----
+"""返回空的SOAP兜底结构。
+
+        当LLM调用失败或JSON解析失败时，使用此结构作为兜底，
+        确保流水线不会因单阶段失败而中断。
+        """
+</file>
+
+<file path="backend/services/pipeline/stages/field_revision.py">
+class FieldRevisionStage(PipelineStage)
+⋮----
+"""字段级修订与落盘阶段：根据核查问题清单对SOAP草稿进行定点修订。"""
+⋮----
+# SOAP必须存在的四个section
+REQUIRED_SECTIONS = ["subjective", "objective", "assessment", "plan"]
+⋮----
+def stage_name(self) -> str
+⋮----
+def execute(self, ctx: PipelineContext) -> Dict[str, Any]
+⋮----
+stage_start = time.time()
+⋮----
+draft_emr = ctx.emr_draft
+issues = ctx.verification_issues or {}
+⋮----
+# 统计各类问题数量
+unsupported_count = len(issues.get("unsupported_claims", []))
+not_addressed_count = len(issues.get("not_addressed_claims", []))
+missing_count = len(issues.get("missing_items", []))
+hard_rule_count = len(issues.get("hard_rule_violations", []))
+total_issues_count = (
+⋮----
+revised = False
+revised_soap = dict(draft_emr)  # shallow copy，先保留原始
+⋮----
+# 没有核查问题，跳过LLM修订，直接进入schema校验
+⋮----
+draft_emr_json = json.dumps(draft_emr, ensure_ascii=False, indent=2)
+issues_json = json.dumps(issues, ensure_ascii=False, indent=2)
+⋮----
+llm_revised = self._call_llm_revision(ctx, draft_emr_json, issues_json)
+⋮----
+# 部分修订处理：缺失字段从原始draft回填
+revised_soap = self._backfill_missing_fields(llm_revised, draft_emr)
+# 确保evidence_traces不丢失
+revised_soap = self._preserve_evidence_traces(revised_soap, draft_emr)
+revised = True
+⋮----
+revised_soap = dict(draft_emr)
+⋮----
+# ---- schema确定性约束校验 ----
+revised_soap = self._apply_schema_constraints(revised_soap)
+⋮----
+# 写入ctx
+⋮----
+stage_time = time.time() - stage_start
+⋮----
+# ---- LLM修订调用 ----
+⋮----
+"""调用LLM进行字段级修订，返回修订后的SOAP dict或None（失败时）。"""
+⋮----
+prompt = ctx.prompt_manager.render(
+⋮----
+debug_interactor = DebugInteractor(ctx.llm_service)
+⋮----
+response_text = debug_interactor.interact(
+⋮----
+response = ctx.llm_service.generate(prompt)
+⋮----
+response_text = response.text
+⋮----
+parsed = parse_json_response(response_text, "字段级修订")
+⋮----
+# ---- 部分修订处理：缺失字段回填 ----
+⋮----
+@staticmethod
+    def _backfill_missing_fields(revised: dict, original: dict) -> dict
+⋮----
+"""如果LLM修订后的SOAP中某个field丢失，从原始draft回填。"""
+result = dict(revised)
+# 确保四个section都存在
+⋮----
+# ---- 确保evidence_traces不丢失 ----
+⋮----
+@staticmethod
+    def _preserve_evidence_traces(revised: dict, original: dict) -> dict
+⋮----
+"""检查修订后每个field是否仍有evidence_traces，没有则从原draft复制。"""
+sections = ["subjective", "objective", "assessment", "plan"]
+preserved_count = 0
+⋮----
+revised_section = revised.get(section_name, {})
+original_section = original.get(section_name, {})
+⋮----
+# 检查修订后是否有evidence_traces
+⋮----
+original_field = original_section.get(field_name)
+⋮----
+def _apply_schema_constraints(self, soap: dict) -> dict
+⋮----
+"""对SOAP执行确定性schema约束校验，确保必填字段和安全性约束。"""
+# 1. 确保四个section存在且为dict
+⋮----
+# 2. 高风险字段检查
+# assessment.diagnosis.value 为空时设为 "unknown"
+assessment = soap.get("assessment", {})
+⋮----
+diagnosis = assessment.get("diagnosis")
+⋮----
+# plan.treatment.value 为空时设为 "unknown"
+plan = soap.get("plan", {})
+⋮----
+treatment = plan.get("treatment")
+⋮----
+# 3. 否定一致性快速检查
+# 如果S/O中明确否认的症状出现在A中作为诊断依据，记录日志
+# 此检查为非阻塞，不修改数据
+⋮----
+section = soap.get(section_name, {})
+⋮----
+text = value.get("value", "")
+</file>
 
 <file path=".env.example">
 UMLS_API_KEY=your-umls-api-key-here
@@ -1406,15 +1727,12 @@ segments: list = field(default_factory=list)
 all_role_mappings: dict = field(default_factory=dict)
 all_cleaned_turns: list = field(default_factory=list)
 combined_text: str = ""
-fact_records: list = field(default_factory=list)
 emr_draft: dict = field(default_factory=dict)
 emr_final: dict = field(default_factory=dict)
 save_evidence: bool = True
-fact_result: dict = field(default_factory=dict)
-consolidation_result: dict = field(default_factory=dict)
-normalized_result: dict = field(default_factory=dict)
 extraction_result: dict = field(default_factory=dict)
 verification_result: dict = field(default_factory=dict)
+verification_issues: dict = field(default_factory=dict)
 ⋮----
 class PipelineStage(ABC)
 ⋮----
@@ -1674,150 +1992,6 @@ emr_final = EvidenceEnricher.enrich(emr_final, fact_records, turns)
 compact = []
 </file>
 
-<file path="backend/services/pipeline/orchestrator.py">
-def run_async(coro)
-⋮----
-"""
-    在同步上下文中运行异步协程的辅助函数
-    
-    解决问题：在FastAPI的事件循环中不能使用asyncio.run()
-    
-    策略：
-    1. 尝试获取当前运行的事件循环
-    2. 如果存在事件循环且正在运行，使用ThreadPoolExecutor在新线程中运行
-    3. 如果不存在事件循环，使用asyncio.run()
-    """
-⋮----
-loop = asyncio.get_running_loop()
-⋮----
-loop = None
-⋮----
-future = executor.submit(asyncio.run, coro)
-⋮----
-class PipelineOrchestrator
-⋮----
-STAGE_DELAY = 0.5
-⋮----
-MAX_PARALLEL_SEGMENTS = 4
-⋮----
-def __init__(self, db: Session, llm_service: Optional[LLMService] = None, language: str = "zh")
-⋮----
-start_time = time.time()
-⋮----
-turns = self.db.query(TranscriptTurn).filter(
-⋮----
-ctx = PipelineContext(
-⋮----
-all_role_mappings = ctx.all_role_mappings
-all_cleaned_turns = ctx.all_cleaned_turns
-combined_text = ctx.combined_text
-⋮----
-fact_result = FactExtractionStage().execute(ctx)
-⋮----
-fact_service = FactService(self.db)
-fact_records = fact_service.get_facts_by_visit(visit_id)
-⋮----
-consolidation_result = FactConsolidationStage().execute(ctx)
-⋮----
-normalized_result = TermNormalizationStage().execute(ctx)
-⋮----
-extraction_result = fact_result
-⋮----
-soap_result = SOAPGenerationStage().execute(ctx)
-emr_draft = ctx.emr_draft
-so_used_fact_ids = emr_draft.get("so_used_fact_ids", [])
-assessment_items = emr_draft.get("assessment_items", [])
-plan_items = emr_draft.get("plan_items", {})
-⋮----
-verification_result = VerificationStage().execute(ctx)
-⋮----
-emr_final = verification_result.get("soap_final", emr_draft)
-⋮----
-emr_final = self.emr_persistence.normalize_format(emr_final)
-emr_final = EvidenceEnricher.enrich(emr_final, fact_records, turns)
-⋮----
-total_time = time.time() - start_time
-⋮----
-"""
-        带进度回调的处理方法，用于SSE实时推送进度。
-        
-        Args:
-            visit_id: 就诊ID
-            progress_callback: 进度回调函数，签名为 callback(stage_num, stage_name, status, detail, extra)
-            save_evidence: 是否保存证据
-        
-        Yields:
-            进度事件字典 {"stage": int, "name": str, "status": str, "detail": str, "extra": dict}
-        """
-def emit_progress(stage_num, stage_name, status, detail="", extra=None)
-⋮----
-event = {
-⋮----
-segment_start = time.time()
-⋮----
-resolved_count = consolidation_result.get("resolved_count", 0) if consolidation_result else 0
-⋮----
-qualifying_count = len([f for f in fact_records if f.normalization_needed and f.mention])
-⋮----
-result = {
-⋮----
-def _segment_turns(self, turns: List[TranscriptTurn]) -> List[List[TranscriptTurn]]
-⋮----
-segments = []
-current_segment = []
-⋮----
-def _format_segment(self, segment: List[TranscriptTurn]) -> str
-⋮----
-"""
-        格式化对话轮次为文本。
-        
-        输出格式包含turn_index，便于后续证据溯源时精确定位：
-        - 有标签：[#0] [spk0]: 对话内容
-        - 无标签：[#0] 对话内容
-        
-        turn_index是全局唯一的轮次索引，用于证据溯源时精确匹配原始转写。
-        """
-has_valid_speakers = False
-⋮----
-has_valid_speakers = True
-⋮----
-lines = []
-⋮----
-# DEPRECATED: replaced by _build_cleaning_prompt()
-def _lightweight_normalize(self, facts_data: List[Dict[str, Any]]) -> None
-⋮----
-"""轻量术语规范化：使用ChineseTerm本地库快速匹配，为事实添加normalized_term"""
-⋮----
-normalized_count = 0
-⋮----
-mention = fact.get("mention", "")
-⋮----
-result = self.terminology_service._normalize_by_chinese_term(
-⋮----
-def _save_atomic_facts(self, facts_data: List[Dict[str, Any]], visit_id: str) -> None
-⋮----
-saved_count = 0
-⋮----
-fact_id = f"fact_{visit_id}_{uuid.uuid4().hex[:12]}"
-atomic_fact = AtomicFact(
-⋮----
-def _parse_cleaning_response(self, response_text: str, segment: List[TranscriptTurn]) -> Dict[str, Any]
-⋮----
-stage = TurnCleaningStage()
-⋮----
-def _apply_asr_corrections(self, cleaning_result: Dict[str, Any], segment: List[TranscriptTurn])
-⋮----
-def get_all_prompts(self, turns: List[TranscriptTurn]) -> List[Dict[str, Any]]
-⋮----
-stages = []
-⋮----
-segments = self._segment_turns(turns)
-total_segments = len(segments)
-⋮----
-transcript_text = self._format_segment(segment)
-prompt = self.prompt_manager.render("turn_cleaning", transcript=transcript_text)
-</file>
-
 <file path="backend/services/pipeline/speaker_handler.py">
 FIELD_TYPE_MAPPING = {
 ⋮----
@@ -1873,10 +2047,12 @@ role_mapping = {}
 </file>
 
 <file path="backend/services/pipeline/stages/__init__.py">
-
+# DEPRECATED — 以下Stage类保留用于向后兼容，不再在新流水线中使用
 </file>
 
 <file path="backend/services/pipeline/stages/fact_consolidation.py">
+# DEPRECATED: 六阶段流水线已重构为四阶段。事实收束阶段不再使用。
+⋮----
 class FactConsolidationStage(PipelineStage)
 ⋮----
 def stage_name(self) -> str
@@ -1964,102 +2140,9 @@ evidence_spans = fact.evidence_spans or []
 evidence_spans = [text[:20] if len(text) > 20 else text for text in fact.evidence_text[:3]]
 </file>
 
-<file path="backend/services/pipeline/stages/fact_extraction.py">
-class FactExtractionStage(PipelineStage)
-⋮----
-def stage_name(self) -> str
-⋮----
-def execute(self, ctx: PipelineContext) -> Dict[str, Any]
-⋮----
-stage_start = time.time()
-⋮----
-cleaned_turns = ctx.all_cleaned_turns
-role_mapping = ctx.all_role_mappings
-visit_id = ctx.visit_id
-⋮----
-new_turns_json = json.dumps(cleaned_turns, ensure_ascii=False, indent=2)
-⋮----
-existing_facts_summary = "[]"
-existing_facts_map = {}
-⋮----
-incremental = False
-⋮----
-fact_service = FactService(ctx.db)
-existing_facts = fact_service.get_facts_by_visit(visit_id)
-⋮----
-summary_items = []
-⋮----
-existing_facts_summary = json.dumps(summary_items, ensure_ascii=False, indent=2)
-⋮----
-prompt = ctx.prompt_manager.render(
-⋮----
-debug_interactor = DebugInteractor(ctx.llm_service)
-⋮----
-response_text = debug_interactor.interact(
-⋮----
-response = ctx.llm_service.generate(prompt, thinking_enabled=False)
-⋮----
-response_text = response.text
-⋮----
-result = parse_json_response(response_text, "事实抽取", raise_on_error=True)
-⋮----
-facts = []
-⋮----
-raw_facts = result.get("facts", [])
-⋮----
-facts = self._process_incremental_facts(ctx, raw_facts, existing_facts_map, visit_id)
-⋮----
-facts = self._deduplicate_facts(raw_facts)
-⋮----
-stage_time = time.time() - stage_start
-⋮----
-new_facts = []
-append_operations = []
-⋮----
-operation = fact.get("operation", "new")
-⋮----
-matched_fact_id = fact.get("matched_fact_id")
-⋮----
-def _apply_fact_appends(self, ctx: PipelineContext, append_operations: List[Dict])
-⋮----
-fact_id = op["fact_id"]
-fact = ctx.db.query(AtomicFact).filter(AtomicFact.fact_id == fact_id).first()
-⋮----
-existing_turn_ids = set(fact.evidence_turn_ids or [])
-new_turn_ids = set(op.get("new_evidence_turn_ids", []))
-⋮----
-existing_texts = fact.evidence_text or []
-new_texts = op.get("new_evidence_text", [])
-⋮----
-@staticmethod
-    def _deduplicate_facts(facts: List[Dict]) -> List[Dict]
-⋮----
-merged = {}
-⋮----
-mention = fact.get("mention", "").strip()
-section = fact.get("section_candidate", "")
-speaker = fact.get("speaker", "")
-⋮----
-key = f"{mention}|{section}|{speaker}"
-⋮----
-existing = merged[key]
-existing_turn_ids = set(existing.get("evidence_turn_ids", []))
-new_turn_ids = set(fact.get("evidence_turn_ids", []))
-⋮----
-existing_texts = existing.get("evidence_text", [])
-new_texts = fact.get("evidence_text", [])
-⋮----
-@staticmethod
-    def _save_atomic_facts(ctx: PipelineContext, facts: List[Dict], visit_id: str)
-⋮----
-saved_count = 0
-⋮----
-fact_id = f"fact_{visit_id}_{uuid.uuid4().hex[:12]}"
-⋮----
-atomic_fact = AtomicFact(
-</file>
-
 <file path="backend/services/pipeline/stages/term_normalization.py">
+# DEPRECATED: 六阶段流水线已重构为四阶段。选择性术语规范化不再使用，术语规范融入直接草稿生成prompt。
+⋮----
 class TermNormalizationStage(PipelineStage)
 ⋮----
 def stage_name(self) -> str
@@ -2097,122 +2180,9 @@ term_type = fact.concept_type or "unknown"
 stage_time = time.time() - stage_start
 </file>
 
-<file path="backend/services/pipeline/stages/turn_cleaning.py">
-class TurnCleaningStage(PipelineStage)
-⋮----
-MAX_PARALLEL_SEGMENTS = 4
-⋮----
-def stage_name(self) -> str
-⋮----
-def execute(self, ctx: PipelineContext) -> Dict[str, Any]
-⋮----
-stage_start = time.time()
-⋮----
-segments = self._segment_turns(ctx.turns)
-⋮----
-combined_text = self._build_text_from_cleaned_turns(all_cleaned_turns, ctx.turns)
-⋮----
-def _segment_turns(self, turns: List[TranscriptTurn]) -> List[List[TranscriptTurn]]
-⋮----
-segments = []
-current_segment = []
-segment_turns = settings.LLM_SEGMENT_TURNS
-⋮----
-parallel_start = time.time()
-⋮----
-all_role_mappings = {}
-all_cleaned_turns = []
-⋮----
-result = self._process_segment(ctx, segment, i)
-⋮----
-max_workers = min(len(segments), self.MAX_PARALLEL_SEGMENTS)
-⋮----
-results = [None] * len(segments)
-speaker_handler = SpeakerHandler(ctx.db)
-debug_interactor = DebugInteractor(ctx.llm_service)
-⋮----
-def process_single_segment(args)
-⋮----
-result = self._process_segment(ctx, segment, idx, speaker_handler, debug_interactor)
-⋮----
-futures = list(executor.map(
-⋮----
-fallback_result = speaker_handler.fallback_role_annotation(segments[idx])
-⋮----
-parallel_time = time.time() - parallel_start
-⋮----
-transcript_text = self._format_segment(segment)
-prompt = self._build_cleaning_prompt(ctx, transcript_text)
-⋮----
-response_text = debug_interactor.interact(
-⋮----
-response = ctx.llm_service.generate(prompt, timeout=300.0, thinking_enabled=False)
-⋮----
-response_text = response.text
-⋮----
-cleaning_result = self._parse_cleaning_response(ctx, response_text, segment, speaker_handler)
-⋮----
-@staticmethod
-    def _format_segment(segment: List[TranscriptTurn]) -> str
-⋮----
-has_valid_speakers = False
-⋮----
-has_valid_speakers = True
-⋮----
-lines = []
-⋮----
-@staticmethod
-    def _build_cleaning_prompt(ctx: PipelineContext, transcript: str) -> str
-⋮----
-prompt = ctx.prompt_manager.render("turn_cleaning", transcript=transcript)
-⋮----
-result = parse_json_response(response_text, "转写清洗")
-⋮----
-turns_data = result.get("turns", [])
-⋮----
-role_mapping = {}
-speaker_corrections = []
-⋮----
-turn_by_index = {turn.turn_index: turn for turn in segment}
-⋮----
-turn_id = turn_json.get("turn_id")
-speaker_role = turn_json.get("speaker_role")
-section_hint = turn_json.get("section_hint", [])
-⋮----
-turn = turn_by_index.get(turn_id)
-⋮----
-turn = segment[i]
-⋮----
-original_speaker = turn.speaker
-⋮----
-expected_label = "spk0" if original_speaker != "spk0" else original_speaker
-⋮----
-expected_label = "spk1" if original_speaker != "spk1" else original_speaker
-⋮----
-expected_label = f"spk_{turn_id}"
-⋮----
-turns_data = cleaning_result.get("turns", [])
-⋮----
-correction_map = {}
-applied_count = 0
-⋮----
-corrected_text = turn_json.get("corrected_text", "")
-changed_spans = turn_json.get("changed_spans", [])
-⋮----
-turn_text_map = {}
-⋮----
-tid = ct.get("turn_id")
-ct_text = ct.get("corrected_text", "")
-⋮----
-text = turn_text_map.get(turn.turn_index, turn.text)
-speaker = turn.corrected_speaker or turn.speaker
-⋮----
-combined = "\n".join(lines)
-⋮----
-speaker = turn.speaker
-</file>
-
 <file path="backend/services/pipeline/stages/verification.py">
+# DEPRECATED: 六阶段流水线已重构为四阶段。依赖事实表的核查与修订已被 ClaimVerificationStage（基于对话文本核查）+ FieldRevisionStage 替代。
+⋮----
 class VerificationStage(PipelineStage)
 ⋮----
 def stage_name(self) -> str
@@ -2268,97 +2238,6 @@ fact_item = {
 evidence_spans = fact.evidence_spans or []
 ⋮----
 evidence_spans = [text[:20] if len(text) > 20 else text for text in fact.evidence_text[:3]]
-</file>
-
-<file path="backend/services/pipeline/utils.py">
-class JSONParseError(Exception)
-⋮----
-def __init__(self, stage_name: str, response_text: str, error_msg: str = "")
-⋮----
-def get_full_response(self) -> str
-⋮----
-def parse_json_response(response_text: str, stage_name: str = "", raise_on_error: bool = False) -> Optional[Dict[str, Any]]
-⋮----
-response_text = response_text.strip()
-⋮----
-response_text = _remove_markdown_code_block(response_text)
-⋮----
-response_text = _remove_control_characters(response_text)
-⋮----
-json_start = response_text.find("{")
-json_end = response_text.rfind("}")
-⋮----
-json_str = response_text[json_start:json_end + 1]
-⋮----
-result = json.loads(json_str)
-⋮----
-fixed_json = _try_fix_json(json_str)
-⋮----
-all_jsons = _extract_all_json_objects(response_text)
-⋮----
-potential_json = response_text[:json_end + 1]
-⋮----
-potential_json = response_text
-⋮----
-json_str = "{" + potential_json
-⋮----
-colon_pos = potential_json.find('":')
-⋮----
-key = potential_json[:colon_pos]
-rest = potential_json[colon_pos + 1:]
-json_str = '{"' + key + '"' + rest
-⋮----
-def _remove_markdown_code_block(text: str) -> str
-⋮----
-text = re.sub(r'^```(?:json)?\s*\n?', '', text)
-text = re.sub(r'\n?```\s*$', '', text)
-⋮----
-def _remove_control_characters(text: str) -> str
-⋮----
-result = []
-in_string = False
-escape_next = False
-⋮----
-escape_next = True
-⋮----
-in_string = not in_string
-⋮----
-def _try_fix_json(json_str: str) -> Optional[Dict[str, Any]]
-⋮----
-fixed = json_str
-⋮----
-fixed = re.sub(r',\s*}', '}', fixed)
-fixed = re.sub(r',\s*]', ']', fixed)
-⋮----
-fixed = re.sub(r',\s*\n\s*"', ',', fixed)
-fixed = re.sub(r',\s*\n\s*}', '}', fixed)
-⋮----
-fixed = re.sub(r':\s*,', ': null,', fixed)
-fixed = re.sub(r':\s*}', ': null}', fixed)
-⋮----
-fixed = re.sub(r'"\s*,\s*,', '",', fixed)
-fixed = re.sub(r',\s*,', ',', fixed)
-⋮----
-fixed = re.sub(r'"\s*:\s*"', '": "', fixed)
-fixed = re.sub(r'"\s*:\s*\[', '": [', fixed)
-fixed = re.sub(r'"\s*:\s*\{', '": {', fixed)
-⋮----
-fixed = re.sub(r'(?<!\\)"(?=[a-zA-Z0-9_\u4e00-\u9fff])', '"', fixed)
-⋮----
-brace_count = fixed.count('{') - fixed.count('}')
-bracket_count = fixed.count('[') - fixed.count(']')
-⋮----
-def _extract_all_json_objects(text: str) -> List[Dict[str, Any]]
-⋮----
-results = []
-depth = 0
-start = -1
-⋮----
-start = i
-⋮----
-json_str = text[start:i+1]
-⋮----
-obj = json.loads(json_str)
 </file>
 
 <file path="backend/services/term_rewriter.py">
@@ -5023,32 +4902,6 @@ end_ms = int(end_sample / sr * 1000)
 full_text = " ".join(all_text)
 </file>
 
-<file path=".repomixignore">
-# Add patterns to ignore here, one per line
-# Example:
-# *.log
-# tmp/
-%TEMP%install-qwen.bat
-/.qwen
-/.trae
-*.0
-/.agents
-/data/audio
-/.agents
-/_bmad
-/backend/services/correction/__pycache__
-/backend/services/llm/__pycache__
-/src/asr/__pycache__
-/tests/test_correction/__pycache__
-/backend/__pycache__
-/tests/__pycache__
-/med_env
-/docs
-README.md
-CLAUDE.md
-tests/
-</file>
-
 <file path="backend/api/upload.py">
 router = APIRouter(prefix="/api", tags=["upload"])
 ⋮----
@@ -5221,6 +5074,8 @@ __all__ = ["LLMAdapter", "LLMRequest", "LLMResponse", "OpenAICompatibleAdapter",
 </file>
 
 <file path="backend/services/pipeline/evidence_enricher.py">
+# DEPRECATED: replaced by DirectSOAPGenerationStage._build_evidence_traces() — LLM内嵌输出 source_turn_indices，后端轻量查表构建 evidence_traces。
+⋮----
 class EvidenceEnricher
 ⋮----
 traces = []
@@ -5314,10 +5169,203 @@ o_total = sum(
 total_traces = (
 </file>
 
-<file path="backend/services/pipeline/stages/soap_generation.py">
-class SOAPGenerationStage(PipelineStage)
+<file path="backend/services/pipeline/orchestrator.py">
+def run_async(coro)
+⋮----
+"""
+    在同步上下文中运行异步协程的辅助函数
+    
+    解决问题：在FastAPI的事件循环中不能使用asyncio.run()
+    
+    策略：
+    1. 尝试获取当前运行的事件循环
+    2. 如果存在事件循环且正在运行，使用ThreadPoolExecutor在新线程中运行
+    3. 如果不存在事件循环，使用asyncio.run()
+    """
+⋮----
+loop = asyncio.get_running_loop()
+⋮----
+loop = None
+⋮----
+future = executor.submit(asyncio.run, coro)
+⋮----
+class PipelineOrchestrator
 ⋮----
 STAGE_DELAY = 0.5
+⋮----
+MAX_PARALLEL_SEGMENTS = 4
+⋮----
+def __init__(self, db: Session, llm_service: Optional[LLMService] = None, language: str = "zh")
+⋮----
+start_time = time.time()
+⋮----
+turns = self.db.query(TranscriptTurn).filter(
+⋮----
+ctx = PipelineContext(
+⋮----
+# 阶段1: 转写清洗与角色纠错（不变）
+⋮----
+all_role_mappings = ctx.all_role_mappings
+all_cleaned_turns = ctx.all_cleaned_turns
+combined_text = ctx.combined_text
+⋮----
+# 阶段2: 直接草稿生成
+⋮----
+soap_result = DirectSOAPGenerationStage().execute(ctx)
+emr_draft = ctx.emr_draft
+⋮----
+# 阶段2.5: ICD-11术语规范化（后处理草稿）
+⋮----
+# 阶段3: 后置核查
+⋮----
+verification_result = ClaimVerificationStage().execute(ctx)
+verification_issues = ctx.verification_issues
+⋮----
+# 阶段4: 字段级修订与落盘
+⋮----
+emr_final = ctx.emr_draft  # FieldRevisionStage已更新ctx.emr_draft
+⋮----
+# 后处理
+emr_final = self.emr_persistence.normalize_format(emr_final)
+# 证据溯源已在DirectSOAPGenerationStage._build_evidence_traces()中完成
+⋮----
+total_time = time.time() - start_time
+⋮----
+"""
+        带进度回调的处理方法，用于SSE实时推送进度。
+        
+        Args:
+            visit_id: 就诊ID
+            progress_callback: 进度回调函数，签名为 callback(stage_num, stage_name, status, detail, extra)
+            save_evidence: 是否保存证据
+        
+        Yields:
+            进度事件字典 {"stage": int, "name": str, "status": str, "detail": str, "extra": dict}
+        """
+def emit_progress(stage_num, stage_name, status, detail="", extra=None)
+⋮----
+event = {
+⋮----
+segment_start = time.time()
+⋮----
+# ICD-11术语规范化（后处理草稿）
+⋮----
+# 发送draft_ready事件
+draft_event = emit_progress(2, "直接草稿生成", "completed",
+⋮----
+result = {
+⋮----
+def _segment_turns(self, turns: List[TranscriptTurn]) -> List[List[TranscriptTurn]]
+⋮----
+segments = []
+current_segment = []
+⋮----
+def _format_segment(self, segment: List[TranscriptTurn]) -> str
+⋮----
+"""
+        格式化对话轮次为文本。
+        
+        输出格式包含turn_index，便于后续证据溯源时精确定位：
+        - 有标签：[#0] [spk0]: 对话内容
+        - 无标签：[#0] 对话内容
+        
+        turn_index是全局唯一的轮次索引，用于证据溯源时精确匹配原始转写。
+        """
+has_valid_speakers = False
+⋮----
+has_valid_speakers = True
+⋮----
+lines = []
+⋮----
+def _normalize_terms_in_draft(self, emr_draft: Dict[str, Any]) -> Dict[str, Any]
+⋮----
+"""使用本地ICD-11知识库对SOAP草稿中的医学术语进行规范化。
+
+        流程：
+        1. 使用colloquial_synonyms.json中的口语化同义词映射进行直接替换
+        2. 使用ChineseTermClient（含ICD-11术语）对剩余术语进行匹配规范化
+        3. 遍历subjective/objective/assessment/plan各字段的value文本
+        4. 日志记录所有替换操作
+        """
+⋮----
+norm_start = time.time()
+⋮----
+chinese_client = self.terminology_service.chinese_term_client
+colloquial_synonyms = {}
+⋮----
+colloquial_synonyms = chinese_client.indexer.colloquial_synonyms
+⋮----
+total_replacements = 0
+sections = ["subjective", "objective", "assessment", "plan"]
+⋮----
+section = emr_draft.get(section_name, {})
+⋮----
+value = field_data.get("value", "")
+⋮----
+original_value = value
+⋮----
+standard = standard_terms[0]
+⋮----
+value = value.replace(colloquial, standard)
+⋮----
+chinese_terms = self._find_terms_in_text(value)
+⋮----
+result = chinese_client.search_term(
+⋮----
+value = value.replace(term_text, result.matched_term)
+⋮----
+norm_time = time.time() - norm_start
+⋮----
+@staticmethod
+    def _find_terms_in_text(text: str) -> List[str]
+⋮----
+"""从文本中提取可能的中文医学术语（2-6个中文字符的词组）。
+        用于在ICD-11术语库中进行匹配查找。
+        """
+terms = []
+chinese_chars = re.findall(r'[\u4e00-\u9fff]{2,6}', text)
+seen = set()
+⋮----
+# DEPRECATED: replaced by _normalize_terms_in_draft which uses ICD-11 local KB
+def _lightweight_normalize(self, facts_data: List[Dict[str, Any]]) -> None
+⋮----
+"""轻量术语规范化：使用ChineseTerm本地库快速匹配，为事实添加normalized_term"""
+⋮----
+normalized_count = 0
+⋮----
+mention = fact.get("mention", "")
+⋮----
+result = self.terminology_service._normalize_by_chinese_term(
+⋮----
+# DEPRECATED: replaced by DirectSOAPGenerationStage (no longer uses atomic facts)
+def _save_atomic_facts(self, facts_data: List[Dict[str, Any]], visit_id: str) -> None
+⋮----
+saved_count = 0
+⋮----
+fact_id = f"fact_{visit_id}_{uuid.uuid4().hex[:12]}"
+atomic_fact = AtomicFact(
+⋮----
+def _parse_cleaning_response(self, response_text: str, segment: List[TranscriptTurn]) -> Dict[str, Any]
+⋮----
+stage = TurnCleaningStage()
+⋮----
+def _apply_asr_corrections(self, cleaning_result: Dict[str, Any], segment: List[TranscriptTurn])
+⋮----
+def get_all_prompts(self, turns: List[TranscriptTurn]) -> List[Dict[str, Any]]
+⋮----
+stages = []
+⋮----
+segments = self._segment_turns(turns)
+total_segments = len(segments)
+⋮----
+transcript_text = self._format_segment(segment)
+prompt = self.prompt_manager.render("turn_cleaning", transcript=transcript_text)
+</file>
+
+<file path="backend/services/pipeline/stages/fact_extraction.py">
+# DEPRECATED: 六阶段流水线已重构为四阶段。事实抽取阶段不再使用，证据溯源由 DirectSOAPGenerationStage._build_evidence_traces() 替代。
+⋮----
+class FactExtractionStage(PipelineStage)
 ⋮----
 def stage_name(self) -> str
 ⋮----
@@ -5325,27 +5373,23 @@ def execute(self, ctx: PipelineContext) -> Dict[str, Any]
 ⋮----
 stage_start = time.time()
 ⋮----
-fact_records = ctx.fact_records
+cleaned_turns = ctx.all_cleaned_turns
 role_mapping = ctx.all_role_mappings
+visit_id = ctx.visit_id
 ⋮----
-so_result = self._generate_so(ctx, fact_records, role_mapping)
-ap_result = self._generate_ap(ctx, so_result, fact_records, role_mapping)
+new_turns_json = json.dumps(cleaned_turns, ensure_ascii=False, indent=2)
 ⋮----
-emr_draft = {
+existing_facts_summary = "[]"
+existing_facts_map = {}
 ⋮----
-so_used_fact_ids = emr_draft.get("so_used_fact_ids", [])
-assessment_items = emr_draft.get("assessment_items", [])
+incremental = False
 ⋮----
-so_facts = self._filter_facts_by_section(fact_records, ["S", "O"])
+fact_service = FactService(ctx.db)
+existing_facts = fact_service.get_facts_by_visit(visit_id)
 ⋮----
-facts_json = self._format_facts_for_prompt(so_facts)
+summary_items = []
 ⋮----
-dialogue_parts = []
-⋮----
-mention = fact.normalized_term or fact.mention
-speaker_label = fact.speaker or "unknown"
-⋮----
-dialogue_summary = "\n".join(dialogue_parts)
+existing_facts_summary = json.dumps(summary_items, ensure_ascii=False, indent=2)
 ⋮----
 prompt = ctx.prompt_manager.render(
 ⋮----
@@ -5357,84 +5401,268 @@ response = ctx.llm_service.generate(prompt, thinking_enabled=False)
 ⋮----
 response_text = response.text
 ⋮----
-result = parse_json_response(response_text, "SO生成", raise_on_error=True)
+result = parse_json_response(response_text, "事实抽取", raise_on_error=True)
+⋮----
+facts = []
+⋮----
+raw_facts = result.get("facts", [])
+⋮----
+facts = self._process_incremental_facts(ctx, raw_facts, existing_facts_map, visit_id)
+⋮----
+facts = self._deduplicate_facts(raw_facts)
 ⋮----
 stage_time = time.time() - stage_start
 ⋮----
-ap_facts = self._filter_facts_by_section(fact_records, ["A", "P"])
+new_facts = []
+append_operations = []
 ⋮----
-subjective_text = json.dumps(so_result.get("subjective", {}), ensure_ascii=False, indent=2)
-objective_text = json.dumps(so_result.get("objective", {}), ensure_ascii=False, indent=2)
-facts_json = self._format_facts_for_prompt(ap_facts)
+operation = fact.get("operation", "new")
 ⋮----
-response = ctx.llm_service.generate(prompt)
+matched_fact_id = fact.get("matched_fact_id")
 ⋮----
-result = parse_json_response(response_text, "AP合并生成", raise_on_error=True)
+def _apply_fact_appends(self, ctx: PipelineContext, append_operations: List[Dict])
 ⋮----
-assessment = result.get("assessment", {})
-assessment_items = result.get("assessment_items", [])
+fact_id = op["fact_id"]
+fact = ctx.db.query(AtomicFact).filter(AtomicFact.fact_id == fact_id).first()
 ⋮----
-assessment_items = assessment.get("assessment_items", [])
-plan = result.get("plan", {})
-plan_items = result.get("plan_items", {})
+existing_turn_ids = set(fact.evidence_turn_ids or [])
+new_turn_ids = set(op.get("new_evidence_turn_ids", []))
 ⋮----
-plan_items = plan.get("plan_items", {})
-⋮----
-a_facts = self._filter_facts_by_section(fact_records, ["A"])
-p_facts = self._filter_facts_by_section(fact_records, ["P"])
-⋮----
-assessment_facts_json = self._format_facts_for_prompt(a_facts)
-assessment_prompt = ctx.prompt_manager.render(
-⋮----
-assessment_response_text = debug_interactor.interact(
-⋮----
-response = ctx.llm_service.generate(assessment_prompt)
-⋮----
-assessment_response_text = response.text
-⋮----
-assessment_result = parse_json_response(assessment_response_text, "Assessment生成")
-⋮----
-assessment_result = {}
-⋮----
-assessment = assessment_result.get("assessment", {})
-assessment_items = assessment_result.get("assessment_items", [])
-⋮----
-assessment_text = json.dumps(assessment, ensure_ascii=False, indent=2)
-⋮----
-plan_facts_json = self._format_facts_for_prompt(p_facts)
-plan_prompt = ctx.prompt_manager.render(
-⋮----
-plan_response_text = debug_interactor.interact(
-⋮----
-response = ctx.llm_service.generate(plan_prompt)
-⋮----
-plan_response_text = response.text
-⋮----
-plan_result = parse_json_response(plan_response_text, "Plan生成")
-⋮----
-plan_result = {}
-⋮----
-plan = plan_result.get("plan", {})
-plan_items = plan_result.get("plan_items", {})
+existing_texts = fact.evidence_text or []
+new_texts = op.get("new_evidence_text", [])
 ⋮----
 @staticmethod
-    def _format_facts_for_prompt(fact_records: List[AtomicFact], lightweight: bool = True) -> str
+    def _deduplicate_facts(facts: List[Dict]) -> List[Dict]
 ⋮----
-facts_data = []
+merged = {}
 ⋮----
-fact_item = {
+mention = fact.get("mention", "").strip()
+section = fact.get("section_candidate", "")
+speaker = fact.get("speaker", "")
 ⋮----
-evidence_spans = fact.evidence_spans or []
+key = f"{mention}|{section}|{speaker}"
 ⋮----
-evidence_spans = [text[:20] if len(text) > 20 else text for text in fact.evidence_text[:3]]
+existing = merged[key]
+existing_turn_ids = set(existing.get("evidence_turn_ids", []))
+new_turn_ids = set(fact.get("evidence_turn_ids", []))
 ⋮----
-context_items = []
+existing_texts = existing.get("evidence_text", [])
+new_texts = fact.get("evidence_text", [])
 ⋮----
-label = f.normalized_term or f.mention
+@staticmethod
+    def _save_atomic_facts(ctx: PipelineContext, facts: List[Dict], visit_id: str)
 ⋮----
-speaker = f.speaker or ""
+saved_count = 0
 ⋮----
-context_items = context_items[:max_items] + [f"... 共 {len(fact_records)} 条事实"]
+fact_id = f"fact_{visit_id}_{uuid.uuid4().hex[:12]}"
+⋮----
+atomic_fact = AtomicFact(
+</file>
+
+<file path="backend/services/pipeline/stages/turn_cleaning.py">
+class TurnCleaningStage(PipelineStage)
+⋮----
+MAX_PARALLEL_SEGMENTS = 4
+⋮----
+def stage_name(self) -> str
+⋮----
+def execute(self, ctx: PipelineContext) -> Dict[str, Any]
+⋮----
+stage_start = time.time()
+⋮----
+segments = self._segment_turns(ctx.turns)
+⋮----
+combined_text = self._build_text_from_cleaned_turns(all_cleaned_turns, ctx.turns)
+⋮----
+def _segment_turns(self, turns: List[TranscriptTurn]) -> List[List[TranscriptTurn]]
+⋮----
+segments = []
+current_segment = []
+segment_turns = settings.LLM_SEGMENT_TURNS
+⋮----
+parallel_start = time.time()
+⋮----
+all_role_mappings = {}
+all_cleaned_turns = []
+⋮----
+result = self._process_segment(ctx, segment, i)
+⋮----
+max_workers = min(len(segments), self.MAX_PARALLEL_SEGMENTS)
+⋮----
+results = [None] * len(segments)
+speaker_handler = SpeakerHandler(ctx.db)
+debug_interactor = DebugInteractor(ctx.llm_service)
+⋮----
+def process_single_segment(args)
+⋮----
+result = self._process_segment(ctx, segment, idx, speaker_handler, debug_interactor)
+⋮----
+futures = list(executor.map(
+⋮----
+fallback_result = speaker_handler.fallback_role_annotation(segments[idx])
+⋮----
+parallel_time = time.time() - parallel_start
+⋮----
+transcript_text = self._format_segment(segment)
+prompt = self._build_cleaning_prompt(ctx, transcript_text)
+⋮----
+response_text = debug_interactor.interact(
+⋮----
+response = ctx.llm_service.generate(prompt, timeout=300.0, thinking_enabled=False)
+⋮----
+response_text = response.text
+⋮----
+cleaning_result = self._parse_cleaning_response(ctx, response_text, segment, speaker_handler)
+⋮----
+@staticmethod
+    def _format_segment(segment: List[TranscriptTurn]) -> str
+⋮----
+has_valid_speakers = False
+⋮----
+has_valid_speakers = True
+⋮----
+lines = []
+⋮----
+@staticmethod
+    def _build_cleaning_prompt(ctx: PipelineContext, transcript: str) -> str
+⋮----
+prompt = ctx.prompt_manager.render("turn_cleaning", transcript=transcript)
+⋮----
+result = parse_json_response(response_text, "转写清洗")
+⋮----
+turns_data = result.get("turns", [])
+⋮----
+role_mapping = {}
+speaker_corrections = []
+⋮----
+turn_by_index = {turn.turn_index: turn for turn in segment}
+⋮----
+turn_id = turn_json.get("turn_id")
+speaker_role = turn_json.get("speaker_role")
+section_hint = turn_json.get("section_hint", [])
+⋮----
+turn = turn_by_index.get(turn_id)
+⋮----
+turn = segment[i]
+⋮----
+original_speaker = turn.speaker
+⋮----
+expected_label = "spk0" if original_speaker != "spk0" else original_speaker
+⋮----
+expected_label = "spk1" if original_speaker != "spk1" else original_speaker
+⋮----
+expected_label = f"spk_{turn_id}"
+⋮----
+turns_data = cleaning_result.get("turns", [])
+⋮----
+correction_map = {}
+applied_count = 0
+⋮----
+corrected_text = turn_json.get("corrected_text", "")
+changed_spans = turn_json.get("changed_spans", [])
+⋮----
+turn_text_map = {}
+⋮----
+tid = ct.get("turn_id")
+ct_text = ct.get("corrected_text", "")
+⋮----
+text = turn_text_map.get(turn.turn_index, turn.text)
+speaker = turn.corrected_speaker or turn.speaker
+⋮----
+combined = "\n".join(lines)
+⋮----
+speaker = turn.speaker
+</file>
+
+<file path="backend/services/pipeline/utils.py">
+class JSONParseError(Exception)
+⋮----
+def __init__(self, stage_name: str, response_text: str, error_msg: str = "")
+⋮----
+def get_full_response(self) -> str
+⋮----
+def parse_json_response(response_text: str, stage_name: str = "", raise_on_error: bool = False) -> Optional[Dict[str, Any]]
+⋮----
+response_text = response_text.strip()
+⋮----
+response_text = _remove_markdown_code_block(response_text)
+⋮----
+response_text = _remove_control_characters(response_text)
+⋮----
+json_start = response_text.find("{")
+json_end = response_text.rfind("}")
+⋮----
+json_str = response_text[json_start:json_end + 1]
+⋮----
+result = json.loads(json_str)
+⋮----
+fixed_json = _try_fix_json(json_str)
+⋮----
+all_jsons = _extract_all_json_objects(response_text)
+⋮----
+potential_json = response_text[:json_end + 1]
+⋮----
+potential_json = response_text
+⋮----
+json_str = "{" + potential_json
+⋮----
+colon_pos = potential_json.find('":')
+⋮----
+key = potential_json[:colon_pos]
+rest = potential_json[colon_pos + 1:]
+json_str = '{"' + key + '"' + rest
+⋮----
+def _remove_markdown_code_block(text: str) -> str
+⋮----
+text = re.sub(r'^```(?:json)?\s*\n?', '', text)
+text = re.sub(r'\n?```\s*$', '', text)
+⋮----
+def _remove_control_characters(text: str) -> str
+⋮----
+result = []
+in_string = False
+escape_next = False
+⋮----
+escape_next = True
+⋮----
+in_string = not in_string
+⋮----
+def _try_fix_json(json_str: str) -> Optional[Dict[str, Any]]
+⋮----
+fixed = json_str
+⋮----
+fixed = re.sub(r',\s*}', '}', fixed)
+fixed = re.sub(r',\s*]', ']', fixed)
+⋮----
+fixed = re.sub(r',\s*\n\s*"', ',', fixed)
+fixed = re.sub(r',\s*\n\s*}', '}', fixed)
+⋮----
+fixed = re.sub(r':\s*,', ': null,', fixed)
+fixed = re.sub(r':\s*}', ': null}', fixed)
+⋮----
+fixed = re.sub(r'"\s*,\s*,', '",', fixed)
+fixed = re.sub(r',\s*,', ',', fixed)
+⋮----
+fixed = re.sub(r'"\s*:\s*"', '": "', fixed)
+fixed = re.sub(r'"\s*:\s*\[', '": [', fixed)
+fixed = re.sub(r'"\s*:\s*\{', '": {', fixed)
+⋮----
+fixed = re.sub(r'(?<!\\)"(?=[a-zA-Z0-9_\u4e00-\u9fff])', '"', fixed)
+⋮----
+brace_count = fixed.count('{') - fixed.count('}')
+bracket_count = fixed.count('[') - fixed.count(']')
+⋮----
+def _extract_all_json_objects(text: str) -> List[Dict[str, Any]]
+⋮----
+results = []
+depth = 0
+start = -1
+⋮----
+start = i
+⋮----
+json_str = text[start:i+1]
+⋮----
+obj = json.loads(json_str)
 </file>
 
 <file path="backend/services/postprocessor.py">
@@ -6055,119 +6283,6 @@ file_size = path.stat().st_size
 def convert_to_wav(audio_path: str | Path, output_path: str | Path) -> Path
 </file>
 
-<file path="frontend/config.html">
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LLM配置 - 中文门诊病历生成系统</title>
-    <link rel="stylesheet" href="/static/css/style.css">
-</head>
-<body>
-    <div class="container">
-        <h1>大模型配置</h1>
-        
-        <div class="config-section">
-            <h2>配置LLM服务</h2>
-            <p class="hint">配置大模型API以获得更好的病历生成效果</p>
-            
-            <form id="llmConfigForm">
-                <input type="hidden" id="editingConfigId" name="editing_config_id" value="">
-                
-                <div class="form-group">
-                    <label for="configName">配置名称 *</label>
-                    <input type="text" id="configName" name="config_name" required placeholder="例如：qwen">
-                </div>
-                
-                <div class="form-group">
-                    <label for="provider">服务商 *</label>
-                    <select id="provider" name="provider" required>
-                        <option value="openai_compatible">OpenAI兼容接口</option>
-                        <option value="openai">OpenAI</option>
-                        <option value="anthropic">Anthropic</option>
-                        <option value="sense-deepseek">Sense-DeepSeek</option>
-                        <option value="custom">自定义</option>
-                    </select>
-                </div>
-                
-                <div class="form-group">
-                    <label for="modelName">模型名称 *</label>
-                    <input type="text" id="modelName" name="model_name" required placeholder="例如：qwen-plus">
-                </div>
-                
-                <div class="form-group">
-                    <label for="apiKey">API Key *</label>
-                    <input type="password" id="apiKey" name="api_key" required placeholder="输入您的API Key">
-                </div>
-                
-                <div class="form-group">
-                    <label for="apiEndpoint">API Endpoint</label>
-                    <input type="text" id="apiEndpoint" name="api_endpoint" placeholder="例如：https://api-inference.modelscope.cn/v1">
-                    <p class="hint">支持base_url格式（如 https://api-inference.modelscope.cn/v1）或完整endpoint格式</p>
-                </div>
-                
-                <div class="form-group">
-                    <label for="maxTokens">最大Token数</label>
-                    <input type="number" id="maxTokens" name="max_tokens" value="2048" min="100" max="131072">
-                </div>
-                
-                <div class="form-group">
-                    <label for="temperature">Temperature</label>
-                    <input type="number" id="temperature" name="temperature" value="0.7" min="0" max="2" step="0.1">
-                </div>
-                
-                <div class="form-group">
-                    <label>
-                        <input type="checkbox" id="isActive" name="is_active" checked>
-                        启用此配置
-                    </label>
-                </div>
-                
-                <div class="form-group">
-                    <label>
-                        <input type="checkbox" id="jsonMode" name="json_mode">
-                        JSON输出模式
-                    </label>
-                    <p class="hint">启用后模型将以JSON格式输出（需在prompt中指示模型输出JSON）</p>
-                </div>
-                
-                <div class="form-group">
-                    <label>
-                        <input type="checkbox" id="thinkingEnabled" name="thinking_enabled">
-                        启用思考模式
-                    </label>
-                    <p class="hint">启用后模型会先进行推理思考再给出回答（支持DeepSeek等模型）</p>
-                </div>
-                
-                <div class="form-group" id="thinkingEffortGroup" style="display:none;">
-                    <label for="thinkingEffort">思考强度</label>
-                    <select id="thinkingEffort" name="thinking_effort">
-                        <option value="high">高（更深入思考）</option>
-                        <option value="low">低（快速响应）</option>
-                    </select>
-                </div>
-                
-                <button type="submit" class="btn-primary" id="submitBtn">保存配置</button>
-                <button type="button" class="btn-secondary" id="cancelEditBtn" style="display:none;">取消编辑</button>
-            </form>
-        </div>
-        
-        <div class="configs-section">
-            <h2>已保存的配置</h2>
-            <div id="configsList"></div>
-        </div>
-        
-        <div class="actions">
-            <button id="backToHome" class="btn-secondary">返回首页</button>
-        </div>
-    </div>
-    
-    <script src="/static/js/config.js"></script>
-</body>
-</html>
-</file>
-
 <file path="frontend/css/ide.css">
 /* ================================================================
    IDE Layout Styles - VS Code inspired dark theme
@@ -6722,6 +6837,14 @@ html, body {
 .editor-btn-danger:hover {
 ⋮----
 /* ================================================================
+   Close EMR View Button
+   ================================================================ */
+⋮----
+.editor-btn-close {
+⋮----
+.editor-btn-close:hover {
+⋮----
+/* ================================================================
    Sidebar Header Refresh Button
    ================================================================ */
 ⋮----
@@ -6977,6 +7100,8 @@ function handleSSEEvent(eventType, data)
 ⋮----
 function updateStageMessage(stageNum, stageName, status, detail)
 ⋮----
+function handleDraftReady(data)
+⋮----
 function handleProcessComplete(result)
 ⋮----
 function checkEMRStatus()
@@ -7002,6 +7127,8 @@ function setActivePanel(panelName)
 function showEditorWelcome()
 ⋮----
 function showEditorContent()
+⋮----
+function closeEMRView()
 ⋮----
 function formatDuration(seconds)
 ⋮----
@@ -7147,70 +7274,30 @@ result = func(*args, **kwargs)
 end_time = time.perf_counter()
 </file>
 
-<file path="backend/api/llm.py">
-router = APIRouter(prefix="/api/llm", tags=["llm"])
-⋮----
-class GenerateRequest(BaseModel)
-⋮----
-prompt: str
-config_name: Optional[str] = None
-max_tokens: Optional[int] = None
-temperature: Optional[float] = None
-json_mode: Optional[bool] = None
-thinking_enabled: Optional[bool] = None
-thinking_effort: Optional[str] = None
-⋮----
-class GenerateWithTemplateRequest(BaseModel)
-⋮----
-template_name: str
-⋮----
-variables: Dict[str, Any]
-⋮----
-class ConfigCreate(BaseModel)
-⋮----
-config_name: str
-provider: str
-model_name: str
-api_key: Optional[str] = None
-api_endpoint: Optional[str] = None
-max_tokens: int = 2048
-temperature: str = "0.7"
-is_active: bool = True
-json_mode: bool = False
-thinking_enabled: bool = False
-thinking_effort: str = "low"
-⋮----
-class ConfigUpdate(BaseModel)
-⋮----
-provider: Optional[str] = None
-model_name: Optional[str] = None
-⋮----
-temperature: Optional[str] = None
-is_active: Optional[bool] = None
-⋮----
-service = LLMService(db)
-response = service.generate(
-result = {
-⋮----
-response = service.generate_with_template(
-⋮----
-@router.get("/models")
-async def get_available_models(db: Session = Depends(get_db))
-⋮----
-@router.get("/configs")
-async def get_configs(db: Session = Depends(get_db))
-⋮----
-configs = db.query(LLMConfig).all()
-⋮----
-existing = db.query(LLMConfig).filter(
-⋮----
-new_config = LLMConfig(
-⋮----
-existing = db.query(LLMConfig).filter(LLMConfig.id == config_id).first()
-⋮----
-name_conflict = db.query(LLMConfig).filter(
-⋮----
-config = db.query(LLMConfig).filter(LLMConfig.id == config_id).first()
+<file path=".repomixignore">
+# Add patterns to ignore here, one per line
+# Example:
+# *.log
+# tmp/
+%TEMP%install-qwen.bat
+/.qwen
+/.trae
+*.0
+/.agents
+/data/audio
+/.agents
+/_bmad
+/backend/services/correction/__pycache__
+/backend/services/llm/__pycache__
+/src/asr/__pycache__
+/tests/test_correction/__pycache__
+/backend/__pycache__
+/tests/__pycache__
+/med_env
+/docs
+README.md
+CLAUDE.md
+tests/
 </file>
 
 <file path="backend/models/atomic_fact.py">
@@ -7238,29 +7325,6 @@ normalization_needed = Column(Boolean, nullable=False, default=True)
 created_at = Column(DateTime, default=datetime.utcnow)
 ⋮----
 visit = relationship("Visit", back_populates="atomic_facts")
-</file>
-
-<file path="backend/models/llm_config.py">
-class LLMConfig(Base)
-⋮----
-__tablename__ = "llm_configs"
-⋮----
-id = Column(Integer, primary_key=True, autoincrement=True)
-config_name = Column(String(100), unique=True, nullable=False)
-provider = Column(String(50), nullable=False)
-model_name = Column(String(100), nullable=False)
-api_key = Column(String(200), nullable=True)
-api_endpoint = Column(String(200), nullable=True)
-is_active = Column(Boolean, default=True)
-max_tokens = Column(Integer, default=32768)
-temperature = Column(String(10), default="0.7")
-json_mode = Column(Boolean, default=False)
-thinking_enabled = Column(Boolean, default=False)
-thinking_effort = Column(String(10), default="high")
-created_at = Column(DateTime, default=datetime.utcnow)
-updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-⋮----
-def to_dict(self)
 </file>
 
 <file path="backend/services/evidence_service.py">
@@ -7699,6 +7763,244 @@ def get_available_models(self) -> List[Dict[str, Any]]
 def reload_adapters(self)
 </file>
 
+<file path="backend/services/pipeline/stages/soap_generation.py">
+# DEPRECATED: 六阶段流水线已重构为四阶段。分节生成SOAP（SO+AP两次LLM调用）已被 DirectSOAPGenerationStage 单次端到端生成替代。
+⋮----
+class SOAPGenerationStage(PipelineStage)
+⋮----
+STAGE_DELAY = 0.5
+⋮----
+def stage_name(self) -> str
+⋮----
+def execute(self, ctx: PipelineContext) -> Dict[str, Any]
+⋮----
+stage_start = time.time()
+⋮----
+fact_records = ctx.fact_records
+role_mapping = ctx.all_role_mappings
+⋮----
+so_result = self._generate_so(ctx, fact_records, role_mapping)
+ap_result = self._generate_ap(ctx, so_result, fact_records, role_mapping)
+⋮----
+emr_draft = {
+⋮----
+so_used_fact_ids = emr_draft.get("so_used_fact_ids", [])
+assessment_items = emr_draft.get("assessment_items", [])
+⋮----
+so_facts = self._filter_facts_by_section(fact_records, ["S", "O"])
+⋮----
+facts_json = self._format_facts_for_prompt(so_facts)
+⋮----
+dialogue_parts = []
+⋮----
+mention = fact.normalized_term or fact.mention
+speaker_label = fact.speaker or "unknown"
+⋮----
+dialogue_summary = "\n".join(dialogue_parts)
+⋮----
+prompt = ctx.prompt_manager.render(
+⋮----
+debug_interactor = DebugInteractor(ctx.llm_service)
+⋮----
+response_text = debug_interactor.interact(
+⋮----
+response = ctx.llm_service.generate(prompt, thinking_enabled=False)
+⋮----
+response_text = response.text
+⋮----
+result = parse_json_response(response_text, "SO生成", raise_on_error=True)
+⋮----
+stage_time = time.time() - stage_start
+⋮----
+ap_facts = self._filter_facts_by_section(fact_records, ["A", "P"])
+⋮----
+subjective_text = json.dumps(so_result.get("subjective", {}), ensure_ascii=False, indent=2)
+objective_text = json.dumps(so_result.get("objective", {}), ensure_ascii=False, indent=2)
+facts_json = self._format_facts_for_prompt(ap_facts)
+⋮----
+response = ctx.llm_service.generate(prompt)
+⋮----
+result = parse_json_response(response_text, "AP合并生成", raise_on_error=True)
+⋮----
+assessment = result.get("assessment", {})
+assessment_items = result.get("assessment_items", [])
+⋮----
+assessment_items = assessment.get("assessment_items", [])
+plan = result.get("plan", {})
+plan_items = result.get("plan_items", {})
+⋮----
+plan_items = plan.get("plan_items", {})
+⋮----
+a_facts = self._filter_facts_by_section(fact_records, ["A"])
+p_facts = self._filter_facts_by_section(fact_records, ["P"])
+⋮----
+assessment_facts_json = self._format_facts_for_prompt(a_facts)
+assessment_prompt = ctx.prompt_manager.render(
+⋮----
+assessment_response_text = debug_interactor.interact(
+⋮----
+response = ctx.llm_service.generate(assessment_prompt)
+⋮----
+assessment_response_text = response.text
+⋮----
+assessment_result = parse_json_response(assessment_response_text, "Assessment生成")
+⋮----
+assessment_result = {}
+⋮----
+assessment = assessment_result.get("assessment", {})
+assessment_items = assessment_result.get("assessment_items", [])
+⋮----
+assessment_text = json.dumps(assessment, ensure_ascii=False, indent=2)
+⋮----
+plan_facts_json = self._format_facts_for_prompt(p_facts)
+plan_prompt = ctx.prompt_manager.render(
+⋮----
+plan_response_text = debug_interactor.interact(
+⋮----
+response = ctx.llm_service.generate(plan_prompt)
+⋮----
+plan_response_text = response.text
+⋮----
+plan_result = parse_json_response(plan_response_text, "Plan生成")
+⋮----
+plan_result = {}
+⋮----
+plan = plan_result.get("plan", {})
+plan_items = plan_result.get("plan_items", {})
+⋮----
+@staticmethod
+    def _format_facts_for_prompt(fact_records: List[AtomicFact], lightweight: bool = True) -> str
+⋮----
+facts_data = []
+⋮----
+fact_item = {
+⋮----
+evidence_spans = fact.evidence_spans or []
+⋮----
+evidence_spans = [text[:20] if len(text) > 20 else text for text in fact.evidence_text[:3]]
+⋮----
+context_items = []
+⋮----
+label = f.normalized_term or f.mention
+⋮----
+speaker = f.speaker or ""
+⋮----
+context_items = context_items[:max_items] + [f"... 共 {len(fact_records)} 条事实"]
+</file>
+
+<file path="frontend/config.html">
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM配置 - 中文门诊病历生成系统</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>大模型配置</h1>
+        
+        <div class="config-section">
+            <h2>配置LLM服务</h2>
+            <p class="hint">配置大模型API以获得更好的病历生成效果</p>
+            
+            <form id="llmConfigForm">
+                <input type="hidden" id="editingConfigId" name="editing_config_id" value="">
+                
+                <div class="form-group">
+                    <label for="configName">配置名称 *</label>
+                    <input type="text" id="configName" name="config_name" required placeholder="例如：qwen">
+                </div>
+                
+                <div class="form-group">
+                    <label for="provider">服务商 *</label>
+                    <select id="provider" name="provider" required>
+                        <option value="openai_compatible">OpenAI兼容接口</option>
+                        <option value="openai">OpenAI</option>
+                        <option value="anthropic">Anthropic</option>
+                        <option value="sense-deepseek">Sense-DeepSeek</option>
+                        <option value="custom">自定义</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="modelName">模型名称 *</label>
+                    <input type="text" id="modelName" name="model_name" required placeholder="例如：qwen-plus">
+                </div>
+                
+                <div class="form-group">
+                    <label for="apiKey">API Key *</label>
+                    <input type="password" id="apiKey" name="api_key" required placeholder="输入您的API Key">
+                </div>
+                
+                <div class="form-group">
+                    <label for="apiEndpoint">API Endpoint</label>
+                    <input type="text" id="apiEndpoint" name="api_endpoint" placeholder="例如：https://api-inference.modelscope.cn/v1">
+                    <p class="hint">支持base_url格式（如 https://api-inference.modelscope.cn/v1）或完整endpoint格式</p>
+                </div>
+                
+                <div class="form-group">
+                    <label for="maxTokens">最大Token数</label>
+                    <input type="number" id="maxTokens" name="max_tokens" value="2048" min="100" max="131072">
+                </div>
+                
+                <div class="form-group">
+                    <label for="temperature">Temperature</label>
+                    <input type="number" id="temperature" name="temperature" value="0.7" min="0" max="2" step="0.1">
+                </div>
+                
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="isActive" name="is_active" checked>
+                        启用此配置
+                    </label>
+                </div>
+                
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="jsonMode" name="json_mode">
+                        JSON输出模式
+                    </label>
+                    <p class="hint">启用后模型将以JSON格式输出（需在prompt中指示模型输出JSON）</p>
+                </div>
+                
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="thinkingEnabled" name="thinking_enabled">
+                        启用思考模式
+                    </label>
+                    <p class="hint">启用后模型会先进行推理思考再给出回答（支持DeepSeek等模型）</p>
+                </div>
+                
+                <div class="form-group" id="thinkingEffortGroup" style="display:none;">
+                    <label for="thinkingEffort">思考强度</label>
+                    <select id="thinkingEffort" name="thinking_effort">
+                        <option value="high">高（更深入思考）</option>
+                        <option value="low">低（快速响应）</option>
+                    </select>
+                </div>
+                
+                <button type="submit" class="btn-primary" id="submitBtn">保存配置</button>
+                <button type="button" class="btn-secondary" id="cancelEditBtn" style="display:none;">取消编辑</button>
+            </form>
+        </div>
+        
+        <div class="configs-section">
+            <h2>已保存的配置</h2>
+            <div id="configsList"></div>
+        </div>
+        
+        <div class="actions">
+            <button id="backToHome" class="btn-secondary">返回首页</button>
+        </div>
+    </div>
+    
+    <script src="/static/js/config.js"></script>
+</body>
+</html>
+</file>
+
 <file path="frontend/js/evaluation.js">
 // 检查是否是自动执行阶段
 ⋮----
@@ -7792,6 +8094,95 @@ engines = {}
 """API路由"""
 ⋮----
 __all__ = ["upload_router", "asr_router", "task_router", "llm_router", "emr_router", "evaluation_router"]
+</file>
+
+<file path="backend/api/llm.py">
+router = APIRouter(prefix="/api/llm", tags=["llm"])
+⋮----
+class GenerateRequest(BaseModel)
+⋮----
+prompt: str
+config_name: Optional[str] = None
+max_tokens: Optional[int] = None
+temperature: Optional[float] = None
+json_mode: Optional[bool] = None
+thinking_enabled: Optional[bool] = None
+thinking_effort: Optional[str] = None
+⋮----
+class GenerateWithTemplateRequest(BaseModel)
+⋮----
+template_name: str
+⋮----
+variables: Dict[str, Any]
+⋮----
+class ConfigCreate(BaseModel)
+⋮----
+config_name: str
+provider: str
+model_name: str
+api_key: Optional[str] = None
+api_endpoint: Optional[str] = None
+max_tokens: int = 2048
+temperature: str = "0.7"
+is_active: bool = True
+json_mode: bool = False
+thinking_enabled: bool = False
+thinking_effort: str = "low"
+⋮----
+class ConfigUpdate(BaseModel)
+⋮----
+provider: Optional[str] = None
+model_name: Optional[str] = None
+⋮----
+temperature: Optional[str] = None
+is_active: Optional[bool] = None
+⋮----
+service = LLMService(db)
+response = service.generate(
+result = {
+⋮----
+response = service.generate_with_template(
+⋮----
+@router.get("/models")
+async def get_available_models(db: Session = Depends(get_db))
+⋮----
+@router.get("/configs")
+async def get_configs(db: Session = Depends(get_db))
+⋮----
+configs = db.query(LLMConfig).all()
+⋮----
+existing = db.query(LLMConfig).filter(
+⋮----
+new_config = LLMConfig(
+⋮----
+existing = db.query(LLMConfig).filter(LLMConfig.id == config_id).first()
+⋮----
+name_conflict = db.query(LLMConfig).filter(
+⋮----
+config = db.query(LLMConfig).filter(LLMConfig.id == config_id).first()
+</file>
+
+<file path="backend/models/llm_config.py">
+class LLMConfig(Base)
+⋮----
+__tablename__ = "llm_configs"
+⋮----
+id = Column(Integer, primary_key=True, autoincrement=True)
+config_name = Column(String(100), unique=True, nullable=False)
+provider = Column(String(50), nullable=False)
+model_name = Column(String(100), nullable=False)
+api_key = Column(String(200), nullable=True)
+api_endpoint = Column(String(200), nullable=True)
+is_active = Column(Boolean, default=True)
+max_tokens = Column(Integer, default=32768)
+temperature = Column(String(10), default="0.7")
+json_mode = Column(Boolean, default=False)
+thinking_enabled = Column(Boolean, default=False)
+thinking_effort = Column(String(10), default="high")
+created_at = Column(DateTime, default=datetime.utcnow)
+updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+⋮----
+def to_dict(self)
 </file>
 
 <file path="backend/models/visit.py">
@@ -8631,89 +9022,6 @@ preview = text[:50] + "..." if len(text) > 50 else text
 latest_preview = "；".join(preview_parts) if preview_parts else "(空病历)"
 </file>
 
-<file path="backend/services/llm/openai_compatible_adapter.py">
-class OpenAICompatibleAdapter(LLMAdapter)
-⋮----
-def __init__(self, config: Dict[str, Any])
-⋮----
-api_endpoint = config.get("api_endpoint", "https://api.openai.com/v1")
-⋮----
-api_endpoint = f"{api_endpoint}/chat/completions"
-⋮----
-api_endpoint = f"{api_endpoint}/v1/chat/completions"
-⋮----
-api_endpoint = f"{api_endpoint}v1/chat/completions"
-⋮----
-def generate(self, request: LLMRequest) -> LLMResponse
-⋮----
-headers = {
-⋮----
-use_json_mode = request.json_mode or self.json_mode
-⋮----
-messages = []
-⋮----
-payload = {
-⋮----
-use_thinking = request.thinking_enabled
-⋮----
-effort = request.thinking_effort if request.thinking_enabled else self.thinking_effort
-⋮----
-last_error = None
-⋮----
-elapsed = time.time() - self._last_request_time
-⋮----
-wait_time = self.request_interval - elapsed
-⋮----
-timeout = request.timeout if request.timeout else (300.0 if use_thinking else 120.0)
-⋮----
-response = client.post(
-⋮----
-data = response.json()
-⋮----
-raw_bytes = response.content
-⋮----
-text = raw_bytes.decode(enc)
-data = json.loads(text)
-⋮----
-choices = data.get("choices", [])
-⋮----
-error_info = data.get("error", {})
-⋮----
-usage = data.get("usage", {})
-⋮----
-message = choices[0].get("message", {})
-content = message.get("content")
-thinking_content = message.get("reasoning_content") or message.get("reasoning")
-finish_reason = choices[0].get("finish_reason", "stop")
-⋮----
-reasoning_tokens = usage.get("completion_tokens_details", {}).get("reasoning_tokens", 0)
-⋮----
-current_max_tokens = payload.get("max_tokens", request.max_tokens)
-new_max_tokens = min(current_max_tokens * 2, 131072)
-⋮----
-stripped_len = len(content.replace(' ', '').replace('\t', '').replace('\n', ''))
-⋮----
-error_detail = ""
-⋮----
-error_body = e.response.text
-error_detail = f", 响应内容: {error_body[:500]}"
-⋮----
-last_error = RuntimeError(f"{self.provider_name} API error: {str(e)}{error_detail}")
-⋮----
-last_error = RuntimeError(f"{self.provider_name} API error: {str(e)}")
-⋮----
-last_error = RuntimeError(f"Invalid {self.provider_name} response format: {str(e)}")
-⋮----
-last_error = e
-⋮----
-wait_time = self.retry_delay * (attempt + 1)
-⋮----
-def is_available(self) -> bool
-⋮----
-base_url = self.api_endpoint.rsplit("/chat/completions", 1)[0]
-response = client.get(
-</file>
-
 <file path="frontend/js/result.js">
 async function loadVisitInfo(visitId)
 ⋮----
@@ -8874,6 +9182,89 @@ case_sensitive = True
 settings = Settings()
 </file>
 
+<file path="backend/services/llm/openai_compatible_adapter.py">
+class OpenAICompatibleAdapter(LLMAdapter)
+⋮----
+def __init__(self, config: Dict[str, Any])
+⋮----
+api_endpoint = config.get("api_endpoint", "https://api.openai.com/v1")
+⋮----
+api_endpoint = f"{api_endpoint}/chat/completions"
+⋮----
+api_endpoint = f"{api_endpoint}/v1/chat/completions"
+⋮----
+api_endpoint = f"{api_endpoint}v1/chat/completions"
+⋮----
+def generate(self, request: LLMRequest) -> LLMResponse
+⋮----
+headers = {
+⋮----
+use_json_mode = request.json_mode or self.json_mode
+⋮----
+messages = []
+⋮----
+payload = {
+⋮----
+use_thinking = request.thinking_enabled
+⋮----
+effort = request.thinking_effort if request.thinking_enabled else self.thinking_effort
+⋮----
+last_error = None
+⋮----
+elapsed = time.time() - self._last_request_time
+⋮----
+wait_time = self.request_interval - elapsed
+⋮----
+timeout = request.timeout if request.timeout else (300.0 if use_thinking else 120.0)
+⋮----
+response = client.post(
+⋮----
+data = response.json()
+⋮----
+raw_bytes = response.content
+⋮----
+text = raw_bytes.decode(enc)
+data = json.loads(text)
+⋮----
+choices = data.get("choices", [])
+⋮----
+error_info = data.get("error", {})
+⋮----
+usage = data.get("usage", {})
+⋮----
+message = choices[0].get("message", {})
+content = message.get("content")
+thinking_content = message.get("reasoning_content") or message.get("reasoning")
+finish_reason = choices[0].get("finish_reason", "stop")
+⋮----
+reasoning_tokens = usage.get("completion_tokens_details", {}).get("reasoning_tokens", 0)
+⋮----
+current_max_tokens = payload.get("max_tokens", request.max_tokens)
+new_max_tokens = min(current_max_tokens * 2, 131072)
+⋮----
+stripped_len = len(content.replace(' ', '').replace('\t', '').replace('\n', ''))
+⋮----
+error_detail = ""
+⋮----
+error_body = e.response.text
+error_detail = f", 响应内容: {error_body[:500]}"
+⋮----
+last_error = RuntimeError(f"{self.provider_name} API error: {str(e)}{error_detail}")
+⋮----
+last_error = RuntimeError(f"{self.provider_name} API error: {str(e)}")
+⋮----
+last_error = RuntimeError(f"Invalid {self.provider_name} response format: {str(e)}")
+⋮----
+last_error = e
+⋮----
+wait_time = self.retry_delay * (attempt + 1)
+⋮----
+def is_available(self) -> bool
+⋮----
+base_url = self.api_endpoint.rsplit("/chat/completions", 1)[0]
+response = client.get(
+</file>
+
 <file path="backend/services/llm/prompts.py">
 class PromptTemplate
 ⋮----
@@ -8890,6 +9281,17 @@ def __init__(self, language: str = "zh")
 def _load_default_templates(self)
 ⋮----
 def _load_chinese_templates(self)
+⋮----
+# DEPRECATED: 六阶段流水线已重构为四阶段
+⋮----
+# ========== 单次LLM调用直接生成SOAP草稿（direct_soap_generation） ==========
+# 精简版：仅生成基础SOAP字段，幻觉检测和证据遗漏由后续质量检查阶段处理
+⋮----
+# ========== 新增：逐claim核查（claim_verification） ==========
+⋮----
+# ========== 新增：遗漏检查（checklist_verification） ==========
+⋮----
+# ========== 新增：定点修订（field_revision） ==========
 ⋮----
 def _load_chinese_evaluation_templates(self)
 ⋮----
@@ -9186,6 +9588,10 @@ template = self.get_template(template_name)
                             <select id="versionSelect"></select>
                         </div>
                         <div class="editor-toolbar-right">
+                            <button id="closeEMRView" class="editor-btn editor-btn-close" title="关闭病历">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m15 9l-6 6m0-6l6 6"/></svg>
+                            关闭
+                        </button>
                             <button id="toggleEvidence" class="editor-btn">
                             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 6l-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551"/></svg>
                             证据溯源
@@ -9343,11 +9749,10 @@ pipeline = LLMPipelineServiceEnglish(db, llm_service)
 pipeline = LLMPipelineService(db, llm_service)
 result = pipeline.process_transcript(request.visit_id)
 ⋮----
-fact_result = result.get("fact_result", {})
-fact_count = fact_result.get("fact_count", 0) if isinstance(fact_result, dict) else 0
-normalized_terms_count = len(result.get("normalized_result", {}).get("terms", []))
-verification_result = result.get("verification_result", {})
-verification_issues = verification_result.get("issues") if isinstance(verification_result, dict) else None
+# 四阶段流水线后，以下字段已不再生成，设为0保持向后兼容
+fact_count = 0
+normalized_terms_count = 0
+verification_issues = result.get("verification_issues", {})
 ⋮----
 emr_result = result.get("emr_result", {})
 ⋮----
@@ -9371,7 +9776,15 @@ async def event_generator()
 ⋮----
 event_data = {
 ⋮----
-result = event.get("extra", {}).get("result", {})
+draft_data = {
+emr_draft_obj = event.get("emr_draft", {})
+fields_in_draft = {}
+⋮----
+section = emr_draft_obj.get(section_name, {})
+⋮----
+draft_json = json.dumps(draft_data, ensure_ascii=False)
+⋮----
+result = event
 ⋮----
 complete_data = {
 ⋮----

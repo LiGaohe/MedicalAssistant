@@ -517,8 +517,12 @@ window.AgentModule = (function() {
     }
 
     function handleSSEEvent(eventType, data) {
+        console.log('[DEBUG] SSE事件:', eventType, data);
         if (eventType === 'stage_update') {
             updateStageMessage(data.stage, data.name, data.status, data.detail);
+        } else if (eventType === 'draft_ready') {
+            console.log('[DEBUG] 收到draft_ready事件, data:', data);
+            handleDraftReady(data);
         } else if (eventType === 'error') {
             addMessage('error', '<p>病历生成失败: ' + App.escapeHtml(data.error || '未知错误') + '</p>');
             App.updateStatusBar('病历生成失败', 'error');
@@ -530,7 +534,7 @@ window.AgentModule = (function() {
         var type = status === 'running' ? 'progress' : 
                    status === 'completed' ? 'success' : 'error';
 
-        var content = '<div class="stage-name">阶段' + stageNum + '/5: ' + stageName + '</div>';
+        var content = '<div class="stage-name">阶段' + stageNum + '/4: ' + stageName + '</div>';
         if (detail) {
             content += '<div class="stage-detail">' + App.escapeHtml(detail) + '</div>';
         }
@@ -545,7 +549,7 @@ window.AgentModule = (function() {
             if (iconEl) {
                 var newIcon = '';
                 if (type === 'progress') newIcon = App.icon('loader', 16);
-                else if (type === 'success') newIcon = App.icon('bot', 16);
+                else if (type === 'success') newIcon = App.icon('checkCircle', 14);
                 else if (type === 'error') newIcon = App.icon('xCircle', 16);
                 iconEl.innerHTML = newIcon;
             }
@@ -554,6 +558,43 @@ window.AgentModule = (function() {
         } else {
             stageElements[stageNum] = addMessage(type, content);
         }
+    }
+
+    function handleDraftReady(data) {
+        console.log('[DEBUG] handleDraftReady开始:', data);
+        if (!data.emr_draft) {
+            console.log('[DEBUG] handleDraftReady: emr_draft为空, 跳过');
+            return;
+        }
+        
+        var draft = data.emr_draft;
+        console.log('[DEBUG] draft内容:', draft);
+        var emrRecord = {
+            record_id: null,
+            version: 0,
+            emr_json: {
+                subjective: draft.subjective || {},
+                objective: draft.objective || {},
+                assessment: draft.assessment || {},
+                plan: draft.plan || {}
+            }
+        };
+        
+        console.log('[DEBUG] 构建emrRecord:', emrRecord);
+        
+        state.emrRecord = emrRecord;
+        App.setState({
+            emrRecord: emrRecord
+        });
+        
+        addMessage('success',
+            '<p>' + App.icon('sparkles', 14) + ' 草稿已生成！</p>' +
+            '<p class="agent-hint">主编辑区已显示草稿，后台正在进行质量核查...</p>'
+        );
+        
+        App.updateStatusBar('草稿已生成，正在进行质量核查...', 'success');
+        
+        App.emit('emrGenerated', { emrRecord: emrRecord });
     }
 
     function handleProcessComplete(result) {
@@ -594,6 +635,25 @@ window.AgentModule = (function() {
         }
 
         App.emit('emrGenerated', { emrRecord: result.emr_record });
+
+        if (result.verification_issues) {
+            var issues = result.verification_issues;
+            var unsupportedCount = (issues.unsupported_claims || []).length;
+            var missingCount = (issues.missing_items || []).length;
+            var violationCount = (issues.hard_rule_violations || []).length;
+            var totalIssues = unsupportedCount + missingCount + violationCount;
+            
+            if (totalIssues > 0) {
+                addMessage('warning',
+                    '<p>' + App.icon('alertTriangle', 14) + ' 核查发现 ' + totalIssues + ' 个问题：</p>' +
+                    '<p class="agent-hint">无依据声明 ' + unsupportedCount + ' 项 | 关键遗漏 ' + missingCount + ' 项 | 规则冲突 ' + violationCount + ' 项</p>'
+                );
+            } else {
+                addMessage('success',
+                    '<p>' + App.icon('checkCircle', 14) + ' 核查通过，无问题发现</p>'
+                );
+            }
+        }
     }
 
     function checkEMRStatus() {

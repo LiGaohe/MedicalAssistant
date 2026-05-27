@@ -117,6 +117,20 @@ window.App = (function() {
         if (content) content.style.display = 'flex';
     }
 
+    function closeEMRView() {
+        state.visitId = null;
+        state.emrRecord = null;
+        state.currentRecordId = null;
+        setState({
+            visitId: null,
+            emrRecord: null,
+            currentRecordId: null
+        });
+        showEditorWelcome();
+        updateTitlebar('--', false);
+        updateStatusBar('已关闭病历');
+    }
+
     function formatDuration(seconds) {
         if (!seconds) return '未知';
         var mins = Math.floor(seconds / 60);
@@ -201,6 +215,13 @@ window.App = (function() {
                 if (state.currentRecordId && state.visitId) {
                     window.open('/static/evaluation.html?record_id=' + state.currentRecordId + '&visit_id=' + state.visitId, '_blank');
                 }
+            });
+        }
+
+        var closeEMRViewBtn = document.getElementById('closeEMRView');
+        if (closeEMRViewBtn) {
+            closeEMRViewBtn.addEventListener('click', function() {
+                closeEMRView();
             });
         }
 
@@ -304,6 +325,7 @@ window.App = (function() {
         setActivePanel: setActivePanel,
         showEditorWelcome: showEditorWelcome,
         showEditorContent: showEditorContent,
+        closeEMRView: closeEMRView,
         formatDuration: formatDuration,
         formatTime: formatTime,
         escapeHtml: escapeHtml,

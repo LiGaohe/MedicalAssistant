@@ -1,3 +1,4 @@
+# DEPRECATED: 六阶段流水线已重构为四阶段。依赖事实表的核查与修订已被 ClaimVerificationStage（基于对话文本核查）+ FieldRevisionStage 替代。
 import json
 import time
 from typing import Dict, Any, List

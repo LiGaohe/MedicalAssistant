@@ -61,6 +61,7 @@ window.EditorModule = (function() {
         });
 
         App.on('emrGenerated', function(data) {
+            console.log('[DEBUG] editor收到emrGenerated事件:', data);
             currentEMRRecord = data.emrRecord;
             App.showEditorContent();
             displayEMR(data.emrRecord);
@@ -228,11 +229,9 @@ window.EditorModule = (function() {
             html += '<li class="evidence-item" data-turn-index="' + turnIndex + '">' +
                 '<div class="evidence-header">' + speakerHtml +
                 '<span class="evidence-turn">轮次 ' + turnIndex + '</span></div>' +
-                '<div class="evidence-detail">' +
-                '<div class="evidence-label">LLM标注片段</div>' +
-                '<div class="evidence-content">' + (content ? createExpandableText(content, 150) : '-') + '</div>';
+                '<div class="evidence-detail">';
             if (turnText) {
-                html += '<div class="evidence-label">完整转写文本</div>' +
+                html += '<div class="evidence-label">原始对话转写</div>' +
                     '<div class="evidence-turn-text">' + createExpandableText(turnText, 150) + '</div>';
             }
             html += '</div></li>';
@@ -489,20 +488,17 @@ window.EditorModule = (function() {
             list.innerHTML = '<p class="empty">暂无证据溯源数据</p>';
         } else {
             var html = '<table class="editor-evidence-table"><thead><tr>';
-            html += '<th>字段类型</th><th>最终病历</th><th>标注片段</th><th>原始转写</th><th>说话人</th><th>轮次</th>';
+            html += '<th>字段类型</th><th>最终病历</th><th>原始转写</th><th>说话人</th><th>轮次</th>';
             html += '</tr></thead><tbody>';
 
             evidenceData.forEach(function(ev) {
                 var turnText = ev.turn_text || '-';
                 var fieldValue = ev.field_value || '-';
-                var content = ev.content || '-';
 
                 html += '<tr>' +
                     '<td>' + App.getFieldName(ev.field_type) + '</td>' +
                     '<td title="' + App.escapeHtml(fieldValue) + '">' +
                         createExpandableText(fieldValue, 100) + '</td>' +
-                    '<td title="' + App.escapeHtml(content) + '">' +
-                        createExpandableText(content, 100) + '</td>' +
                     '<td title="' + App.escapeHtml(turnText) + '">' +
                         createExpandableText(turnText, 100) + '</td>' +
                     '<td>' + (ev.speaker || '-') + '</td>' +

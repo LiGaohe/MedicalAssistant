@@ -1,5 +1,109 @@
 # 完成状态记录
 
+## 2026-05-27 新增 certainty_errors 确定性核查（ClaimVerificationStage 步骤D）
+
+### 变更说明
+
+在 `ClaimVerificationStage` 中新增步骤D（确定性核查），检测 SOAP 草稿中诊断的确定性层级是否被拔高。例如：对话中医生说"可能是XX"但草稿写成了 `explicit_diagnosis`。
+
+### 新增模板
+
+| 模板名称 | required_vars | 用途 |
+|----------|-------------|------|
+| `certainty_verification` | `transcript`, `assessment_json` | LLM检查assessment_items的diagnosis_type/certainty_level与对话证据力度是否匹配 |
+
+### 修改文件
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `backend/services/llm/prompts.py` | 新增 `certainty_verification` 模板（~48行） | 在 `field_revision` 之后、DEPRECATED段之前 |
+| `backend/services/pipeline/stages/claim_verification.py` | 新增 `_step_certainty_verification()` 方法（~78行）+ `execute()` 中集成步骤D | 只检查拔高（suspected→explicit），不检查降级 |
+
+### 核查流程更新
+
+```
+步骤A: Claim核查（supported/unsupported/not_addressed）
+步骤B: Checklist核查（missing_items）
+步骤C: 硬规则核查（laterality_conflict/negation_conflict）
+步骤D: 确定性核查（certainty_errors） ← 新增
+```
+
+### 设计要点
+
+- 仅当 assessment 有诊断内容时才调用LLM（无诊断则跳过）
+- 只标记确定性被拔高的情况，不检查降级（保守偏向安全侧）
+- 不确定则不标记，避免误报
+- 结果通过 `issues["certainty_errors"]` 传递给 `FieldRevisionStage`，后者已有确定性降级修订规则
+
+---
+
+## 2026-05-27 新增 ClaimVerificationStage 和 FieldRevisionStage
+
+### 变更说明
+
+在 `backend/services/pipeline/stages/` 目录下创建两个新的 PipelineStage 实现文件，分别实现后置核查和字段级修订功能。
+
+### 新增文件
+
+| 文件 | 类名 | stage_name | 用途 |
+|------|------|-----------|------|
+| `stages/claim_verification.py` | `ClaimVerificationStage` | `"后置核查"` | 对SOAP草稿执行三步核查：Claim核查(LLM)、Checklist核查(LLM)、硬规则核查(Python) |
+| `stages/field_revision.py` | `FieldRevisionStage` | `"字段级修订与落盘"` | 根据核查问题清单进行字段级修订，含schema确定性约束校验 |
+
+### ClaimVerificationStage 设计要点
+
+- **步骤A (Claim核查)**：渲染 `claim_verification` prompt，LLM逐claim判定 supported/unsupported/not_addressed
+- **步骤B (Checklist核查)**：渲染 `checklist_verification` prompt，LLM检查SOAP关键信息遗漏
+- **步骤C (硬规则核查)**：纯Python实现，检查部位矛盾（左右)、否定冲突（S/O否定但A肯定）等
+- 所有LLM调用失败时使用空数组，不中断流水线
+- 使用 `ctx.prompt_manager.render()` 渲染prompt，`ctx.llm_service.generate(prompt)` 调用LLM（默认thinking模式）
+- 结果写入 `ctx.verification_issues`
+
+### FieldRevisionStage 设计要点
+
+- 接收 `ctx.emr_draft` 和 `ctx.verification_issues`
+- issues为空时跳过LLM修订，直接执行schema确定性约束校验
+- issues非空时渲染 `field_revision` prompt 进行字段级最小化修订
+- Schema约束校验：必填字段检查（subjective/objective/assessment/plan）、高风险字段默认值（diagnosis/treatment为空时设为"unknown"）
+- 部分修订处理：LLM返回缺失字段从原始draft回填
+- Evidence traces保护：修订后字段缺少evidence_traces时从原draft复制
+- 修订后结果覆盖写入 `ctx.emr_draft`
+
+### 修改文件
+
+- `backend/services/pipeline/stages/claim_verification.py` — 新建，263行
+- `backend/services/pipeline/stages/field_revision.py` — 新建，204行
+
+---
+
+## 2026-05-27 新增4个中文Prompt模板（direct_soap_generation / claim_verification / checklist_verification / field_revision）
+
+### 变更说明
+
+在 `backend/services/llm/prompts.py` 的 `_load_chinese_templates()` 方法中，在 `soap_verification` 之后、`_load_chinese_evaluation_templates()` 之前新增4个中文prompt模板，用于支持新的核查-修订流水线。
+
+### 新增模板
+
+| 模板名称 | required_vars | 用途 | 说明 |
+|----------|--------------|------|------|
+| `direct_soap_generation` | `["transcript"]` | 单次LLM直接生成完整SOAP | 一次调用产出S/O/A/P，A/P无证据留空；每个字段含 `value` + `source_turn_indices`；三层诊断策略+assessment_items+plan_items |
+| `claim_verification` | `["transcript", "draft_emr"]` | 逐claim核查A/P部分 | 将A和P拆分为原子claim，逐条判定supported/unsupported/not_addressed，含evidence_text和reasoning |
+| `checklist_verification` | `["transcript", "draft_emr"]` | 检查SOAP关键遗漏 | 逐项检查主诉完整性、关键症状遗漏、处置建议遗漏，输出missing_items清单 |
+| `field_revision` | `["draft_emr", "issues_json", "transcript"]` | 定点修订SOAP草稿 | 根据核查问题清单做最小化修订（删除unsupported claim/补充missing item/确定性降级），其他字段不变 |
+
+### 设计要点
+
+- 所有模板遵循现有 `PromptTemplate(template="""...""", required_vars=[...])` 模式
+- `direct_soap_generation` 使用 `source_turn_indices`（整型数组，从0开始）替代旧模板的 `evidence_ids`，与turn级溯源语义一致
+- `field_revision` 要求只修改失败字段、严禁重写整份SOAP，遵循最小化修订原则
+- 旧模板（`fact_extraction`、`fact_consolidation`、`emr_generation_so` 等）完整保留，不做任何修改
+
+### 修改文件
+
+- `backend/services/llm/prompts.py` — `_load_chinese_templates()` 方法中新增4个模板（+272行）
+
+---
+
 ## 2026-05-27 JSON解析失败时停止后续执行并输出LLM响应
 
 ### 问题背景
@@ -28,6 +132,38 @@
 **之前**：JSON解析失败 → 返回空结果 → 继续执行下一阶段
 
 **现在**：JSON解析失败 → 输出完整LLM响应到日志 → 抛出异常 → 停止后续执行 → 返回包含 `llm_response` 的错误结果
+
+---
+
+## 2026-05-27 六阶段流水线重构为四阶段
+
+### 变更说明
+
+将原有的六阶段流水线（事实抽取->事实收束->术语规范化->SOAP分节生成->核查修订）重构为简洁的四阶段流水线（清洗->直接草稿生成->后置核查->字段级修订）。新流水线去掉中间的事实抽取/收束/术语规范化环节，改为直接从清洗文本生成SOAP草稿，再通过后置核查+字段级修订保证质量。
+
+### 四阶段流水线架构
+
+| 阶段 | Stage 类 | 用途 |
+|------|----------|------|
+| 1 | `TurnCleaningStage` | 转写清洗与角色纠错（不变） |
+| 2 | `DirectSOAPGenerationStage` | 直接草稿生成：基于清洗全文一次性生成完整SOAP，含evidence_traces |
+| 3 | `ClaimVerificationStage` | 后置核查：三步核查（Claim核查+Checklist核查+硬规则核查） |
+| 4 | `FieldRevisionStage` | 字段级修订与落盘：根据核查问题定点修订，schema约束校验 |
+
+### 修改文件
+
+| 文件 | 变更类型 | 说明 |
+|------|----------|------|
+| `backend/services/pipeline/orchestrator.py` | 重构 | 移除旧stage import（FactExtractionStage/FactConsolidationStage/TermNormalizationStage/SOAPGenerationStage/VerificationStage）、FactService、EvidenceEnricher；新增DirectSOAPGenerationStage/ClaimVerificationStage/FieldRevisionStage；重写process_transcript和process_with_callback为4阶段流程；新增draft_ready事件；更新get_all_prompts |
+| `backend/api/emr.py` | 修改 | event_generator新增is_draft_ready事件检测；complete事件移除fact_count改为verification_issues；process_visit中fact_count/normalized_terms_count设为0保持向后兼容 |
+| `backend/services/llm_pipeline_service.py` | 无修改 | 包装类所有方法签名保持不变，无需修改 |
+
+### 关键设计决策
+
+- **draft_ready事件**：阶段2完成后通过含`is_draft_ready: True`的额外stage_update事件触发SSE的draft_ready事件，前端可据此提前展示草稿
+- **证据溯源自动化**：证据溯源由DirectSOAPGenerationStage._build_evidence_traces()内部完成，不再需要EvidenceEnricher后处理
+- **向后兼容**：emr.py中ProcessResponse保留fact_count/normalized_terms_count/evidence_count/extracted_items_count字段（设为0），前端无需修改
+- **已废弃方法**：orchestrator.py中`_lightweight_normalize`和`_save_atomic_facts`添加# DEPRECATED注释
 
 ---
 
@@ -4487,3 +4623,244 @@ if not turn:
 ### 预期效果
 
 ASR修正和角色识别能够正确匹配到对应的 turn，不再出现"找不到turn"的警告。
+
+## 2026-05-27 新增草稿即时展示功能
+
+### 变更说明
+
+在 `frontend/js/agent.js` 中新增 SSE `draft_ready` 事件处理，使策展阶段生成 SOAP 草稿后编辑器能够即时渲染，无需等待全部4个阶段完成。
+
+### 修改文件
+
+`frontend/js/agent.js`：
+
+| 修改项 | 描述 |
+|--------|------|
+| `handleSSEEvent()` | 新增 `draft_ready` 分支，转发到 `handleDraftReady()` |
+| `handleDraftReady()` | 新增函数：接收 `emr_draft` 数据，包装为 `emrRecord` 格式，更新 state 并发射 `emrGenerated` 事件驱动编辑器即时渲染 |
+| `handleProcessComplete()` | 新增核查问题摘要显示：从 `verification_issues` 中提取 `unsupported_claims`、`missing_items`、`hard_rule_violations` 三类问题计数，以 warning 或 success 消息展示 |
+| `updateStageMessage()` | 阶段总数从 `/5` 改为 `/4`，success 状态 icon 从 `bot` 改为 `checkCircle` |
+
+### 草稿即时展示流程
+
+```
+后端SSE → event: draft_ready → handleDraftReady()
+  → 包装 emr_draft 为 emrRecord 格式
+  → 设置 state.emrRecord
+  → addMessage 告知用户草稿已生成
+  → App.emit('emrGenerated', { emrRecord })
+  → 编辑器监听事件，即时渲染草稿
+  → 后台继续执行核查阶段...
+  → event: stage_update (阶段3/4: 后置核查)
+  → event: stage_update (阶段4/4: 字段级修订)
+  → event: complete → handleProcessComplete() 显示核查问题摘要
+```
+
+### 核查问题摘要展示
+
+- 有核查问题：warning 消息，格式 `核查发现 N 个问题：无依据声明 X 项 | 关键遗漏 Y 项 | 规则冲突 Z 项`
+- 无核查问题：success 消息，格式 `核查通过，无问题发现`
+
+---
+
+## 2026-05-27 旧模板废弃标记与Stage导出更新
+
+### 变更说明
+
+在 `prompts.py` 中为7个旧六阶段流水线模板添加 DEPRECATED 标记，同时更新 `stages/__init__.py` 导出所有 Stage 类（含废弃的旧阶段）。
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `backend/services/llm/prompts.py` | 为7个旧模板注册行前添加 `# DEPRECATED: 六阶段流水线已重构为四阶段` 注释 |
+| `backend/services/pipeline/stages/__init__.py` | 导出所有 Stage 类（新4阶段 + 旧5阶段标记为 DEPRECATED） |
+
+### prompts.py 废弃标记详情
+
+| 旧模板名 | 行号范围 | 用途 |
+|----------|----------|------|
+| `fact_extraction` | ~233 | 增量抽取原子临床事实 |
+| `fact_consolidation` | ~294 | 重复事实合并 + 冲突标记 |
+| `soap_verification` | ~339 | SOAP 草稿核查 |
+| `emr_generation_so` | ~655 | 分节生成主观+客观数据 |
+| `emr_generation_assessment` | ~701 | 分节生成评估 |
+| `emr_generation_plan` | ~742 | 分节生成计划 |
+| `emr_generation_ap` | ~786 | 分节合并生成评估+计划 |
+
+未标记的新四阶段模板：`direct_soap_generation`、`claim_verification`、`checklist_verification`、`field_revision`。
+
+### stages/\_\_init\_\_.py 导出清单
+
+**新四阶段（活跃）**：
+
+| Stage 类 | 文件 |
+|----------|------|
+| `TurnCleaningStage` | `turn_cleaning.py` |
+| `DirectSOAPGenerationStage` | `direct_soap_generation.py` |
+| `ClaimVerificationStage` | `claim_verification.py` |
+| `FieldRevisionStage` | `field_revision.py` |
+
+**旧阶段（DEPRECATED，向后兼容保留）**：
+
+| Stage 类 | 文件 |
+|----------|------|
+| `FactExtractionStage` | `fact_extraction.py` |
+| `FactConsolidationStage` | `fact_consolidation.py` |
+| `TermNormalizationStage` | `term_normalization.py` |
+| `SOAPGenerationStage` | `soap_generation.py` |
+| `VerificationStage` | `verification.py` |
+
+---
+
+## 2026-05-27 修复：草稿病历生成后前端不显示的问题
+
+### 问题描述
+
+生成草稿后，前端没有显示草稿病历（`draft_ready` SSE 事件未触发编辑器渲染）。
+
+### 排查过程
+
+1. 检查 `orchestrator.py` L231-235：`draft_event` 正确设置 `is_draft_ready=True` 和 `emr_draft` 后 yield
+2. 检查 `emr.py` L206-210：正确检测 `is_draft_ready` 并发送 `event: draft_ready` SSE 事件
+3. 检查 `agent.js` L519-528：`handleSSEEvent` 正确将 `draft_ready` 事件路由到 `handleDraftReady`
+4. 检查 `agent.js` L561-589：`handleDraftReady` 正确构建 `emrRecord` 并调用 `App.emit('emrGenerated', ...)`
+5. 检查 `editor.js` L63-70：正确监听 `emrGenerated` 事件，调用 `displayEMR` 和 `setActivePanel('editor')`
+6. **发现 BUG**：`emr.py` L221 检查 `event.get("stage") == 0` 来判断是否为最终完成事件，但新4阶段流水线的最终结果没有 `stage` 字段，导致 `complete` SSE 事件永远不会被发送
+
+### 已修复
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 修复 `complete` 事件检查逻辑 | ✅ 完成 | `emr.py`：将 `event.get("stage") == 0` 改为 `"emr_result" in event`，直接匹配新流水线结果格式 |
+| 添加后端调试日志 | ✅ 完成 | `orchestrator.py`：记录 draft_event yield 时的 emr_draft 字段信息 |
+| 添加后端调试日志 | ✅ 完成 | `emr.py`：记录 draft_ready 和 complete SSE 事件发送时的详细信息 |
+| 添加前端调试日志 | ✅ 完成 | `agent.js`：在 handleSSEEvent、handleDraftReady 中添加 console.log |
+| 添加前端调试日志 | ✅ 完成 | `editor.js`：在 emrGenerated 事件监听器中添加 console.log |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `backend/api/emr.py` | L206-248：重写 draft_ready 和 complete 事件逻辑，添加调试日志，修复 `stage == 0` → `"emr_result" in event` |
+| `backend/services/pipeline/orchestrator.py` | L233-235：添加 yield draft_ready 事件的调试日志 |
+| `frontend/js/agent.js` | L519-585：在 handleSSEEvent 和 handleDraftReady 中添加 console.log 调试信息 |
+| `frontend/js/editor.js` | L63-64：在 emrGenerated 事件监听器中添加 console.log 调试信息 |
+
+### 待验证
+
+- 用户重新测试后，通过浏览器控制台和后端日志确认 `draft_ready` 事件是否正确传递
+
+---
+
+## 2026-05-27 前端添加关闭病历按钮
+
+### 问题背景
+
+用户从历史病历列表查看病历后，编辑器会显示病历内容，但没有途径返回到"未生成病历"的欢迎页面。
+
+### 已修改
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 添加关闭按钮 HTML | ✅ | `emr.html`：在 `.editor-toolbar-right` 最前面添加 `#closeEMRView` 按钮，使用 x-circle SVG 图标 |
+| 添加关闭逻辑 | ✅ | `app.js`：新增 `closeEMRView()` 函数，清空 visitId/emrRecord/currentRecordId 状态，显示 welcome 页面，更新标题栏为"未生成病历" |
+| 添加事件绑定 | ✅ | `app.js`：在 DOMContentLoaded 中绑定 `#closeEMRView` 的 click 事件 |
+| 添加按钮样式 | ✅ | `ide.css`：新增 `.editor-btn-close` 样式，灰色边框按钮，hover 时突出显示 |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `frontend/emr.html` | 在编辑器工具栏右侧添加关闭按钮 |
+| `frontend/js/app.js` | 新增 `closeEMRView()` 函数、事件绑定、导出 |
+| `frontend/css/ide.css` | 新增 `.editor-btn-close` 样式
+
+### 交互流程
+
+1. 用户在历史病历面板点击"查看" → 编辑器显示病历内容
+2. 用户点击编辑器工具栏的「关闭」按钮 → 清空病历状态 → 显示欢迎页面 → 标题栏恢复为"未生成病历"
+
+---
+
+## 2026-05-27 新增 ICD-11 术语规范化后处理步骤
+
+### 问题背景
+
+`TerminologyService` 初始化时已加载 ICD-11 中文术语库（`ChineseTermIndexer.load_icd11_terms()`）和口语化同义词映射表（`colloquial_synonyms.json`），但四阶段流水线从未调用术语规范化——`DirectSOAPGenerationStage` 仅依赖 LLM 内置知识，未利用本地 ICD-11 知识库。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 添加 `_normalize_terms_in_draft()` 方法 | ✅ | 在 `PipelineOrchestrator` 中新增后处理方法，遍历 SOAP 各节的 value 字段，执行口语词替换 + ICD-11 术语匹配 |
+| 添加 `_find_terms_in_text()` 静态方法 | ✅ | 从文本中提取 2-6 字中文候选医学术语，用于 ICD-11 匹配 |
+| 在两种处理模式中调用 | ✅ | `process_transcript()` 和 `process_with_callback()` 中，阶段2完成后、阶段3开始前调用 `_normalize_terms_in_draft()`（阶段2.5） |
+| 仅中文模式生效 | ✅ | 英文模式跳过术语规范化 |
+
+### 规范化步骤
+
+1. **口语词替换**：加载 `colloquial_synonyms.json`（如"发烧"→"发热"、"拉肚子"→"腹泻"），直接替换 SOAP 草稿中的口语词
+2. **ICD-11 匹配**：对 SOAP 各节文本提取 2-6 字医学术语，通过 `ChineseTermClient.search_term()` 在本地 ICD-11 数据中进行模糊匹配
+3. **遍历所有 SOAP 节**：subjective、objective、assessment、plan 四个节的 value 字段均参与规范化
+4. **日志记录**：每次替换都通过 `logger.info/debug` 输出，方便追踪
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `backend/services/pipeline/orchestrator.py` | 新增 `ChineseTermIndexer` 导入；新增 `_normalize_terms_in_draft()` 和 `_find_terms_in_text()` 方法；在 `process_transcript()` 和 `process_with_callback()` 中添加阶段2.5调用 |
+
+---
+
+## 2026-05-27 删除前端 LLM 标注片段展示
+
+### 问题背景
+
+当前四阶段流水线使用 `DirectSOAPGenerationStage` 直接从转写文本生成病历草稿，**不再经过 LLM 标注阶段**。但前端 `editor.js` 和 `emr.js` 仍保留"LLM 标注片段"标签和表格列，展示误导性信息。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 删除 editor.js 中的 LLM 标注片段 | ✅ | 移除 `<div class="evidence-label">LLM标注片段</div>` 和 `<div class="evidence-content">`，标签改为"原始对话转写"；表格移除"标注片段"列头和对应 `<td>` |
+| 删除 emr.js 中的 LLM 标注片段 | ✅ | 移除 `<div class="evidence-label">LLM标注片段：</div>` 和 `<div class="evidence-content">`，标签改为"原始对话转写："；表格移除"标注片段"列头和对应 `<td>` |
+| 后端字段保留 | ✅ | `EvidenceSpan` 模型中的 `content` 字段保留（向后兼容），数据库和 API 不做修改 |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `frontend/js/editor.js` | 删除 LLM 标注片段标签和表格列，标签改为"原始对话转写" |
+| `frontend/js/emr.js` | 删除 LLM 标注片段标签和表格列，标签改为"原始对话转写：" |
+
+---
+
+## 2026-05-27 精简 direct_soap_generation 提示词
+
+### 变更说明
+
+精简 `direct_soap_generation` 提示词，去掉三层诊断策略、幻觉检测、evidence_traces 构建规则等复杂指令。提示词从 ~87 行缩减至 ~40 行，仅保留基础 SOAP 字段生成和 `source_turn_indices` 标注。幻觉检测和证据遗漏交给后续质量检查阶段（ClaimVerificationStage、FieldRevisionStage）处理。
+
+### 精简对比
+
+| 项目 | 精简前 | 精简后 |
+|------|--------|--------|
+| 提示词长度 | ~87 行 | ~40 行 |
+| 核心原则 | 3 条详细规则（防编造、三步验证） | 无（交给质量检查） |
+| 生成规则 | 逐段详细说明（S/O/A/P 各有子规则） | 仅列字段名 |
+| 诊断策略 | 三层诊断 per-item（explicit/suspected/symptom） | 无，直接填 diagnosis |
+| 输出字段 | 含 assessment_items、plan_items（medications/tests/follow_up/education） | 无，仅基础 SOAP 字段 |
+| source_turn_indices | 保留 | 保留 |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `backend/services/llm/prompts.py` | 精简 `direct_soap_generation` 模板，移除三层诊断策略、幻觉检测指令、assessment_items/plan_items 输出 |
+
+### 下游兼容性
+
+- `direct_soap_generation.py` 的 `_empty_draft()` 和 `_build_evidence_traces()` 无需修改，与精简输出结构一致
+- `emr_persistence.py` 有 `if assessment_items:` 守卫，跳过空的 assessment_items
+- `evidence_enricher.py` 有 `if assessment_items:` 守卫，跳过空的 assessment_items

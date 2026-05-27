@@ -12,22 +12,19 @@ from ..llm.prompts import PromptManager
 from ..evaluation_service import EMREvaluationService
 from ..validation_service import ValidationService
 from ..terminology_service import TerminologyService
-from ..fact_service import FactService
+from ..chinese_term_indexer import ChineseTermIndexer
 from ...config import settings
 from ...utils.logger import logger
 from .utils import parse_json_response, JSONParseError
 from .base import PipelineContext
 from .speaker_handler import SpeakerHandler, FIELD_TYPE_MAPPING, FIELD_EXPECTED_ROLE
 from .debug_interactor import DebugInteractor
-from .evidence_enricher import EvidenceEnricher
 from .emr_persistence import EMRPersistence
 from .interactive import InteractivePipelineService
 from .stages.turn_cleaning import TurnCleaningStage
-from .stages.fact_extraction import FactExtractionStage
-from .stages.fact_consolidation import FactConsolidationStage
-from .stages.term_normalization import TermNormalizationStage
-from .stages.soap_generation import SOAPGenerationStage
-from .stages.verification import VerificationStage
+from .stages.direct_soap_generation import DirectSOAPGenerationStage
+from .stages.claim_verification import ClaimVerificationStage
+from .stages.field_revision import FieldRevisionStage
 
 
 def run_async(coro):
@@ -82,7 +79,7 @@ class PipelineOrchestrator:
         visit_id: str,
         save_evidence: bool = True
     ) -> Dict[str, Any]:
-        logger.info(f"=== 开始多阶段LLM处理: {visit_id} ===")
+        logger.info(f"=== 开始多阶段LLM处理(4阶段): {visit_id} ===")
         start_time = time.time()
         
         turns = self.db.query(TranscriptTurn).filter(
@@ -104,6 +101,7 @@ class PipelineOrchestrator:
             save_evidence=save_evidence
         )
         
+        # 阶段1: 转写清洗与角色纠错（不变）
         TurnCleaningStage().execute(ctx)
         all_role_mappings = ctx.all_role_mappings
         all_cleaned_turns = ctx.all_cleaned_turns
@@ -111,81 +109,33 @@ class PipelineOrchestrator:
         
         time.sleep(self.STAGE_DELAY)
         
-        try:
-            fact_result = FactExtractionStage().execute(ctx)
-            logger.info(f"事实抽取阶段完成，共 {fact_result.get('fact_count', 0)} 条事实，耗时统计见上")
-        except JSONParseError as e:
-            logger.error(f"阶段2 JSON解析失败，停止后续处理: {visit_id}")
-            return {
-                "status": "failed",
-                "error": "JSON解析失败",
-                "stage": "fact_extraction",
-                "llm_response": e.get_full_response(),
-                "role_mapping": all_role_mappings,
-                "cleaned_turns": all_cleaned_turns,
-                "combined_text": combined_text
-            }
+        # 阶段2: 直接草稿生成
+        logger.info("阶段2: 直接草稿生成")
+        soap_result = DirectSOAPGenerationStage().execute(ctx)
+        emr_draft = ctx.emr_draft
+        logger.info(f"直接草稿生成完成, 状态={soap_result.get('status')}")
+        
+        # 阶段2.5: ICD-11术语规范化（后处理草稿）
+        ctx.emr_draft = self._normalize_terms_in_draft(ctx.emr_draft)
         
         time.sleep(self.STAGE_DELAY)
         
-        fact_service = FactService(self.db)
-        fact_records = fact_service.get_facts_by_visit(visit_id)
-        ctx.fact_records = fact_records
-        consolidation_result = FactConsolidationStage().execute(ctx)
-        logger.info(f"事实收束阶段完成，耗时统计见上")
+        # 阶段3: 后置核查
+        logger.info("阶段3: 后置核查")
+        verification_result = ClaimVerificationStage().execute(ctx)
+        verification_issues = ctx.verification_issues
+        logger.info(f"后置核查完成, 问题数={verification_result.get('issues_count', 0)}")
         
         time.sleep(self.STAGE_DELAY)
         
-        fact_records = fact_service.get_facts_by_visit(visit_id)
-        ctx.fact_records = fact_records
-        logger.info(f"从数据库查询到 {len(fact_records)} 条原子事实用于阶段3规范化")
-        normalized_result = TermNormalizationStage().execute(ctx)
-        logger.info(f"术语规范化阶段完成，耗时统计见上")
+        # 阶段4: 字段级修订与落盘
+        logger.info("阶段4: 字段级修订与落盘")
+        FieldRevisionStage().execute(ctx)
+        emr_final = ctx.emr_draft  # FieldRevisionStage已更新ctx.emr_draft
         
-        time.sleep(self.STAGE_DELAY)
-        
-        extraction_result = fact_result
-        
-        time.sleep(self.STAGE_DELAY)
-        
-        fact_records = fact_service.get_facts_by_visit(visit_id)
-        ctx.fact_records = fact_records
-        
-        try:
-            soap_result = SOAPGenerationStage().execute(ctx)
-            emr_draft = ctx.emr_draft
-            so_used_fact_ids = emr_draft.get("so_used_fact_ids", [])
-            assessment_items = emr_draft.get("assessment_items", [])
-            plan_items = emr_draft.get("plan_items", {})
-            logger.info(f"病历生成阶段完成（SO/AP分节），S/O使用fact数={len(so_used_fact_ids)}, 评估项数={len(assessment_items)}")
-        except JSONParseError as e:
-            logger.error(f"阶段4 JSON解析失败，停止后续处理: {visit_id}")
-            return {
-                "status": "failed",
-                "error": "JSON解析失败",
-                "stage": "soap_generation",
-                "llm_response": e.get_full_response(),
-                "role_mapping": all_role_mappings,
-                "cleaned_turns": all_cleaned_turns,
-                "combined_text": combined_text,
-                "fact_result": fact_result,
-                "normalized_result": normalized_result
-            }
-        
-        time.sleep(self.STAGE_DELAY)
-        
-        fact_records = fact_service.get_facts_by_visit(visit_id)
-        ctx.fact_records = fact_records
-        verification_result = VerificationStage().execute(ctx)
-        logger.info(f"核查修订阶段完成，耗时统计见上")
-        
-        emr_final = verification_result.get("soap_final", emr_draft)
-        emr_final["so_used_fact_ids"] = so_used_fact_ids
-        emr_final["assessment_items"] = assessment_items
-        emr_final["plan_items"] = plan_items
-        
+        # 后处理
         emr_final = self.emr_persistence.normalize_format(emr_final)
-        emr_final = EvidenceEnricher.enrich(emr_final, fact_records, turns)
+        # 证据溯源已在DirectSOAPGenerationStage._build_evidence_traces()中完成
         if save_evidence and visit_id:
             self.emr_persistence.save_evidence_spans_from_emr(emr_final, visit_id)
             self.emr_persistence.save_emr_record(emr_final, visit_id)
@@ -199,12 +149,9 @@ class PipelineOrchestrator:
             "role_mapping": all_role_mappings,
             "cleaned_turns": all_cleaned_turns,
             "combined_text": combined_text,
-            "fact_result": fact_result,
-            "normalized_result": normalized_result,
-            "extraction_result": extraction_result,
             "emr_result": emr_final,
             "emr_draft": emr_draft,
-            "verification_result": verification_result,
+            "verification_issues": verification_issues,
             "processing_time": total_time
         }
     
@@ -238,7 +185,7 @@ class PipelineOrchestrator:
                 progress_callback(event)
             return event
         
-        logger.info(f"=== 开始多阶段LLM处理(带回调): {visit_id} ===")
+        logger.info(f"=== 开始多阶段LLM处理(带回调, 4阶段): {visit_id} ===")
         start_time = time.time()
         
         turns = self.db.query(TranscriptTurn).filter(
@@ -261,6 +208,7 @@ class PipelineOrchestrator:
             save_evidence=save_evidence
         )
         
+        # 阶段1: 转写清洗与角色纠错（不变）
         segment_start = time.time()
         yield emit_progress(1, "转写清洗与角色纠错", "running", "正在处理段落...")
         
@@ -274,95 +222,55 @@ class PipelineOrchestrator:
         
         time.sleep(self.STAGE_DELAY)
         
-        yield emit_progress(2, "事实抽取与证据绑定", "running", "正在抽取临床事实...")
+        # 阶段2: 直接草稿生成
+        yield emit_progress(2, "直接草稿生成", "running", "正在基于清洗文本直接生成SOAP草稿...")
         
-        try:
-            fact_result = FactExtractionStage().execute(ctx)
-            logger.info(f"事实抽取阶段完成，共 {fact_result.get('fact_count', 0)} 条事实")
-            
-            yield emit_progress(2, "事实抽取与证据绑定", "completed", 
-                               f"抽取 {fact_result.get('fact_count', 0)} 条原子事实")
-        except JSONParseError as e:
-            logger.error(f"阶段2 JSON解析失败，停止后续处理: {visit_id}")
-            yield emit_progress(2, "事实抽取与证据绑定", "failed", 
-                               "JSON解析失败，请查看日志获取完整LLM响应",
-                               {"llm_response_preview": e.get_full_response()[:500]})
-            return
+        soap_result = DirectSOAPGenerationStage().execute(ctx)
+        emr_draft = ctx.emr_draft
         
-        time.sleep(self.STAGE_DELAY)
+        # ICD-11术语规范化（后处理草稿）
+        ctx.emr_draft = self._normalize_terms_in_draft(ctx.emr_draft)
         
-        fact_service = FactService(self.db)
-        fact_records = fact_service.get_facts_by_visit(visit_id)
-        ctx.fact_records = fact_records
+        yield emit_progress(2, "直接草稿生成", "completed", 
+                           f"草稿生成完成，状态={soap_result.get('status')}")
         
-        yield emit_progress(2.5, "事实收束", "running", "正在合并重复事实...")
-        
-        consolidation_result = FactConsolidationStage().execute(ctx)
-        
-        resolved_count = consolidation_result.get("resolved_count", 0) if consolidation_result else 0
-        yield emit_progress(2.5, "事实收束", "completed", 
-                           f"合并 {resolved_count} 条重复事实")
+        # 发送draft_ready事件
+        draft_event = emit_progress(2, "直接草稿生成", "completed", 
+                                    "草稿已就绪")
+        draft_event["is_draft_ready"] = True
+        draft_event["emr_draft"] = ctx.emr_draft
+        logger.info(f"yield draft_ready事件: emr_draft类型={type(ctx.emr_draft).__name__}, "
+                    f"subjective keys={list(ctx.emr_draft.get('subjective', {}).keys())[:3] if ctx.emr_draft else 'None'}")
+        yield draft_event
         
         time.sleep(self.STAGE_DELAY)
         
-        fact_records = fact_service.get_facts_by_visit(visit_id)
-        ctx.fact_records = fact_records
-        logger.info(f"从数据库查询到 {len(fact_records)} 条原子事实用于阶段3规范化")
+        # 阶段3: 后置核查
+        yield emit_progress(3, "后置核查", "running", "正在进行Claim核查、Checklist核查和硬规则核查...")
         
-        qualifying_count = len([f for f in fact_records if f.normalization_needed and f.mention])
-        yield emit_progress(3, "选择性术语规范化", "running", 
-                           f"正在规范化 {qualifying_count} 个术语...")
+        verification_result = ClaimVerificationStage().execute(ctx)
+        verification_issues = ctx.verification_issues
         
-        normalized_result = TermNormalizationStage().execute(ctx)
-        
-        yield emit_progress(3, "选择性术语规范化", "completed", 
-                           f"规范化 {normalized_result.get('processed_count', 0)} 个术语")
+        yield emit_progress(3, "后置核查", "completed", 
+                           f"核查完成，发现 {verification_result.get('issues_count', 0)} 个问题")
         
         time.sleep(self.STAGE_DELAY)
         
-        extraction_result = fact_result
+        # 阶段4: 字段级修订与落盘
+        yield emit_progress(4, "字段级修订与落盘", "running", "正在根据核查问题修订SOAP草稿...")
         
-        fact_records = fact_service.get_facts_by_visit(visit_id)
-        ctx.fact_records = fact_records
-        yield emit_progress(4, "分节生成SOAP病历", "running", "正在生成主观和客观部分...")
+        FieldRevisionStage().execute(ctx)
+        emr_final = ctx.emr_draft  # FieldRevisionStage已更新ctx.emr_draft
         
-        try:
-            soap_result = SOAPGenerationStage().execute(ctx)
-            emr_draft = ctx.emr_draft
-            so_used_fact_ids = emr_draft.get("so_used_fact_ids", [])
-            assessment_items = emr_draft.get("assessment_items", [])
-            plan_items = emr_draft.get("plan_items", {})
-            
-            yield emit_progress(4, "分节生成SOAP病历", "completed", 
-                               f"生成完成，S/O使用 {len(so_used_fact_ids)} 条事实")
-        except JSONParseError as e:
-            logger.error(f"阶段4 JSON解析失败，停止后续处理: {visit_id}")
-            yield emit_progress(4, "分节生成SOAP病历", "failed", 
-                               "JSON解析失败，请查看日志获取完整LLM响应",
-                               {"llm_response_preview": e.get_full_response()[:500]})
-            return
-        
-        time.sleep(self.STAGE_DELAY)
-        
-        fact_records = fact_service.get_facts_by_visit(visit_id)
-        ctx.fact_records = fact_records
-        yield emit_progress(5, "核查与修订", "running", "正在核查病历完整性...")
-        
-        verification_result = VerificationStage().execute(ctx)
-        
-        emr_final = verification_result.get("soap_final", emr_draft)
-        emr_final["so_used_fact_ids"] = so_used_fact_ids
-        emr_final["assessment_items"] = assessment_items
-        emr_final["plan_items"] = plan_items
-        
+        # 后处理
         emr_final = self.emr_persistence.normalize_format(emr_final)
-        emr_final = EvidenceEnricher.enrich(emr_final, fact_records, turns)
+        # 证据溯源已在DirectSOAPGenerationStage._build_evidence_traces()中完成
         if save_evidence and visit_id:
             self.emr_persistence.save_evidence_spans_from_emr(emr_final, visit_id)
             self.emr_persistence.save_emr_record(emr_final, visit_id)
             logger.info(f"已保存最终病历记录及证据溯源到数据库: visit_id={visit_id}")
         
-        yield emit_progress(5, "核查与修订", "completed", "核查完成")
+        yield emit_progress(4, "字段级修订与落盘", "completed", "修订完成，病历已落盘")
         
         total_time = time.time() - start_time
         logger.info(f"=== 多阶段LLM处理完成(带回调): {visit_id}, 总耗时: {total_time:.2f}秒 ===")
@@ -372,12 +280,9 @@ class PipelineOrchestrator:
             "role_mapping": all_role_mappings,
             "cleaned_turns": all_cleaned_turns,
             "combined_text": combined_text,
-            "fact_result": fact_result,
-            "normalized_result": normalized_result,
-            "extraction_result": extraction_result,
             "emr_result": emr_final,
             "emr_draft": emr_draft,
-            "verification_result": verification_result,
+            "verification_issues": verification_issues,
             "processing_time": total_time
         }
         
@@ -424,7 +329,121 @@ class PipelineOrchestrator:
         
         return "\n".join(lines)
     
-    # DEPRECATED: replaced by _build_cleaning_prompt()
+    def _normalize_terms_in_draft(self, emr_draft: Dict[str, Any]) -> Dict[str, Any]:
+        """使用本地ICD-11知识库对SOAP草稿中的医学术语进行规范化。
+
+        流程：
+        1. 使用colloquial_synonyms.json中的口语化同义词映射进行直接替换
+        2. 使用ChineseTermClient（含ICD-11术语）对剩余术语进行匹配规范化
+        3. 遍历subjective/objective/assessment/plan各字段的value文本
+        4. 日志记录所有替换操作
+        """
+        if not self.terminology_service or not self.terminology_service.chinese_term_client:
+            logger.info("ChineseTermClient不可用，跳过ICD-11术语规范化")
+            return emr_draft
+
+        if self.language != "zh":
+            logger.info("非中文模式，跳过ICD-11术语规范化")
+            return emr_draft
+
+        logger.info("开始ICD-11术语规范化（后处理SOAP草稿）")
+        norm_start = time.time()
+
+        chinese_client = self.terminology_service.chinese_term_client
+        colloquial_synonyms = {}
+        if chinese_client.indexer:
+            colloquial_synonyms = chinese_client.indexer.colloquial_synonyms
+
+        total_replacements = 0
+        sections = ["subjective", "objective", "assessment", "plan"]
+
+        for section_name in sections:
+            section = emr_draft.get(section_name, {})
+            if not isinstance(section, dict):
+                continue
+
+            for field_name, field_data in section.items():
+                if field_name in ("text", "evidence_traces", "assessment_items", "plan_items"):
+                    continue
+                if not isinstance(field_data, dict):
+                    continue
+
+                value = field_data.get("value", "")
+                if not value or not isinstance(value, str) or not value.strip():
+                    continue
+
+                original_value = value
+
+                for colloquial, standard_terms in colloquial_synonyms.items():
+                    if not isinstance(standard_terms, list) or not standard_terms:
+                        continue
+                    standard = standard_terms[0]
+                    if colloquial in value and colloquial != standard:
+                        value = value.replace(colloquial, standard)
+                        total_replacements += 1
+                        logger.debug(
+                            f"同义词替换: '{colloquial}' -> '{standard}' "
+                            f"在 {section_name}.{field_name}"
+                        )
+
+                if value != original_value:
+                    field_data["value"] = value
+                    logger.info(
+                        f"术语规范化: {section_name}.{field_name}: "
+                        f"'{original_value[:50]}...' -> '{value[:50]}...'"
+                    )
+
+                chinese_terms = self._find_terms_in_text(value)
+                if chinese_terms:
+                    for term_text in chinese_terms:
+                        try:
+                            result = chinese_client.search_term(
+                                term=term_text,
+                                term_type=None,
+                                use_fuzzy=True
+                            )
+                            if result and result.matched_term != term_text and result.confidence >= 0.7:
+                                if term_text in value:
+                                    value = value.replace(term_text, result.matched_term)
+                                    total_replacements += 1
+                                    logger.info(
+                                        f"ICD-11术语匹配: '{term_text}' -> '{result.matched_term}' "
+                                        f"(confidence: {result.confidence:.2f}, "
+                                        f"code: {result.code or 'N/A'}) "
+                                        f"在 {section_name}.{field_name}"
+                                    )
+                        except Exception as e:
+                            logger.debug(f"术语搜索异常 '{term_text}': {e}")
+
+                    if value != field_data.get("value", ""):
+                        field_data["value"] = value
+
+        norm_time = time.time() - norm_start
+        if total_replacements > 0:
+            logger.info(
+                f"ICD-11术语规范化完成: {total_replacements} 处替换, "
+                f"耗时: {norm_time:.2f}秒"
+            )
+        else:
+            logger.info(f"ICD-11术语规范化完成: 无需替换, 耗时: {norm_time:.2f}秒")
+
+        return emr_draft
+
+    @staticmethod
+    def _find_terms_in_text(text: str) -> List[str]:
+        """从文本中提取可能的中文医学术语（2-6个中文字符的词组）。
+        用于在ICD-11术语库中进行匹配查找。
+        """
+        terms = []
+        chinese_chars = re.findall(r'[\u4e00-\u9fff]{2,6}', text)
+        seen = set()
+        for term in chinese_chars:
+            if term not in seen:
+                seen.add(term)
+                terms.append(term)
+        return terms
+
+    # DEPRECATED: replaced by _normalize_terms_in_draft which uses ICD-11 local KB
     def _lightweight_normalize(self, facts_data: List[Dict[str, Any]]) -> None:
         """轻量术语规范化：使用ChineseTerm本地库快速匹配，为事实添加normalized_term"""
         if not hasattr(self, 'terminology_service') or not self.terminology_service:
@@ -449,6 +468,7 @@ class PipelineOrchestrator:
         except Exception as e:
             logger.warning(f"轻量规范化失败: {e}")
 
+    # DEPRECATED: replaced by DirectSOAPGenerationStage (no longer uses atomic facts)
     def _save_atomic_facts(self, facts_data: List[Dict[str, Any]], visit_id: str) -> None:
         try:
             saved_count = 0
@@ -518,59 +538,40 @@ class PipelineOrchestrator:
             })
 
         stages.append({
-            "stage": "fact_extraction",
+            "stage": "direct_soap_generation",
             "prompt": "[待阶段1完成后生成]",
-            "description": "阶段2: 事实抽取与证据绑定",
+            "description": "阶段2: 直接草稿生成",
             "instructions": """
-从清洗后的对话轮次中抽取原子临床事实。
-每条事实含：section_candidate(S/O/A/P)、concept_type、mention、polarity、temporality、certainty、speaker、evidence_turn_ids、evidence_text。
-详见 fact_extraction 模板。
+根据清洗后的完整对话文本，一次性生成完整的SOAP病历草稿。
+每个字段包含value和source_turn_indices，用于后续证据溯源。
+详见 direct_soap_generation 模板。
 """,
             "pending": True
         })
 
         stages.append({
-            "stage": "emr_generation_so",
+            "stage": "claim_verification",
             "prompt": "[待阶段2完成后生成]",
-            "description": "阶段3: 分节生成SO（主观+客观）",
+            "description": "阶段3: 后置核查",
             "instructions": """
-根据S/O事实表生成Subjective和Objective两部分。
-S: chief_complaint、history_present_illness、denied_symptoms、past_history
-O: physical_examination、auxiliary_examination
-禁止生成诊断和计划。详见 emr_generation_so 模板。
+三步核查流程：
+A. Claim核查 - 逐claim原子核查（supported/unsupported/not_addressed）
+B. Checklist核查 - 检查SOAP关键信息遗漏
+C. 硬规则核查 - 确定性规则检查（部位矛盾、否定冲突等）
+详见 claim_verification 和 checklist_verification 模板。
 """,
             "pending": True
         })
 
         stages.append({
-            "stage": "emr_generation_assessment",
+            "stage": "field_revision",
             "prompt": "[待阶段3完成后生成]",
-            "description": "阶段4-1: 生成评估(Assessment)",
+            "description": "阶段4: 字段级修订与落盘",
             "instructions": """
-按三层诊断策略生成评估：explicit_diagnosis / suspected_diagnosis / symptom_based_assessment。
-输出assessment_items数组。详见 emr_generation_assessment 模板。
-""",
-            "pending": True
-        })
-
-        stages.append({
-            "stage": "emr_generation_plan",
-            "prompt": "[待阶段4-1完成后生成]",
-            "description": "阶段4-2: 生成计划(Plan)",
-            "instructions": """
-拆分为4个子字段：medications、tests、follow_up、education。
-每条必须有fact_id依据。详见 emr_generation_plan 模板。
-""",
-            "pending": True
-        })
-
-        stages.append({
-            "stage": "verification",
-            "prompt": "[待阶段4-2完成后生成]",
-            "description": "阶段5: 核查与修订",
-            "instructions": """
-四维度核查：unsupported_claims、missing_critical_facts、internal_conflicts、certainty_errors。
-输出issues问题清单和修订后的soap_final。详见 soap_verification 模板。
+根据核查问题清单对SOAP草稿进行定点修订。
+仅修改有问题的字段，保留无问题字段不变。
+修订后执行schema确定性约束校验。
+详见 field_revision 模板。
 """,
             "pending": True
         })

@@ -1,3 +1,4 @@
+# DEPRECATED: replaced by DirectSOAPGenerationStage._build_evidence_traces() — LLM内嵌输出 source_turn_indices，后端轻量查表构建 evidence_traces。
 import time
 from typing import Dict, Any, List
 from ...models import TranscriptTurn, AtomicFact
