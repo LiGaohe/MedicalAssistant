@@ -308,7 +308,12 @@ window.App = (function() {
             xCircle: '<svg ' + attrs + '><circle cx="12" cy="12" r="10"/><path d="m15 9l-6 6m0-6l6 6"/></svg>',
             loader: '<svg ' + attrs + ' class="icon-spin"><path d="M12 2v4m4.2 1.8l2.9-2.9M18 12h4m-5.8 4.2l2.9 2.9M12 18v4m-7.1-2.9l2.9-2.9M2 12h4M4.9 4.9l2.9 2.9"/></svg>',
             refreshCw: '<svg ' + attrs + '><path d="M3 12a9 9 0 0 1 9-9a9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5m5 4a9 9 0 0 1-9 9a9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>',
-            circlePause: '<svg ' + attrs + '><circle cx="12" cy="12" r="10"/><path d="M10 15V9m4 6V9"/></svg>'
+            circlePause: '<svg ' + attrs + '><circle cx="12" cy="12" r="10"/><path d="M10 15V9m4 6V9"/></svg>',
+            circle: '<svg ' + attrs + '><circle cx="12" cy="12" r="10"/></svg>',
+            square: '<svg ' + attrs + '><rect width="18" height="18" x="3" y="3" rx="2"/></svg>',
+            checkSquare: '<svg ' + attrs + '><rect width="18" height="18" x="3" y="3" rx="2"/><path d="m9 12l2 2l4-4"/></svg>',
+            alertTriangle: '<svg ' + attrs + '><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 2 21h20a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>',
+            play: '<svg ' + attrs + '><polygon points="6 3 20 12 6 21 6 3"/></svg>'
         };
         return icons[name] || '';
     }

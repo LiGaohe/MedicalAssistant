@@ -217,10 +217,6 @@ assessment_items每项含：text, certainty_level(high/medium/low), supporting_f
                     print("""
 [DEPRECATED] 该阶段已废弃。新版流程使用 turn_cleaning + fact_extraction 替代。
 """)
-                elif stage == "term_normalization":
-                    print("""
-[DEPRECATED] 全文本术语规范化已废弃。新版使用基于事实表的逐条规范化(阶段3)，不需要手动输入。
-""")
                 elif stage == "field_extraction":
                     print("""
 [DEPRECATED] 字段抽取阶段已废弃。新版流程中事实表本身已是结构化数据。

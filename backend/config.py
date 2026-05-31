@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     ALT_PHRASING_MAX_COUNT: int = 2
     ENABLE_MULTI_CONCEPT_DECOMPOSE: bool = True
 
+    DRAFT_GENERATION_MODE: str = "free_text"
+
     class Config:
         env_file = ".env"
         case_sensitive = True

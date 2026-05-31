@@ -1217,6 +1217,217 @@ Note: Output the most reasonable standard term based on your medical knowledge. 
             return self.cache_service.get_stats()
         return None
 
+    def _extract_medical_terms_with_llm(self, text: str) -> List[str]:
+        logger.info(f"[EXTRACT_TERMS] Extracting medical terms from draft via LLM, text length: {len(text)}")
+        if not self.llm_service:
+            logger.warning("[EXTRACT_TERMS] LLM service not available, skipping term extraction")
+            return []
+
+        try:
+            response = self.llm_service.generate_with_template(
+                "extract_medical_terms",
+                draft_text=text
+            )
+            logger.info(f"[EXTRACT_TERMS] LLM response length: {len(response.text)} characters")
+            raw_text = response.text.strip()
+            raw_text = self._strip_whitespace_padding(raw_text)
+
+            json_match = re.search(r'\[[\s\S]*\]', raw_text)
+            if not json_match:
+                logger.warning("[EXTRACT_TERMS] No valid JSON array in LLM response, skipping term extraction")
+                logger.warning(f"[EXTRACT_TERMS] Raw response: {raw_text[:500]}")
+                return []
+
+            json_str = json_match.group()
+            try:
+                term_objects = json.loads(json_str)
+            except json.JSONDecodeError as e:
+                logger.warning(f"[EXTRACT_TERMS] JSON parse failed: {e}, skipping term extraction")
+                return []
+
+            if not isinstance(term_objects, list):
+                logger.warning(f"[EXTRACT_TERMS] Response is not a list: {type(term_objects)}, skipping term extraction")
+                return []
+
+            terms = []
+            for item in term_objects:
+                if isinstance(item, dict) and "term" in item:
+                    terms.append(item["term"])
+                elif isinstance(item, str):
+                    terms.append(item)
+
+            unique_terms = list(dict.fromkeys(terms))
+            logger.info(f"[EXTRACT_TERMS] LLM extracted {len(unique_terms)} unique medical terms: {unique_terms}")
+            return unique_terms
+
+        except Exception as e:
+            logger.error(f"[EXTRACT_TERMS] LLM extraction failed: {e}, skipping term extraction")
+            return []
+
+    def _llm_standardize_terms(self, terms: List[str]) -> Dict[str, str]:
+        logger.info(f"[LLM_STD] Starting LLM standardization for {len(terms)} terms")
+        if not self.llm_service:
+            logger.warning("[LLM_STD] LLM service not available, returning empty mapping")
+            return {}
+        try:
+            terms_json = json.dumps(terms, ensure_ascii=False)
+            response = self.llm_service.generate_with_template(
+                "term_standardization",
+                terms=terms_json
+            )
+            logger.info(f"[LLM_STD] LLM response length: {len(response.text)} characters")
+            text = response.text.strip()
+            text = self._strip_whitespace_padding(text)
+            json_match = re.search(r'\{[\s\S]*\}', text)
+            if not json_match:
+                logger.warning("[LLM_STD] No valid JSON found in LLM response")
+                return {}
+            json_str = json_match.group()
+            try:
+                result = json.loads(json_str)
+            except json.JSONDecodeError as e:
+                logger.warning(f"[LLM_STD] JSON parse failed, attempting fix: {e}")
+                result = self._try_fix_json(json_str)
+            if result is None or not isinstance(result, dict):
+                logger.error("[LLM_STD] JSON fix also failed or result is not a dict")
+                return {}
+            for original, standardized in result.items():
+                logger.info(f"[LLM_STD] '{original}' -> '{standardized}'")
+            logger.info(f"[LLM_STD] Standardized {len(result)} terms")
+            return result
+        except Exception as e:
+            logger.error(f"[LLM_STD] LLM standardization failed: {e}")
+            return {}
+
+    def _lookup_standardized_terms_zh(self, term_mapping: Dict[str, str]) -> Dict[str, Tuple[str, Optional[str], Optional[str]]]:
+        logger.info(f"[LOOKUP_ZH] Looking up {len(term_mapping)} terms in ICD-11")
+        if not self.chinese_term_client:
+            logger.warning("[LOOKUP_ZH] Chinese term client not available, returning empty dict")
+            return {}
+        result = {}
+        for original_term, llm_term in term_mapping.items():
+            try:
+                exact_result = self.chinese_term_client.search_term(
+                    term=llm_term,
+                    use_fuzzy=False
+                )
+                if exact_result and exact_result.confidence >= 0.9:
+                    result[original_term] = (
+                        exact_result.matched_term,
+                        exact_result.code,
+                        exact_result.code_system
+                    )
+                    logger.info(f"[LOOKUP_ZH] Exact match: '{original_term}' -> LLM:'{llm_term}' -> '{exact_result.matched_term}' (code: {exact_result.code})")
+                    continue
+                fuzzy_result = self.chinese_term_client.search_term(
+                    term=llm_term,
+                    use_fuzzy=True
+                )
+                if fuzzy_result and fuzzy_result.confidence >= 0.7:
+                    result[original_term] = (
+                        fuzzy_result.matched_term,
+                        fuzzy_result.code,
+                        fuzzy_result.code_system
+                    )
+                    logger.info(f"[LOOKUP_ZH] Fuzzy match: '{original_term}' -> LLM:'{llm_term}' -> '{fuzzy_result.matched_term}' (code: {fuzzy_result.code}, confidence: {fuzzy_result.confidence:.2f})")
+                    continue
+                result[original_term] = (llm_term, None, None)
+                logger.info(f"[LOOKUP_ZH] No match, keeping LLM result: '{original_term}' -> '{llm_term}'")
+            except Exception as e:
+                logger.error(f"[LOOKUP_ZH] Lookup failed for '{llm_term}': {e}")
+                result[original_term] = (llm_term, None, None)
+        logger.info(f"[LOOKUP_ZH] Lookup completed: {len(result)} results")
+        return result
+
+    def _lookup_standardized_terms_en(self, term_mapping: Dict[str, str]) -> Dict[str, Tuple[str, Optional[str], Optional[str]]]:
+        logger.info(f"[LOOKUP_EN] Looking up {len(term_mapping)} terms in UMLS")
+        if not self.umls_client:
+            logger.warning("[LOOKUP_EN] UMLS client not available, returning empty dict")
+            return {}
+        result = {}
+        for original_term, llm_term in term_mapping.items():
+            try:
+                search_result = self.umls_client.search_term(llm_term, language="ENG")
+                if search_result.candidates:
+                    preferred_candidates = [c for c in search_result.candidates if c.preferred]
+                    if preferred_candidates:
+                        best = max(preferred_candidates, key=lambda c: c.score)
+                    else:
+                        best = max(search_result.candidates, key=lambda c: c.score)
+                    result[original_term] = (best.term, best.cui, None)
+                    logger.info(f"[LOOKUP_EN] Match: '{original_term}' -> LLM:'{llm_term}' -> '{best.term}' (CUI: {best.cui}, score: {best.score:.2f})")
+                    continue
+                result[original_term] = (llm_term, None, None)
+                logger.info(f"[LOOKUP_EN] No match, keeping LLM result: '{original_term}' -> '{llm_term}'")
+            except Exception as e:
+                logger.error(f"[LOOKUP_EN] Lookup failed for '{llm_term}': {e}")
+                result[original_term] = (llm_term, None, None)
+        logger.info(f"[LOOKUP_EN] Lookup completed: {len(result)} results")
+        return result
+
+    def normalize_draft_terms(self, text: str) -> Dict[str, str]:
+        logger.info(f"[NORM_DRAFT] Starting draft term normalization, text length: {len(text)}")
+        start_time = time.time()
+
+        terms = self._extract_medical_terms_with_llm(text)
+        if not terms:
+            logger.info("[NORM_DRAFT] No terms extracted, returning empty dict")
+            return {}
+        logger.info(f"[NORM_DRAFT] Extracted {len(terms)} medical terms: {terms}")
+
+        pre_matched = {}
+        terms_needing_llm = []
+        if self.language == "zh" and self.chinese_term_client:
+            for term in terms:
+                try:
+                    exact_result = self.chinese_term_client.search_term(term=term, use_fuzzy=False)
+                    if exact_result and exact_result.confidence >= 0.9:
+                        if term != exact_result.matched_term:
+                            pre_matched[term] = exact_result.matched_term
+                            logger.info(f"[NORM_DRAFT] Pre-check exact match: '{term}' -> '{exact_result.matched_term}' (skip LLM)")
+                        continue
+                except Exception as e:
+                    logger.debug(f"[NORM_DRAFT] Pre-check failed for '{term}': {e}")
+                terms_needing_llm.append(term)
+        elif self.language != "zh" and self.umls_client:
+            for term in terms:
+                try:
+                    search_result = self.umls_client.search_term(term, language="ENG")
+                    if search_result.candidates:
+                        best = search_result.candidates[0]
+                        if best.score >= 0.9:
+                            if term != best.term:
+                                pre_matched[term] = best.term
+                                logger.info(f"[NORM_DRAFT] Pre-check UMLS match: '{term}' -> '{best.term}' (skip LLM)")
+                            continue
+                except Exception as e:
+                    logger.debug(f"[NORM_DRAFT] Pre-check UMLS failed for '{term}': {e}")
+                terms_needing_llm.append(term)
+        else:
+            terms_needing_llm = list(terms)
+
+        if pre_matched:
+            logger.info(f"[NORM_DRAFT] Pre-check matched {len(pre_matched)} terms, {len(terms_needing_llm)} terms need LLM")
+
+        llm_result = {}
+        if terms_needing_llm:
+            term_mapping = self._llm_standardize_terms(terms_needing_llm)
+            if term_mapping:
+                if self.language == "zh":
+                    lookup_result = self._lookup_standardized_terms_zh(term_mapping)
+                else:
+                    lookup_result = self._lookup_standardized_terms_en(term_mapping)
+                for original_term, (final_term, _, _) in lookup_result.items():
+                    if original_term != final_term:
+                        llm_result[original_term] = final_term
+            else:
+                logger.warning("[NORM_DRAFT] LLM standardization failed for remaining terms")
+
+        replacement_map = {**pre_matched, **llm_result}
+        elapsed = time.time() - start_time
+        logger.info(f"[NORM_DRAFT] Completed: extracted={len(terms)}, pre_matched={len(pre_matched)}, llm_processed={len(terms_needing_llm)}, replacements={len(replacement_map)}, elapsed={elapsed:.2f}s")
+        return replacement_map
+
     def _batch_select_candidates(
         self,
         term_candidates: Dict[str, List[UMLSCandidate]],

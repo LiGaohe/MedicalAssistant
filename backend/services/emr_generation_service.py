@@ -61,6 +61,9 @@ class EMRGenerationService:
         else:
             template_requirements = "符合中国医疗病历书写规范"
         
+        logger.info(f"=== 开始LLM病历生成 === visit_id={visit_id}, language={self.language}")
+        logger.debug(f"聚合数据字段数: {len(extracted_data)}, 对话轮数: {len(turns)}")
+        
         try:
             response = self.llm_service.generate_with_template(
                 "emr_generation_with_role",
@@ -69,7 +72,13 @@ class EMRGenerationService:
                 template_requirements=template_requirements
             )
             
+            logger.info(f"LLM病历生成成功 - 响应长度: {len(response.text)} 字符")
+            logger.debug(f"LLM响应模型: {response.model}, 提供商: {response.provider}")
+            logger.debug(f"LLM响应内容预览: {response.text[:500]}...")
+            
             result = json.loads(response.text)
+            
+            logger.debug(f"解析后的病历JSON字段: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
             
             latest_version = self._get_latest_version(visit_id)
             
@@ -81,10 +90,16 @@ class EMRGenerationService:
                 evidence_mapping=self._build_evidence_mapping(items)
             )
             
+            logger.info(f"病历对象创建成功 - visit_id={visit_id}, version={emr.version}")
             return emr
             
+        except json.JSONDecodeError as e:
+            logger.error(f"LLM响应JSON解析失败: {e}")
+            logger.warning("回退到模板生成病历")
+            return self._generate_by_template(visit_id, items, turns)
         except Exception as e:
-            logger.error(f"LLM generation failed: {e}")
+            logger.error(f"LLM generation failed: {e}", exc_info=True)
+            logger.warning("回退到模板生成病历")
             return self._generate_by_template(visit_id, items, turns)
             
     def _generate_by_template(

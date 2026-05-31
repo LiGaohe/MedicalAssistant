@@ -1,5 +1,1592 @@
 # 完成状态记录
 
+## 2026-05-31 消融实验关键召回率评估完成
+
+### 评估概述
+
+使用 [evaluate_ablation_completeness.py](file:///d:/practice/MedicalAssisstant/scripts/evaluate_ablation_completeness.py) 对三种消融配置的运行结果执行 LLM 完整性评估（CompletenessEvaluator），每样本2次 LLM 调用（关键事实提取 + 覆盖评估），共60次调用，0出错。
+
+### 评估结果
+
+| 配置 | 关键召回率 (%) | 加权召回率 (%) | 0%样本数 |
+|:---|---:|---:|---:|
+| − 术语规范化 | **40.5** | **42.7** | 4 |
+| − 后置核查 | **67.0** | **70.2** | 1 |
+| − 字段修订 | **45.1** | **47.9** | 4 |
+
+### LLM IO 日志
+
+所有 LLM 输入输出记录在 `data/logs/llm_io/ablation_completeness_20260531.jsonl`。
+
+### 文档更新
+
+**量化实验结果.md**：
+
+- 表三消融实验结果：填充三种消融配置的关键召回率数据
+- 脚注¹³：扩展说明关键召回率数据来源
+- 新增脚注¹⁴：标注完整管线和−幻觉检查的关键召回率待补充
+
+---
+
+## 2026-05-31 消融实验完成
+
+### 实验概述
+
+完成了三种消融配置的实验运行，每种配置运行10个样本，用于量化Pipeline各关键阶段对最终病历质量的独立贡献。
+
+### 实验配置
+
+| 配置 | 跳过阶段 | 样本数 | 平均耗时 | 结果文件 |
+|:---|:---|---:|---:|:---|
+| − 术语规范化 | `skip_term_norm=True` | 10 | 161.3s | [ablation_no_term_norm_20260531_161309.jsonl](file:///d:/practice/MedicalAssisstant/data/experiments/results/ablation_no_term_norm_20260531_161309.jsonl) |
+| − 后置核查 | `skip_verification=True` | 10 | 127.4s | [ablation_no_verification_20260531_165022.jsonl](file:///d:/practice/MedicalAssisstant/data/experiments/results/ablation_no_verification_20260531_165022.jsonl) |
+| − 字段修订 | `skip_field_revision=True` | 10 | 198.0s | [ablation_no_field_revision_20260531_171229.jsonl](file:///d:/practice/MedicalAssisstant/data/experiments/results/ablation_no_field_revision_20260531_171229.jsonl) |
+
+### 实验结果
+
+| 配置 | 事实支持率 (%) | 幻觉率 (%) | 总事实数 | 无支持事实数 |
+|:---|---:|---:|---:|---:|
+| 完整管线（六阶段） | **96.4** | **4.2** | 166 | 7 |
+| − 术语规范化 | **98.0** | **3.2** | 157 | 5 |
+| − 后置核查 | **99.2** | **0.7** | 134 | 1 |
+| − 字段修订 | **98.3** | **1.7** | 176 | 3 |
+
+### 结果分析
+
+消融实验结果显示，去除某些阶段后事实支持率反而提高、幻觉率降低：
+
+- **− 术语规范化**：事实支持率从96.4%提升至98.0%，幻觉率从4.2%降至3.2%。可能原因：术语规范化可能引入额外术语表述，部分术语与原始对话不完全匹配。
+- **− 后置核查**：事实支持率从96.4%提升至99.2%，幻觉率从4.2%降至0.7%。可能原因：后置核查的Claim核查、Checklist核查等步骤可能引入额外判断，部分判断可能导致误判。
+- **− 字段修订**：事实支持率从96.4%提升至98.3%，幻觉率从4.2%降至1.7%。可能原因：字段修订可能调整部分表述，调整后的表述与原始对话不完全匹配。
+
+### 文档更新
+
+**量化实验结果.md**：
+
+- 表三消融实验结果：填充三种消融配置的事实支持率和幻觉率数据
+- 脚注¹³：添加消融实验数据来源说明，包括各配置的结果文件路径和详细统计
+
+---
+
+## 2026-05-31 修正诊断一致性评估逻辑
+
+### 问题背景
+
+诊断一致性评估采用字符串包含匹配逻辑（`sample_diagnosis in diag_val or diag_val in sample_diagnosis`），但部分样本的匹配结果不正确：
+
+**端到端基线**：
+- 10134898：参考"小儿腹泻"，草稿"腹泻" → 应匹配（当前标记为不匹配）
+- 10144880（两次）：参考"小儿便秘"，草稿"便秘" → 应匹配（当前标记为不匹配）
+- 10100121：参考"小儿支气管炎"，草稿"支气管炎" → 应匹配（当前标记为不匹配）
+
+**简化管线**：
+- 10134898：参考"小儿腹泻"，草稿"腹泻" → 应匹配
+- 10144880：参考"小儿便秘"，草稿"便秘" → 应匹配
+- 10100121：参考"小儿支气管炎"，草稿"支气管炎" → 应匹配
+
+### 变更说明
+
+**量化实验结果.md**：
+
+- 表二安全风险行：诊断一致性从 **22.2%** 修正为 **55.6%**（端到端基线，5/9样本匹配）
+- 表二安全风险行：诊断一致性从 **40.0%** 修正为 **70.0%**（简化管线，7/10样本匹配）
+- 脚注 ⁸：诊断一致性说明从"2/9样本匹配"改为"5/9样本匹配，采用字符串包含匹配逻辑"
+
+### 匹配逻辑说明
+
+诊断一致性采用字符串包含匹配，而非精确匹配：
+
+- "小儿腹泻" 包含 "腹泻" → 匹配
+- "小儿便秘" 包含 "便秘" → 匹配
+- "小儿支气管炎" 包含 "支气管炎" → 匹配
+- "上呼吸道感染" 包含 "上呼吸道感染" → 匹配
+- "新生儿黄疸" 不包含 "母乳性黄疸" → 不匹配（母乳性黄疸是特定类型，但字符串不包含）
+
+---
+
+## 2026-05-31 集成项目评估系统到实验脚本
+
+### 问题背景
+
+前次错误地将关键召回率/遗漏率标记为"不可自动化"，实际项目已有 [CompletenessEvaluator](file:///d:/practice/MedicalAssisstant/backend/services/evaluation/completeness.py) 通过 LLM 自动完成关键事实提取和覆盖检查。同时项目还有 QualityEvaluator（文档质量五维度评分）和 SafetyEvaluator（安全风险检测）。
+
+### 变更说明
+
+**run_batch_experiments.py**:
+
+- 新增 import：`CompletenessEvaluator`、`QualityEvaluator`、`SafetyEvaluator`
+- 新增 `_format_emr_for_evaluation()` 方法：将结构化 EMR dict（嵌套字段格式）转换为评估器期望的文本格式
+- 新增 `_run_llm_evaluation()` 方法：依次运行完整性评估（提取关键事实→检查覆盖）、质量评估、安全评估
+- `run_batch()` 新增 `run_evaluation` 参数：设为 `True` 时 pipeline 完成后自动运行 LLM 评估
+- 新增 `run_evaluate_only()` 方法：对已完成实验的 JSONL 文件运行 LLM 评估（不重跑 pipeline）
+- 新增 `_evaluate_existing_jsonl()` 方法：读取已有 JSONL，跳过已有评估的条目，只对缺失的条目运行评估
+- 新增 CLI 参数：`--evaluate`（实验完成时运行评估）、`--evaluate-only PATH`（仅运行评估）
+
+**aggregate_results.py**:
+
+- 新增 `compute_llm_evaluation_aggregates()` 函数：聚合 recall_rate、omission_rate、quality_score、safety_has_risk_rate
+- `generate_comparison_table()` 输出新增 5 个 LLM 评估字段
+- `main()` 输出新增评估结果打印
+
+**量化实验结果.md**:
+
+- 表三完整性行：关键召回率/遗漏率从"不适用"改为通过 LLM 自动计算的 `[待填充]⁶`
+- 新增脚注 ⁶：说明 CompletenessEvaluator 二步流程和执行方式
+- 新增指标行：文档质量评分、安全风险
+- 未填充指标表：移除"不可自动化"标注
+
+### 可自动化程度总结
+
+| 指标类型 | 自动化方案 | 是否需要人工 |
+|:---|:---|:---|
+| 事实支持率/幻觉率 | Pipeline HallucinationCheckStage（已内置） | 否 |
+| 关键召回率/遗漏率 | CompletenessEvaluator（LLM 提取+检查） | 否 |
+| 结构完整率 | emr_result S/O/A/P 四段检查 | 否 |
+| 字段缺失率 | emr_result 必填字段值检查 | 否 |
+| 诊断一致性 | emr_result.diagnosis 与样本标签对比 | 否 |
+| 文档质量评分 | QualityEvaluator（LLM 五维评分） | 否 |
+| 安全风险 | SafetyEvaluator（LLM 风险检测） | 否 |
+| ASR 转写指标 | 需音频文件 | **是（唯一不可自动化的指标）** |
+
+### 修改文件
+
+| 文件 | 变更内容 |
+|:---|:---|
+| `scripts/run_batch_experiments.py` | 集成 CompletenessEvaluator/QualityEvaluator/SafetyEvaluator；新增 `--evaluate`/`--evaluate-only` 参数 |
+| `scripts/aggregate_results.py` | 新增 `compute_llm_evaluation_aggregates()` 及输出 |
+| `docs/提交/论文/量化实验结果.md` | 修正表三脚注，更新已实现指标、未填充原因 |
+| `docs/completion_status.md` | 本条目 |
+
+## 2026-05-31 修复实验脚本Bug：简化管线实际跑了全部阶段 + 实现质量指标自动计算
+
+### 问题背景
+
+1. **简化管线实际跑了全部阶段**：`process_transcript` 不接受 `skip_verification` 参数，导致简化管线和端到端基线在之前的实验中实际跑了全部 6 个阶段而非预期阶段数
+2. **多个文档质量指标被错误标记为"不可计算"**：项目 Pipeline 已经产出了结构完整率、字段缺失率、诊断一致性所需的所有数据，但实验脚本未保存 `emr_result` 到输出文件
+
+### 变更说明
+
+**orchestrator.py**:
+
+- `process_transcript()` 新增 `skip_verification` 参数：设为 `True` 时，在术语规范化（阶段 2.5）后停止，跳过阶段 5（后置核查）和阶段 6（字段修订）
+
+**run_batch_experiments.py**:
+
+- EXPERIMENT_CONFIGS 中 `simplified` 新增 `skip_verification: True`：简化管线仅执行草稿生成 → 结构化 → 术语规范化（约 2 次 LLM 调用）
+- `run_batch()` 传递 `skip_verification` 参数到 `process_transcript()`
+- 保存 `emr_result` 到输出 JSONL 条目
+- 新增 `_compute_quality_metrics()` 方法：从 `emr_result` 自动计算结构完整率（S/O/A/P 四段是否齐全）、字段缺失率（必填字段是否为空）、诊断一致性（对比数据集诊断标签）
+- 新增 `_summarize_verification_issues()` 方法：修正之前对 `verification_issues` 字典用 `len()` 的错误（应为遍历 5 个类别的子列表长度求和）
+
+**aggregate_results.py**:
+
+- `load_result_files()` 重构：从读取 JSON 文件改为读取 JSONL 行，返回 `Dict[str, List[Dict]]` 结构
+- 新增 `compute_quality_aggregates()`：聚合结构完整率、字段缺失率、诊断一致性
+- 新增 `compute_hallucination_aggregates()`：聚合样本级和累计幻觉率、事实支持率
+- 新增 `compute_verification_aggregates()`：聚合核查问题分类统计
+- `generate_comparison_table()` 和 `main()` 更新输出格式
+
+**量化实验结果.md**:
+
+- 表三脚注更新：结构完整率/字段缺失率/诊断一致性标记为"可自动计算（已实现），待重跑填充"
+- 方案定义更新：简化管线改为"草稿生成 → 结构化 → 术语规范化"三段
+- LLM 调用效率表新增"简化流程"行
+- 实验运行记录更新：标注端到端基线和简化管线数据因脚本 bug 作废
+
+### 可自动计算的指标
+
+| 指标 | 数据来源 | 说明 |
+|:---|:---|:---|
+| 事实支持率/幻觉率 | `hallucination_result.summary` | 之前已实现 |
+| 结构完整率 | `emr_result` SOAP 四段是否齐全 | 本次新增 |
+| 字段缺失率 | 必填字段（主诉/现病史/诊断/治疗方案）value 为空数 | 本次新增 |
+| 诊断一致性 | `emr_result.assessment.diagnosis.value` vs 数据集诊断标签 | 本次新增 |
+| 核查问题分类 | `verification_issues` 字典中 5 类问题分别计数 | 本次新增 |
+
+### 仍需人工的指标
+
+| 指标 | 原因 |
+|:---|:---|
+| 关键召回率/遗漏率 | 需要从对话中人工标注关键事实清单作为参照集，IMCS-MRG 的参考为诊断标签而非逐条事实 |
+
+### 修改文件
+
+| 文件 | 变更内容 |
+|:---|:---|
+| `backend/services/pipeline/orchestrator.py` | `process_transcript()` 新增 `skip_verification` 参数与跳过阶段 5+6 逻辑 |
+| `scripts/run_batch_experiments.py` | simplified 配置加 `skip_verification: True`；保存 `emr_result`；新增 `_compute_quality_metrics()` 和 `_summarize_verification_issues()` |
+| `scripts/aggregate_results.py` | JSONL 读取；新增 `compute_quality_aggregates()` / `compute_hallucination_aggregates()` / `compute_verification_aggregates()` |
+| `docs/提交/论文/量化实验结果.md` | 更新方案定义、脚注、LLM 效率表、未填充指标说明、已填充指标说明 |
+
+## 2026-05-30 创建论文错误分析文档
+
+### 变更说明
+
+创建了 `docs/提交/论文/错误分析.md` 文档，包含以下章节：
+
+1. **概述**：说明错误分析的背景——基于四层评估框架对 SOAP 病历生成中的典型错误进行系统化分类与分析
+2. **错误分类体系总览**：
+   - 六类错误与四层评估框架的对应关系表（幻觉→一致性、遗漏→完整性、术语/结构性→文档质量、诊断层级→安全风险、矛盾→一致性）
+   - 错误类别层级分布图
+   - 错误频率与风险不对称性分析表
+3. **各类错误详细分析**（每类含典型场景、对话示例与错误生成对比、危害分析表）：
+   - 幻觉错误（Hallucination）：凭空生成诊断/药物/检查数值/既往史
+   - 遗漏错误（Omission）：关键阳性症状、过敏史、异常检查结果遗漏
+   - 术语错误（Terminology Error）：对话口语化表述未转换为规范医学术语
+   - 结构性错误（Structural Error）：S/O/A/P 章节内容归类错误
+   - 诊断层级错误（Assessment Error）：诊断确定性拔高/降低、鉴别诊断缺失
+   - 矛盾错误（Contradiction）：部位侧别矛盾、时间矛盾、诊断与计划矛盾
+4. **A/P 高风险字段专项分析**：
+   - 四字段风险特征对比表（S/O 容错大 vs A/P 容错极小）
+   - A 字段典型错误：诊断确定性拔高、鉴别诊断遗漏、诊断凭空生成
+   - P 字段典型错误：用药建议过度、关键检查遗漏、医嘱频次/剂量错误
+   - A/P 错误分布预估表
+5. **错误分布预估**：
+   - 六类错误预估频率分布表（100 份病历中的预估出现例数）
+   - 错误类型交叉分析表（幻觉+遗漏共存、幻觉+诊断层级等四种交叉模式）
+   - 错误来源分析表（六类错误在 Pipeline 七阶段的来源分布）
+6. **系统局限性分析与改进方向**：
+   - 五个固有局限：LLM 事实边界判断模糊性、关键事实清单生成稳定性、多阶段累积误差、LLM 评委自身可靠性、诊断风险评估深度不足
+   - 五个改进方向：多次评估共识机制、关键事实清单人工参与、A/P 生成约束强化、规则引擎覆盖扩展、人工抽查集建立
+7. **总结**：四个核心结论
+
+### 文档特点
+
+- 错误分类完全基于项目的四层评估框架（一致性/完整性/文档质量/安全风险）
+- 每类错误包含典型场景 + 对话片段示例 + 错误生成标注 + 正确参考对照
+- 图表先行、描述在后
+- Markdown 列表与冒号之间遵循空行规则
+- 所有分析推断与项目 Pipeline 架构和已实现的功能模块对齐
+
+## 2026-05-30 论文文档补充 — 实验脚本与论文章节
+
+### 变更说明
+
+根据 `.trae/docs/handoff-论文文档补充.md` 中列出的待完成任务，完成了以下工作：
+
+**第三部分：实验自动化脚本（3 个脚本）**：
+
+1. `scripts/prepare_test_data.py` — 测试数据准备脚本
+   - 从 IMCS-MRG 数据集（test.json, 811 条）中按指定数量抽取样本
+   - 输出标准化的 JSON 格式（含 dialogue_text, turns, references, diagnosis）
+   - 支持 `--stats_only` 模式（仅输出统计信息）和 `--num_samples 0`（全部抽取）
+   - 运行结果：811 条测试样本，平均 40.6 轮对话，10 种儿科诊断
+
+2. `scripts/run_batch_experiments.py` — 批量实验运行脚本
+   - 支持四种实验方案：端到端基线（A）、简化管线（B）、标准管线（C）、完整管线（D）
+   - 支持五种消融配置：完整管线、-术语规范化、-幻觉检查、-后置核查、-字段修订
+   - 通过 PipelineOrchestrator 的 skip_cleaning / skip_hallucination_check / stop_after_draft 参数控制配置
+   - 端到端基线采用单独的单次 LLM 调用实现（不经过流水线）
+   - 每个配置的结果保存为独立 JSON 文件，汇总为 summary.json
+
+3. `scripts/aggregate_results.py` — 评估结果汇总脚本
+   - 读取实验运行结果，计算 ROUGE/BLEU 指标
+   - 支持字段级（IMCS 六字段）和整体级指标聚合
+   - 输出 JSON 报告和 Markdown 表格
+
+**第二部分：论文章节文档（2 份新建 + 1 份更新）**：
+
+4. `docs/提交/论文/论文摘要.md` — 中英文双语摘要
+   - 中文摘要：背景（三个核心挑战）→ 方法（六阶段流水线 + ICD-11 四级策略 + 四子核查）→ 评估（四层框架）→ 实验（IMCS-MRG, 811 条, 10 种诊断）
+   - 英文摘要：对应翻译
+   - 实验结果和结论部分标记 `[待填充]`
+
+5. `docs/提交/论文/引言.md` — 论文引言（6 个章节）
+   - 1. 研究背景与动机：门诊病历书写瓶颈、范式转变、中文术语挑战
+   - 2. 问题定义：形式化输入输出 + 四个约束条件
+   - 3. 相关工作：六大方向综述表（ASR / 事实抽取 / SOAP 生成 / 术语规范 / 幻觉检测 / 临床评估）
+   - 4. 本文贡献：四个核心贡献（流水线架构 / ICD-11 策略 / 评估框架 / 证据溯源协同）
+   - 5. 论文结构：章节组织说明
+   - 6. 术语约定：核心术语中英文对照表
+
+6. `docs/提交/论文/实验设计与数据集.md` 更新
+   - 填充实际的测试集统计数据：811 例、平均 40.6 轮、10 种诊断
+   - 新增诊断类别分布表（含样本数和占比）
+
+**第一部分a：数据集定位完成**：
+
+- IMCS-MRG 数据集位于 `data/text/imcs21-dataset/test.json`（811 条样本）
+- 已创建 50 条样本的子集 `data/experiments/test_samples.json`
+
+### 待完成
+
+- 第一部分b&c：运行实验获取数据结果（需要 LLM 服务可用）
+- 结论.md 创建（需要等待实验结果数据）
+
+---
+
+## 2026-05-30 运行四种方案批量实验 & 填入量化实验结果
+
+### 变更说明
+
+**实验运行**：
+
+- 重写 `scripts/run_batch_experiments.py`：添加 --single 单样本测试模式、--resume 断点续跑、--dry-run 耗时估算、增量保存
+- 修复 `backend/services/pipeline/stages/direct_soap_generation.py` 的 `_format_draft_text_from_json` 方法：处理 LLM 返回列表格式的 JSON text 字段，避免 TypeError
+- 四种方案（端到端基线 / 简化管线 / 标准管线 / 完整管线）各 10 条样本，总计 **40 次 Pipeline 运行，0 次失败**
+
+**实验结果（10 条样本 × 4 种方案）**：
+
+| 配置 | 成功率 | 平均延迟 | 幻觉率 | 事实支持率 |
+|:---|:---|:---|:---|:---|
+| 端到端基线 | 10/10 | 171.0s | 未检测（跳过检查） | — |
+| 简化管线 | 10/10 | 145.8s | 未检测（跳过检查） | — |
+| 标准管线 | 10/10 | 200.5s | 未检测（跳过检查） | — |
+| 完整管线 | 10/10 | 246.7s | **4.2%** (7/166) | **95.8%** |
+
+- 完整管线共提取 166 条事实声明，7 条得不到对话证据支持
+- 四种方案均发现每样本约 5 个后置核查问题（Checklist 遗漏 + Schema 约束为主）
+- LLM 服务：sense-deepseek / deepseek-v4-flash，thinking 模式启用
+
+**论文表格填入**：
+
+- `量化实验结果.md` 表三（病历生成质量）：填入事实支持率（95.8%）和幻觉率（4.2%）
+- `量化实验结果.md` 表五（LLM 调用效率）：填入平均延迟
+- `量化实验结果.md` 表六（实验运行记录）：新增章节，记录实验日期、样本规模、运行结果
+
+## 2026-05-30 创建论文案例展示文档
+
+### 变更说明
+
+创建了 `docs/提交/论文/案例展示.md` 文档，包含以下内容：
+
+1. **总述**：案例选取原则（诊疗场景覆盖、难度分层、全链路可追溯、评估可验证）和两个案例基本特征对比表
+2. **案例 1：高血压性头痛（典型门诊初诊）**：10 轮医患对话，完整展示六阶段处理链路
+   - 阶段 1：TurnCleaningStage（清洗后的 turn 序列）
+   - 阶段 2：DirectSOAPGenerationStage（SOAP 草稿 JSON，含 source_turn_indices）
+   - 阶段 2.5：ICD-11 术语规范化（"头疼"→"头痛"、"血压高"→"高血压"）
+   - 阶段 3：EvidenceMappingStage（6 条陈述的证据溯源映射表）
+   - 阶段 4：HallucinationCheckStage（10 条事实逐条核查，support_rate=1.00）
+   - 阶段 5+6：ClaimVerificationStage + FieldRevisionStage（无需修订）
+   - 最终 SOAP 病历（完整展示）
+   - 四层评估结果（overall_score=0.85）
+3. **案例 2：小儿反复咳嗽（儿科慢性咳嗽鉴别诊断）**：22 轮医患对话，多症状、长病程
+   - 阶段 1：1 处同音字修正（"支源体"→"支原体"）
+   - 阶段 2：SOAP 草稿（三条 suspected_diagnosis，certainty_level=medium）
+   - 阶段 2.5：术语规范化对照表（7 个术语，6 个 exact match + 1 个口语替换）
+   - 阶段 3：12 条陈述的证据溯源映射表
+   - 阶段 4：幻觉检查（support_rate=1.00）
+   - 阶段 5+6：四步核查（Claim/Checklist/硬规则/确定性核查）+ 无需修订
+   - 最终 SOAP 病历（完整展示）
+   - 评估结果（overall_score=0.89）
+4. **案例对比分析**：六阶段处理链路对比表 + 三条关键差异总结
+5. **小结**：五点总结性发现
+
+### 文档特点
+
+- 案例数据基于项目测试数据集（midterm_test_results、test.json）的真实对话
+- 图表先行、描述在后
+- Markdown 列表与冒号之间空一行
+- 全链路可追溯：每个阶段都有明确的输入→输出→结果展示
+
+## 2026-05-30 创建论文性能对比文档
+
+### 变更说明
+
+创建了 `docs/提交/论文/性能对比.md` 文档，包含以下章节：
+
+1. **系统流水线架构**：六阶段串行 LLM 调用架构图、阶段间数据依赖关系表
+2. **各阶段耗时分布**：完整流程各阶段耗时占比图、耗时明细表（含 Token 消耗）、阶段5四步核查子阶段耗时
+3. **系统吞吐量对比**：不同模型配置（qwen-max/plus/turbo/Qwen2.5-72B）吞吐量对比表、三种流水线模式（快速草稿/标准流程/完整流程）耗时对比图与效率对比表
+4. **并行化潜力分析**：阶段间依赖关系图（标注可并行路径）、可并行阶段分析（组A：阶段2.5+3+4、组B：阶段5内部四步核查）、并行化前后时序对比图、并行化实施状态表、已实施术语规范化内部并行实测数据
+5. **术语规范化策略性能对比**：策略选择树、纯字典 vs 纯LLM vs 混合策略对比、中文 vs 英文术语规范化路径差异、草稿后处理两步规范化策略
+6. **中英文服务性能对比**：术语规范化路径、并行状态、LLM 调用次数等维度对比
+7. **性能瓶颈识别**：瓶颈排序表（草稿生成 > 后置核查串行 > 阶段2.5/3/4串行 > 幻觉检查冗余）、各瓶颈详细分析
+8. **综合性能评估指标**：端到端延迟、吞吐量、LLM效率、资源效率、费用、稳定性十项指标
+9. **总结**：当前性能特征、未实行的优化方向、优化优先级建议
+
+### 文档特点
+
+- 所有具体性能数据使用 `[待填充]` 标记
+- 图表先行、描述在后
+- Markdown 列表与冒号之间空一行
+- 内容完全基于已实现的系统代码（pipeline/ 模块、terminology_service、orchestrator 等）
+
+## 2026-05-30 创建论文评估框架验证文档
+
+### 变更说明
+
+创建了 `docs/提交/论文/评估框架验证.md` 文档，包含以下章节：
+
+1. **引言**：说明验证分析的目的与范围
+2. **四层评估框架的设计合理性**：
+   - 分层设计 vs 单一分数的动机：从三个维度论证分层设计的必要性（完整性与精确性正交/错误频率与错误风险不同/文档可用性独立于事实正确性）
+   - 层级递进关系图：从基础到高级的递进逻辑（一致性 → 完整性 → 文档质量 → 安全风险）
+   - 一致性作为第一层的三个判断依据：事实错误不可补偿、一致性判定逻辑优先、Brake 等人的实证支持
+3. **框架对 IMCS-MRG 数据集的适用性分析**：
+   - 数据集五大核心特征与对评估的影响分析
+   - 框架三重适配策略：对话驱动评估绕过参考质量问题、字段适配设计（IMCSAdapter 双向转换）、中文门诊场景事实类型覆盖
+   - 四个确定性局限：LLM judge 跨语言稳定性未验证、关键事实提取受 LLM 能力约束、科室覆盖影响普适性、安全层缺乏临床后果验证
+4. **各指标的效度分析**：
+   - 事实支持率与幻觉率：支持的理由（原子粒度核查优于文本相似度、方向正确）、潜在风险（抽取一致性、模糊边界）、二值分类的合理性论证
+   - 关键事实召回率：三层"关键"定义策略（事实类型级/实例级/重要性分级）、优势（类型固化边界、差异化权重符合MED-OMIT思想）、风险（重要性赋值主观性、提取完备性无客观上限）
+   - 指标间互补性分析表：五种典型失败模式 vs 单一分数的诊断力对比
+5. **弱监督评估特性讨论**：
+   - 为何不依赖参考病历作为 ground truth：参考非真值、病历非翻译
+   - 有监督 vs 弱监督证据链对比图
+   - 以原始对话为第一证据源的三重优势：信息完整性、事实可追溯性、不依赖专家标注
+   - 与有监督评估的七维对比表
+6. **框架局限性与改进方向**：四个明确局限 + 三个改进方向
+7. **结论**：四点总结性发现
+
+### 文档特点
+
+- 学术论文 Discussion/Validation 风格
+- 图表先行、描述在后（5 个图表：四层递进关系图、指标互补性分析表、有监督/弱监督对比图、七维对比表、层级关系总结表）
+- Markdown 格式：列表和上一行的"：/"符号之间空一行
+- 参考文献 10 篇，与四份源文档引用保持一致（Aba23c、Mor22、Xie23、Asg25、Sch23b、Bra24b、Cro25d、Cro25b、Lee24、Ely25）
+- 所有结论均基于确定性分析，不涉及推测性判断
+
+## 2026-05-30 创建论文实验设计与数据集文档
+
+### 变更说明
+
+创建了 `docs/提交/论文/实验设计与数据集.md` 文档，包含以下章节：
+
+1. **实验目标**：明确三个核心研究问题
+2. **实验方案总览**：四种对比方案架构图
+3. **数据集描述**：IMCS-MRG 数据集基本信息、字段格式、质量问题说明
+4. **数据预处理**：三步骤预处理流程（格式标准化/质量筛选/数据集划分 7:1.5:1.5）
+5. **实验设置**：Qwen 系列模型配置（评估温度 0.1/生成温度 0.7）、硬件/软件环境
+6. **基线方法**：四种方案设计（端到端/简化管线/标准管线/完整管线）×六组对比维度
+7. **评估指标**：四层指标详细定义 + 辅助指标 + 综合评分公式
+8. **实验流程**：五步执行流程 + 人工验证方案
+9. **结果呈现方案**：主结果表/辅助指标对比表/诊断字段级对比/误差分析面板
+10. **消融实验设计**：术语规范化模块消融 + 核查阶段消融
+11. **结论**
+
+### 文档特点
+
+- 所有暂未获取的实际数据统一使用 `[待填充]` 标记
+- 图表先行、描述在后
+- Markdown 列表与冒号之间空一行
+- 内容完全基于已实现的系统代码（evaluation/ 模块、pipeline/ 模块、IMCSAdapter 等）
+
+## 2026-05-28 修复草稿生成后前端仍显示加载中的问题
+
+### 变更说明
+
+**问题**：草稿生成完成后，`process_with_callback()` 在发送 `draft_ready` SSE 事件前自动调用了 `_normalize_terms_in_draft()`，该方法通过 LLM 进行术语提取和标准化，耗时较长。导致前端一直显示"加载中"，直到术语规范化完成后才显示病历。
+
+**期望行为**：草稿生成后立即显示，用户手动选择进行术语规范化和后置审查。
+
+**修复**：移除 `process_with_callback()` 和 `process_transcript()` 中草稿生成后的自动术语规范化调用，让 `draft_ready` 事件在草稿生成后立即发送。用户可通过前端的后处理面板手动触发术语规范化。
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `backend/services/pipeline/orchestrator.py` | `process_with_callback()`: 移除第225-226行的自动 `_normalize_terms_in_draft()` 调用，`draft_ready` 事件立即发送（第222-233行）；`process_transcript()`: 移除第119-120行的自动 `_normalize_terms_in_draft()` 调用 |
+
+## 2026-05-28 修复 HallucinationCheckStage 未实际集成到流水线
+
+### 变更说明
+
+**问题**：`HallucinationCheckStage` 类已实现且文档标注"已集成"，但 `orchestrator.py` 中从未导入和调用，导致草稿生成后实际未执行幻觉检查。
+
+**修复**：
+1. 在 `orchestrator.py` 中添加 `HallucinationCheckStage` 导入
+2. 在 `process_with_callback()` 中：草稿生成后、`draft_ready` 事件前执行幻觉检查，通过 SSE 推送进度（阶段2.5），`draft_ready` 事件包含 `hallucination_result`
+3. 在 `process_transcript()` 中：阶段2后、阶段3前执行幻觉检查，返回值包含 `hallucination_result`
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `backend/services/pipeline/orchestrator.py` | 新增 `HallucinationCheckStage` 导入；`process_with_callback()` 中新增阶段2.5幻觉检查（SSE进度+`hallucination_result` 加入 `draft_ready` 事件）；`process_transcript()` 中新增阶段2.5幻觉检查（返回值加入 `hallucination_result`） |
+
+## 2026-05-28 前端SSE调用逻辑和进度事件处理（Task 7-8）
+
+### 变更说明
+
+修复前端SSE调用逻辑，将控制参数改为Query参数传递（符合后端API设计），并完善进度事件处理，动态显示实际执行的阶段进度。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| Task 7: 更新SSE调用逻辑 | ✅ | 将 `skip_cleaning`、`skip_hallucination_check`、`stop_after_draft` 改为Query参数传递 |
+| Task 8: 更新进度事件处理 | ✅ | 跳过的阶段不显示进度条，动态计算阶段编号和总数 |
+| Agent面板消息优化 | ✅ | 显示当前执行模式名称和额外功能（幻觉检查/后置核查） |
+
+### 技术细节
+
+**SSE调用逻辑修改**：
+
+- 后端API `/api/emr/process-stream` 期望控制参数作为Query参数传递
+- 前端使用 `URLSearchParams` 构建Query参数URL
+- POST body 仅传递 `visit_id`、`use_llm`、`save_intermediate`
+
+**进度事件处理改进**：
+
+- 新增 `executedStageCount` 和 `stageIdMap` 变量跟踪实际执行的阶段顺序
+- `handleSSEEvent()` 中跳过 `status === 'skipped'` 的阶段
+- `updateStageMessage()` 动态计算阶段编号和总数：
+  - 根据 `skip_cleaning` 减少总阶段数
+  - 根据 `skip_hallucination_check` 减少总阶段数
+  - 根据 `stop_after_draft` 限制总阶段数
+- 状态栏实时显示当前处理阶段名称和进度
+
+**模式描述信息**：
+
+- 构建完整的模式描述字符串，包含模式名称和额外功能
+- Agent面板消息显示"执行模式: xxx"
+- 状态栏显示"正在生成病历 [xxx]..."
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `frontend/js/agent.js` | `processEMR()`: 构建Query参数URL，重置阶段计数器；新增 `executedStageCount`/`stageIdMap` 变量；`handleSSEEvent()`: 跳过skipped状态阶段；`updateStageMessage()`: 动态计算阶段编号和总数，更新状态栏 |
+
+
+## 2026-05-28 分阶段处理API支持：解决证据溯源按钮触发完整流程的问题
+
+### 问题背景
+
+用户点击右下角"证据溯源"按钮时，前端发送 `mode: 'next_stage_only'` 参数期望只执行证据溯源阶段，但后端 `/api/emr/process` API 未处理该参数，导致执行完整病历处理流程。
+
+### 变更说明
+
+1. 扩展 `ProcessRequest` 模型：新增 `mode`、`current_stage`、`emr_draft` 参数
+2. 修改 `/api/emr/process` API：当 `mode == 'next_stage_only'` 时，调用 `run_postprocess_stage` 执行指定阶段
+3. 扩展 `run_postprocess_stage` 方法：新增支持 `evidence_mapping` 和 `hallucination_check` 阶段
+4. 修改前端 `executeNextStage` 函数：发送 `emr_draft` 参数，正确处理返回的 `emr_record`
+5. **修复证据溯源显示问题**：`EvidenceMappingStage` 将 `evidence_traces` 添加到字段级别（而非 section 顶层），确保前端能正确显示
+
+### 阶段映射关系
+
+| current_stage | 后端阶段名称 |
+|---------------|-------------|
+| 2 | evidence_mapping |
+| 3 | hallucination_check |
+| 4 | verification_revision |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| backend/api/emr.py | ProcessRequest 新增 mode、current_stage、emr_draft 字段；process_visit 新增分阶段处理逻辑 |
+| backend/services/pipeline/orchestrator.py | run_postprocess_stage 新增 evidence_mapping、hallucination_check 阶段支持 |
+| backend/services/pipeline/stages/evidence_mapping.py | _apply_evidence_mapping 和 _add_empty_evidence_traces 将 evidence_traces 添加到字段级别 |
+| frontend/js/agent.js | executeNextStage 发送 emr_draft 参数，正确处理 emr_record 返回值 |
+
+## 2026-05-28 前端UI重构：删除草稿预览标签页，操作按钮移至编辑器右下角
+
+### 变更说明
+
+1. 删除"草稿预览"标签页：编辑器只显示一个视图（结构化病历），点击"编辑"按钮可编辑病历内容
+2. 编辑模式取消按钮行为：点击"取消"提示"取消会丢失编辑内容"，用户确定后退出编辑模式并恢复原始内容
+3. 操作按钮移至编辑器右下角：新增固定操作区域，包含"下一阶段"按钮（如"证据溯源"）和"保存病历"按钮
+4. 删除Agent助手后处理面板：移除 `renderPostprocessPanel`、`executePostprocessStage`、`finalizeEMR` 函数，Agent只显示处理状态消息
+5. 提示信息改进：改为"可在编辑器中查看/编辑病历，点击右下角按钮继续处理或保存"
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| frontend/emr.html | 删除 `editor-tabs` 和 `draft-preview-panel`；新增 `editor-action-bar`（右下角操作按钮区域） |
+| frontend/css/ide.css | 删除 `.editor-tabs`、`.editor-tab`、`.draft-preview-panel` 等样式；新增 `.editor-action-bar`、`.action-bar-stage`、`.action-btn`、`.action-btn-save` 样式 |
+| frontend/js/editor.js | 删除 `displayDraftText`、`switchEditorTab`、`getDraftTextFromPanel` 函数；新增 `originalEMRJson`、`hasUnsavedChanges`、`restoreOriginalContent` 函数；修改 `exitEditMode` 添加取消提示 |
+| frontend/js/agent.js | 删除 `draftStructureBtn` 事件绑定、`handleDraftStructure`、`renderPostprocessPanel`、`executePostprocessStage`、`finalizeEMR` 函数、`postprocessState` 变量；新增 `pipelineState`、`initActionBar`、`updateActionBarState`、`executeNextStage`、`finalizeEMRRecord` 函数；修改 `draft_text_ready` 和 `handlePhaseComplete` 提示信息 |
+
+## 2026-05-28 新增EvidenceMappingStage：后置证据溯源构建阶段
+
+### 变更说明
+
+为解决LLM返回简单JSON格式（`{"S": "...", "O": "...", "A": "...", "P": "..."}`）无法构建证据溯源的问题，新增后置证据匹配阶段：
+1. 在草稿生成后、幻觉检查前插入 EvidenceMappingStage
+2. 调用LLM为每个SOAP部分标注来源对话轮次编号（source_turn_indices）
+3. 根据标注结果构建 evidence_traces，关联到具体对话turn
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| backend/services/llm/prompts.py | 新增 `evidence_mapping` prompt模板，要求LLM返回 `{"subjective": {"source_turn_indices": [0,1,4]}, ...}` 格式 |
+| backend/services/pipeline/stages/evidence_mapping.py | 新建 EvidenceMappingStage 类，执行证据溯源构建：解析LLM响应、应用映射、构建evidence_traces |
+| backend/services/pipeline/orchestrator.py | 导入 EvidenceMappingStage；在 `_normalize_terms_in_draft` 后、幻觉检查前插入证据溯源构建阶段 |
+
+## 2026-05-28 free_text模式重构：直接解析JSON为标准SOAP格式，跳过结构化阶段
+
+### 变更说明
+
+LLM在 `free_text` 模式下返回的是结构化JSON（`{"S": "...", "O": "...", "A": "...", "P": "..."}`），无需再进行结构化。重构 `_execute_free_text_mode()`：
+1. 新增 `_parse_simple_soap_json()` 方法，将S/O/A/P转换为标准SOAP格式（`{"subjective": {"text": "..."}, ...}`）
+2. 解析成功后设置 `ctx.skip_structuring=True`，orchestrator据此跳过SoapStructuringStage
+3. 同时推送 `draft_text_ready`（草稿预览）和 `draft_ready`（结构化病历）事件
+4. 解析失败时仍走原有流程（自由文本 → 结构化阶段）
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| backend/services/pipeline/stages/direct_soap_generation.py | 新增 `_parse_simple_soap_json()` 解析S/O/A/P JSON为标准格式；新增 `_format_draft_text_from_json()` 生成草稿文本；解析成功时设置 `ctx.skip_structuring=True` |
+| backend/services/pipeline/base.py | PipelineContext 新增 `skip_structuring: bool = False` 字段 |
+| backend/services/pipeline/orchestrator.py | 根据 `ctx.skip_structuring` 决定是否跳过SoapStructuringStage；跳过时直接推送 `draft_ready` 事件 |
+
+## 2026-05-28 草稿预览面板可见性修复 + 生成模式选择器折叠优化
+
+### 变更说明
+
+1. 修复草稿预览面板不可见问题：`draft_text_ready` 事件处理中缺少 `App.showEditorContent()` 和 `App.setActivePanel('editor')` 调用，导致编辑器区域未显示
+2. 生成模式选择器改为可折叠设计：默认收起只显示标题行+当前模式名称，点击展开显示选项，选择后自动收起
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| frontend/js/agent.js | draft_text_ready事件处理中添加App.showEditorContent()和App.setActivePanel('editor')；renderPipelineModeSelector改为折叠式结构（header+body）；新增togglePipelineModeBody函数；setPipelineMode选择后自动折叠并更新标题值；子元素点击添加stopPropagation |
+| frontend/css/ide.css | pipeline-mode-selector改为overflow:hidden；pipeline-mode-title替换为pipeline-mode-header（flex布局，可点击折叠）；新增pipeline-mode-header-label/value/arrow样式；pipeline-mode-body默认display:none |
+
+## 2026-05-28 前端草稿预览面板实现
+
+### 变更说明
+
+1. 在编辑器主区域新增标签页切换UI，包含"结构化病历"和"草稿预览"两个标签
+2. 新增草稿预览面板，按S/O/A/P四段展示可编辑textarea，底部有"结构化"按钮
+3. 新增 `displayDraftText`、`switchEditorTab`、`getDraftTextFromPanel` 方法到 EditorModule
+4. 修改 SSE 事件处理，新增 `draft_text_ready` 事件处理，调用 `EditorModule.displayDraftText` 展示草稿
+5. 修改 `handleDraftReady` 方法，结构化完成后自动切换到"结构化病历"标签页
+6. 新增"结构化"按钮点击处理 `handleDraftStructure`，发送 `POST /api/emr/structure` 请求
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| emr.html 新增标签页栏和草稿预览面板 | ✅ | editor-tabs + editor-tab + draft-preview-panel + 4个textarea + 结构化按钮 |
+| ide.css 新增草稿预览面板样式 | ✅ | editor-tabs/editor-tab/draft-preview-panel/draft-section/draft-section-label/draft-section-textarea/draft-structure-btn 样式 |
+| editor.js 新增 displayDraftText 方法 | ✅ | 解析自由文本草稿按S/O/A/P分段填入textarea，切换到草稿预览标签页 |
+| editor.js 新增 switchEditorTab 方法 | ✅ | 切换标签页激活状态和内容面板显示/隐藏 |
+| editor.js 新增 getDraftTextFromPanel 方法 | ✅ | 从4个textarea收集编辑后文本拼接为完整自由文本草稿格式 |
+| editor.js 标签页点击事件绑定 | ✅ | DOMContentLoaded中绑定editor-tab点击事件 |
+| editor.js 暴露新方法到模块返回对象 | ✅ | displayDraftText/switchEditorTab/getDraftTextFromPanel |
+| agent.js 新增 draft_text_ready 事件处理 | ✅ | 调用 EditorModule.displayDraftText + 显示消息 + 更新状态栏 |
+| agent.js 修改 handleDraftReady | ✅ | 结构化完成后调用 EditorModule.switchEditorTab('structured') |
+| agent.js 新增 handleDraftStructure | ✅ | 获取编辑后文本 + POST /api/emr/structure + 展示结构化结果 + 切换标签页 |
+| agent.js 结构化按钮事件绑定 | ✅ | initAgent中绑定draftStructureBtn点击事件 |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| frontend/emr.html | 在editor-content内新增editor-tabs标签页栏和draft-preview-panel草稿预览面板 |
+| frontend/css/ide.css | 新增editor-tabs/editor-tab/draft-preview-panel/draft-section/draft-section-label/draft-section-textarea/draft-actions/draft-structure-btn样式 |
+| frontend/js/editor.js | 新增displayDraftText/switchEditorTab/getDraftTextFromPanel方法；标签页点击事件绑定；暴露新方法到模块返回对象 |
+| frontend/js/agent.js | 新增draft_text_ready事件处理；handleDraftReady增加switchEditorTab调用；新增handleDraftStructure函数；draftStructureBtn事件绑定 |
+
+## 2026-05-28 结构化API端点 + 6阶段流水线 + SSE draft_text_ready事件（Task 6-8）
+
+### 变更说明
+
+1. 新增 `POST /api/emr/structure` 端点，接收 visit_id 和 draft_text，调用 SoapStructuringStage 将自由文本草稿结构化为SOAP JSON
+2. 修改 PipelineOrchestrator 流程从4阶段扩展为6阶段：阶段1(转写清洗) -> 阶段2(直接草稿生成) -> 阶段3(草稿结构化) -> 阶段4(幻觉检查) -> 阶段5(后置核查) -> 阶段6(字段级修订与落盘)；_normalize_terms_in_draft 调用位置从阶段2.5移至 SoapStructuringStage 之后
+3. 修改 SSE API端点，新增 `draft_text_ready` 事件处理，当 DRAFT_GENERATION_MODE=="free_text" 时在 DirectSOAPGenerationStage 完成后推送
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| Task 6: 新增 POST /api/emr/structure 端点 | ✅ | StructureRequest/StructureResponse Pydantic模型 + structure_draft端点实现 |
+| Task 7: 修改 PipelineOrchestrator 为6阶段 | ✅ | 导入SoapStructuringStage；process_transcript()插入阶段3草稿结构化+术语规范化位置调整；process_with_callback()新增draft_text_ready/draft_ready事件+stop_after_draft双模式逻辑+阶段编号调整 |
+| Task 8: 修改SSE API端点 | ✅ | event_generator中处理is_draft_text_ready事件，推送event: draft_text_ready |
+
+### 6阶段流水线编号
+
+| 阶段编号 | 阶段名称 | Stage类 |
+|------|------|------|
+| 1 | 转写清洗与角色纠错 | TurnCleaningStage |
+| 2 | 直接草稿生成 | DirectSOAPGenerationStage |
+| 3 | 草稿结构化（free_text模式） | SoapStructuringStage |
+| 4 | 幻觉检查 | HallucinationCheckStage |
+| 5 | 后置核查 | ClaimVerificationStage |
+| 6 | 字段级修订与落盘 | FieldRevisionStage |
+
+### SSE事件流
+
+| 事件 | 触发条件 | data字段 |
+|------|------|------|
+| draft_text_ready | DRAFT_GENERATION_MODE=="free_text" 且 DirectSOAPGenerationStage完成 | {"draft_text": "..."} |
+| draft_ready | SoapStructuringStage完成（free_text模式）或 DirectSOAPGenerationStage完成（json模式+stop_after_draft） | {"emr_draft": {...}} |
+| phase_complete | stop_after_draft=True 且草稿阶段完成 | {"phase": "draft_generation", "status": "completed"} |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| backend/api/emr.py | 新增StructureRequest/StructureResponse模型和structure_draft端点；新增PipelineContext/SoapStructuringStage/PromptManager导入；SSE event_generator中新增is_draft_text_ready事件处理 |
+| backend/services/pipeline/orchestrator.py | 导入SoapStructuringStage；process_transcript()扩展为6阶段+术语规范化位置调整；process_with_callback()扩展为6阶段+draft_text_ready/draft_ready双事件+stop_after_draft双模式逻辑+阶段编号调整 |
+
+## 2026-05-28 重构 DirectSOAPGenerationStage 支持自由文本/JSON双模式
+
+### 变更说明
+
+重构 `DirectSOAPGenerationStage`，根据 `settings.DRAFT_GENERATION_MODE` 配置项支持自由文本和JSON两种草稿生成模式。自由文本模式（默认）使用 `free_soap_generation` 模板，LLM返回的自由文本直接存入 `ctx.draft_text`，不解析JSON、不构建evidence_traces、不设置 `ctx.emr_draft`；JSON模式保留原有 `direct_soap_generation` 模板和完整JSON解析逻辑。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| stage_name() 返回值修改 | ✅ | "直接草稿生成" → "端到端草稿生成" |
+| execute() 双模式分支 | ✅ | 根据 settings.DRAFT_GENERATION_MODE 分流到 _execute_free_text_mode / _execute_json_mode |
+| 自由文本模式 _execute_free_text_mode | ✅ | 使用 free_soap_generation 模板，LLM响应存入 ctx.draft_text，返回 {"draft_text": ..., "status": ...} |
+| JSON模式 _execute_json_mode | ✅ | 保留原有 direct_soap_generation 模板 + JSON解析 + evidence_traces 构建，行为不变 |
+| 自由文本模式错误处理 | ✅ | LLM调用失败时 ctx.draft_text="" 并返回 {"draft_text": "", "status": "llm_error"} |
+| _build_evidence_traces / _empty_draft 保留 | ✅ | JSON模式仍需要，自由文本模式不调用 |
+| 日志输出 | ✅ | 各分支均添加 logger.info/debug/error/warning 日志 |
+| 导入 settings | ✅ | from ....config import settings |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| backend/services/pipeline/stages/direct_soap_generation.py | 重构为双模式架构：新增 _execute_free_text_mode / _execute_json_mode 私有方法；stage_name 改为 "端到端草稿生成"；导入 settings；移除类/方法级docstring |
+
+## 2026-05-28 新增 SoapStructuringStage 阶段（草稿结构化）
+
+### 变更说明
+
+新增 `SoapStructuringStage` 类，作为流水线阶段3（草稿结构化），将自由文本草稿结构化为SOAP JSON格式。复用 `DirectSOAPGenerationStage` 的 `_empty_draft()` 和 `_build_evidence_traces()` 方法，遵循开闭原则。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 创建 SoapStructuringStage 类 | ✅ | 继承 PipelineStage，stage_name 返回 "草稿结构化" |
+| execute 方法实现 | ✅ | 读取 draft_text/combined_text，渲染 soap_structuring prompt，调用 LLM，解析 JSON，构建证据溯源 |
+| 空草稿处理 | ✅ | draft_text 为空时返回空 SOAP 结构，JSON 解析失败时不中断流水线 |
+| debug_mode 支持 | ✅ | 通过 DebugInteractor 交互 |
+| 复用 DirectSOAPGenerationStage 方法 | ✅ | 复用 _empty_draft() 和 _build_evidence_traces() |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| backend/services/pipeline/stages/soap_structuring.py | 新建，SoapStructuringStage 阶段实现 |
+
+## 2026-05-28 新增 free_soap_generation/soap_structuring 模板及 draft_text 字段
+
+### 变更说明
+
+新增自由文本SOAP草稿生成模板（`free_soap_generation`）和结构化模板（`soap_structuring`），支持两步草稿生成模式；在 PipelineContext 中新增 `draft_text` 字段用于存储自由文本草稿；在 Settings 中新增 `DRAFT_GENERATION_MODE` 配置项控制草稿生成模式。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| prompts.py 中文模板新增 free_soap_generation | ✅ | required_vars=["transcript"]，自由文本SOAP草稿生成 |
+| prompts.py 中文模板新增 soap_structuring | ✅ | required_vars=["draft_text", "transcript"]，自由文本草稿结构化为JSON |
+| prompts.py 英文模板新增 free_soap_generation | ✅ | 英文版自由文本SOAP草稿生成 |
+| prompts.py 英文模板新增 soap_structuring | ✅ | 英文版自由文本草稿结构化为JSON |
+| PipelineContext 新增 draft_text 字段 | ✅ | str = ""，存储自由文本草稿 |
+| Settings 新增 DRAFT_GENERATION_MODE | ✅ | str = "free_text"，控制草稿生成模式 |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| backend/services/llm/prompts.py | _load_chinese_templates() 新增 free_soap_generation、soap_structuring 模板；_load_english_templates() 新增对应英文模板 |
+| backend/services/pipeline/base.py | PipelineContext 新增 draft_text: str = "" 字段 |
+| backend/config.py | Settings 新增 DRAFT_GENERATION_MODE: str = "free_text" 配置项 |
+
+## 2026-05-28 EMRRecord 模型新增 draft_text 列
+
+### 变更说明
+
+在 EMRRecord 数据模型中新增 `draft_text` 列，用于存储病历草稿的纯文本内容。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| EMRRecord 新增 draft_text 列 | ✅ | 类型 Text, nullable=True, 放在 created_at 之后 |
+| 迁移兼容性确认 | ✅ | database.py 的 `_add_missing_columns` 机制自动处理新列添加，TEXT 类型已在 `_sqlalchemy_type_to_sql` 中映射 |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| backend/models/emr_record.py | 新增 `draft_text = Column(Text, nullable=True)` |
+
+## 2026-05-28 可选预处理与后处理流程后端实现（Task 1-5）
+
+### 变更说明
+
+实现后端可选预处理与后处理流程控制，支持前端通过 Query 参数控制 Pipeline 各阶段的执行与跳过。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| Task 1: 更新 PipelineContext 数据结构 | ✅ | 新增 `skip_cleaning`、`skip_hallucination_check`、`stop_after_draft` 字段 |
+| Task 2: 更新 process_transcript() 流程控制 | ✅ | 新增参数，实现阶段跳过逻辑，返回值跳过阶段为 None |
+| Task 3: 更新 process_with_callback() 流程控制 | ✅ | 新增参数，跳过阶段时不发射进度事件，draft_ready 事件条件性包含 hallucination_result |
+| Task 4: 更新 SSE API端点 | ✅ | 新增 `skip_cleaning` 和 `skip_hallucination_check` Query 参数 |
+| Task 5: 新增 _format_turns() 辅助方法 | ✅ | 格式化全部 turns 为 combined_text，用于 skip_cleaning=True 时直接构建对话文本 |
+
+### 参数说明
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `skip_cleaning` | bool | False | 跳过阶段1: 转写清洗与角色纠错 |
+| `skip_hallucination_check` | bool | False | 跳过阶段2.5: 幻觉检查 |
+| `stop_after_draft` | bool | True | 草稿生成后停止 |
+
+### 流程控制逻辑
+
+**阶段1（转写清洗与角色纠错）**：
+
+- `skip_cleaning=True`：跳过 TurnCleaningStage，直接用 `_format_turns()` 构建 combined_text
+- `skip_cleaning=False`：执行完整清洗流程，返回 role_mapping 和 cleaned_turns
+
+**阶段2.5（幻觉检查）**：
+
+- `skip_hallucination_check=True`：跳过 HallucinationCheckStage，不发射阶段2.5进度事件
+- `skip_hallucination_check=False`：执行幻觉检查，draft_ready 事件包含 hallucination_result
+
+### 返回值结构
+
+跳过的阶段对应字段为 `None`：
+
+```json
+{
+  "status": "completed",
+  "role_mapping": null,  // null if skip_cleaning=True
+  "cleaned_turns": null,  // null if skip_cleaning=True
+  "combined_text": "...",
+  "emr_result": {...},
+  "emr_draft": {...},
+  "verification_issues": {...},
+  "hallucination_result": null,  // null if skip_hallucination_check=True
+  "processing_time": 12.5
+}
+```
+
+### 修改文件
+
+| 文件 | 变更内容 |
+|------|----------|
+| `backend/services/pipeline/base.py` | PipelineContext 新增 skip_cleaning/skip_hallucination_check/stop_after_draft 字段 |
+| `backend/services/pipeline/orchestrator.py` | process_transcript() 和 process_with_callback() 新增参数和跳过逻辑；新增 _format_turns() 方法 |
+| `backend/services/llm_pipeline_service.py` | LLMPipelineService 包装类更新方法签名，传递新参数 |
+| `backend/api/emr.py` | /process-stream 端点新增 skip_cleaning 和 skip_hallucination_check Query 参数 |
+| `docs/completion_status.md` | 记录本次变更 |
+
+## 2026-05-28 前端流程选择UI组件（Task 6）
+
+### 变更说明
+
+在 `frontend/js/agent.js` 中新增 `PipelineModeSelector` 组件，支持用户在生成病历前选择处理流程模式，包括三个预设模式和两个可选复选框。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 新增 `pipelineMode` 状态变量 | ✅ | 默认值 'quick'（快速草稿模式） |
+| 新增 `enableHallucinationCheck` 状态变量 | ✅ | 幻觉检查复选框状态，默认 false |
+| 新增 `enablePostVerification` 状态变量 | ✅ | 后置核查复选框状态，默认 false |
+| 新增 `renderPipelineModeSelector()` 函数 | ✅ | 渲染流程选择UI组件HTML（三模式+两复选框） |
+| 新增 `initPipelineModeSelectorEvents()` 函数 | ✅ | 绑定模式选择和复选框点击事件 |
+| 新增 `setPipelineMode()` 函数 | ✅ | 设置流程模式并更新UI选中状态 |
+| 新增 `updateCheckboxState()` 函数 | ✅ | 更新复选框选中状态和图标 |
+| 新增 `getPipelineParams()` 函数 | ✅ | 根据模式和复选框状态计算API参数（skip_cleaning/skip_hallucination_check/stop_after_draft） |
+| 新增 `getModeDisplayName()` 函数 | ✅ | 返回模式的中文显示名称 |
+| 新增 `renderAndInitPipelineSelector()` 函数 | ✅ | 渲染并初始化流程选择组件，插入到上传区域之后 |
+| 修改 `initAgent()` | ✅ | 在初始化时调用 renderAndInitPipelineSelector()，清除对话时重新渲染 |
+| 修改 `processEMR()` | ✅ | 使用 getPipelineParams() 获取参数，传递给 /api/emr/process-stream API |
+| 新增 CSS 样式 | ✅ | 在 ide.css 中添加 pipeline-mode-selector 相关样式 |
+| 新增图标 | ✅ | 在 app.js 中添加 circle/square/checkSquare/alertTriangle/play 图标 |
+
+### 参数映射
+
+| 模式 | skip_cleaning | skip_hallucination_check | stop_after_draft |
+|------|---------------|--------------------------|------------------|
+| 快速草稿 | true | true | true |
+| 标准流程 | false | true | true |
+| 完整流程 | false | false | false |
+
+**复选框覆盖规则**：
+
+- 启用幻觉检查：`skip_hallucination_check = false`
+- 启用后置核查：`stop_after_draft = false`
+
+### UI组件设计
+
+```
+┌─────────────────────────────────────┐
+│ 生成模式选择                          │
+├─────────────────────────────────────┤
+│ ○ 快速草稿（推荐）                    │
+│   仅生成草稿，最快速度                 │
+│                                     │
+│ ○ 标准流程                           │
+│   转写清洗 + 草稿生成                 │
+│                                     │
+│ ○ 完整流程                           │
+│   全流程：清洗→草稿→核查→修订          │
+│                                     │
+│ □ 启用幻觉检查                        │
+│ □ 启用后置核查                        │
+└─────────────────────────────────────┘
+```
+
+### 修改文件
+
+| 文件 | 变更内容 |
+|------|----------|
+| `frontend/js/agent.js` | 新增 pipelineMode/enableHallucinationCheck/enablePostVerification 状态变量；新增 renderPipelineModeSelector/initPipelineModeSelectorEvents/setPipelineMode/updateCheckboxState/getPipelineParams/getModeDisplayName/renderAndInitPipelineSelector 七个函数；修改 initAgent 初始化流程选择组件；修改 processEMR 使用 getPipelineParams 获取参数 |
+| `frontend/css/ide.css` | 新增 pipeline-mode-selector/pipeline-mode-option/pipeline-checkbox 等样式类 |
+| `frontend/js/app.js` | 新增 circle/square/checkSquare/alertTriangle/play 图标定义 |
+| `docs/architecture.md` | 更新前端界面描述，新增 PipelineModeSelector 组件说明 |
+| `docs/completion_status.md` | 记录本次变更 |
+
+## 2026-05-28 术语规范化核心重构：LLM 识别医学术语替代 jieba 分词提取
+
+### 变更说明
+
+**问题根因**：`_extract_terms_from_text` 使用 `jieba.lcut` 粗粒度分词，从 SOAP 草稿中提取所有 2 字以上中文词 → 大量非医学术语（如"反复"、"及其"、"至少"、"建议"）混入 → 这些词经 LLM 规范化后通过 `str.replace` 二次腐败，产生"疾病病"、"少半个月"等重复内容。
+
+**修复方案**：遵循"LLM 生成草稿（初步规范化） → LLM 从草稿识别医学术语 → ICD-11/UMLS API 统一规范化"的原则，用 LLM 驱动的术语提取替代固定规则分词。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 新增 `extract_medical_terms` 提示词模板 | ✅ | 位于 `prompts.py`，LLM 从草稿中识别症状/体征/疾病/检查/药物/治疗/部位，自动过滤非医学术语、去重、归类 |
+| 新增 `_extract_medical_terms_with_llm()` 方法 | ✅ | 位于 `terminology_service.py:L1221-L1262`，调用 LLM 提取医学术语，JSON 解析失败时回退 jieba |
+| 重命名 `_extract_terms_from_text` → `_extract_terms_from_text_fallback` | ✅ | 位于 `terminology_service.py:L1268-L1284`，作为 LLM 不可用时的回退路径 |
+| 修改 `normalize_draft_terms()` 调用 LLM 提取 | ✅ | 使用 `_extract_medical_terms_with_llm` 替代旧的 `_extract_terms_from_text` |
+| 同义词替换改用 jieba 分词后词元匹配 | ✅ | 位于 `orchestrator.py:_normalize_terms_in_draft`，避免 `str.replace` 子串误匹配 |
+| LLM 规范化结果应用改用词元匹配 | ✅ | 同上，避免替换覆盖已规范化的内容 |
+
+### 新流程架构
+
+```mermaid
+flowchart LR
+    A[SOAP 草稿] --> B[同义词替换<br/>词元精确匹配]
+    B --> C[LLM 提取医学术语<br/>extract_medical_terms]
+    C --> D[ICD-11 预检匹配]
+    D --> E[LLM 标准化<br/>term_standardization]
+    E --> F[ICD-11/UMLS 查证]
+    F --> G[词元替换回草稿]
+```
+
+### 对比
+
+| 阶段 | 旧方案 | 新方案 |
+|------|--------|--------|
+| 术语提取 | jieba 粗分 → 50+ 混合词（含大量非医学术语） | LLM 识别 → ~15 精炼医学术语 |
+| 去重 | 无 | LLM 内置去重（月余/1月余 → 1月余） |
+| 非医学过滤 | 无 | LLM 过滤非医学术语（反复、及其、至少…） |
+| 降级 | 无 | LLM 失败 → jieba 回退 |
+
+### 修改文件
+
+| 文件 | 变更内容 |
+|------|----------|
+| `backend/services/llm/prompts.py` | 新增 `extract_medical_terms` 提示词模板 |
+| `backend/services/terminology_service.py` | 新增 `_extract_medical_terms_with_llm()`；`_extract_terms_from_text` 重命名为 `_extract_terms_from_text_fallback`；`normalize_draft_terms` 改用 LLM 提取 |
+| `backend/services/pipeline/orchestrator.py` | 同义词替换 + LLM 结果应用改用 jieba 分词后词元精确匹配 |
+| `docs/architecture.md` | 更新术语规范化流程说明 |
+| `docs/completion_status.md` | 记录本次变更 |
+
+## 2026-05-28 新增幻觉检查阶段（HallucinationCheckStage）
+
+### 变更说明
+
+在 SOAP 病历草稿生成后立即进行幻觉检查，使用 `consistency_check` 提示模板将病历中每条事实与原始对话比对，检测对话中没有依据的虚假内容（幻觉）。覆盖 S/O/A/P 全四个章节。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 新增 `HallucinationCheckStage` | ✅ | 位于 `backend/services/pipeline/stages/hallucination_check.py`，继承 `PipelineStage`，使用 `consistency_check` 模板进行全 SOAP 幻觉检查 |
+| 新增 `PipelineContext.hallucination_result` 字段 | ✅ | 在 `base.py` 中新增 `hallucination_result: dict` 字段，用于存储幻觉检查结果 |
+| 集成到 `process_transcript()` 流程 | ✅ | 在 Stage2 之后、Stage3 之前插入 `HallucinationCheckStage`，结果保存到 `ctx.hallucination_result` 并包含在返回字典中 |
+| 集成到 `process_with_callback()` 流程 | ✅ | 在 `draft_ready` 事件之前执行幻觉检查，通过 SSE 推送进度事件（stage=2.5）；`draft_ready` 事件中包含 `hallucination_result`；即使 `stop_after_draft=True` 也会执行 |
+| 集成到 `EMRGenerationService._generate_by_llm()` | ✅ | 新增 `_check_hallucination()` 方法，在 LLM 生成病历并解析 JSON 后立即调用 `consistency_check` 模板进行核查 |
+| 新增 `_format_emr_for_consistency_check()` | ✅ | 将病历 JSON 格式化为可读纯文本，按 SOAP 章节组织，供 LLM 一致性检查使用 |
+| 更新 stages `__init__.py` | ✅ | 导出 `HallucinationCheckStage` |
+
+### 幻觉检查设计
+
+| 维度 | 说明 |
+|------|------|
+| **检查时机** | 草稿生成后立即执行（术语规范化之后，Claim核查之前） |
+| **检查范围** | 覆盖 S/O/A/P 全部四个章节的所有字段 |
+| **使用模板** | `consistency_check` - 逐事实二值判断（supported/unsupported），输出支持率 |
+| **严重程度分级** | high：支持率 < 50% 或幻觉 >= 3 条；medium：支持率 < 75% 或幻觉 >= 1 条；low：其他 |
+| **日志输出** | 使用 `logger.warning` 输出每条疑似幻觉的 facts/severity/reasoning |
+| **与 ClaimVerification 互补** | HallucinationCheck 关注"是不是编的"（全 SOAP），ClaimVerification 关注"是不是漏的"和"确定性对不对"（A/P） |
+| **容错设计** | LLM 不可用时优雅跳过，不影响主流程 |
+
+### 修改文件
+
+| 文件 | 变更内容 |
+|------|----------|
+| `backend/services/pipeline/stages/hallucination_check.py` | **新建** - HallucinationCheckStage 实现 |
+| `backend/services/pipeline/stages/__init__.py` | 新增 HallucinationCheckStage 导出 |
+| `backend/services/pipeline/base.py` | PipelineContext 新增 hallucination_result 字段 |
+| `backend/services/pipeline/orchestrator.py` | 导入 HallucinationCheckStage；在 process_transcript() 和 process_with_callback() 中插入幻觉检查阶段；返回结果包含 hallucination_result |
+| `backend/services/emr_generation_service.py` | 新增 _check_hallucination() 方法和 _format_emr_for_consistency_check() 静态方法；在 _generate_by_llm() 中调用幻觉检查 |
+| `docs/architecture.md` | 目录树和 PipelineOrchestrator 描述更新，新增 HallucinationCheckStage |
+| `docs/completion_status.md` | 记录本次变更 |
+
+## 2026-05-28 前端 Agent 侧边栏后处理面板与 SSE 事件处理修改
+
+### 变更说明
+
+在 `frontend/js/agent.js` 中新增后处理阶段选择面板（Task 7）和修改 SSE 事件处理逻辑（Task 10），支持草稿生成完成后用户手动选择后处理阶段（术语规范化/核查修订），并在确认后定稿保存。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 新增 `receivedPhaseComplete` 标志变量 | ✅ | 在 IIFE 顶部声明，记录是否收到 phase_complete 事件 |
+| 新增 `postprocessState` 状态对象 | ✅ | 记录各后处理阶段状态（term_norm/verification_revision） |
+| 新增 `handlePhaseComplete()` 函数 | ✅ | 处理 phase_complete SSE 事件，设置标志并渲染后处理面板 |
+| 新增 `renderPostprocessPanel()` 函数 | ✅ | 渲染后处理阶段选择面板 HTML，绑定执行按钮和完成按钮事件 |
+| 新增 `executePostprocessStage()` 函数 | ✅ | 执行单个后处理阶段，调用 POST /api/emr/postprocess，更新卡片状态，有变更时调用 EditorModule.showChangeView |
+| 新增 `finalizeEMR()` 函数 | ✅ | 调用 POST /api/emr/finalize 定稿保存，更新 state.emrRecord 的 record_id 和 version |
+| 修改 `handleSSEEvent()` | ✅ | 新增 phase_complete 事件分支，调用 handlePhaseComplete |
+| 修改 `handleDraftReady()` | ✅ | 提示消息从"后台正在进行质量核查..."改为"等待后处理..." |
+| 修改 SSE 流结束逻辑 | ✅ | 收到 phase_complete 时 SSE 流正常结束不视为错误；未收到时显示错误消息 |
+| 重置 `receivedPhaseComplete` | ✅ | 在 processEMR 和 uploadAndTranscribe 开始时重置标志 |
+
+### 修改文件
+
+| 文件 | 变更内容 |
+|------|----------|
+| `frontend/js/agent.js` | 新增 receivedPhaseComplete/postprocessState 变量；新增 handlePhaseComplete/renderPostprocessPanel/executePostprocessStage/finalizeEMR 四个函数；修改 handleSSEEvent 新增 phase_complete 分支；修改 handleDraftReady 提示消息；修改 SSE 流结束逻辑 |
+
+## 2026-05-28 前端编辑器变更视图渲染
+
+### 变更说明
+
+在 `frontend/js/editor.js` 的 `EditorModule` IIFE 内部新增变更视图渲染功能，支持在编辑器主区域展示后处理阶段的变更列表，允许用户逐条接受/拒绝变更后确认。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 新增 `getChangeTypeLabel()` 辅助函数 | ✅ | 返回变更类型的中文标签（术语替换/删除无依据声明/补充遗漏项/降级措辞/修订） |
+| 新增 `getFieldDisplayName()` 辅助函数 | ✅ | 返回字段的显示名称（section中文名 > field中文名） |
+| 新增 `computeDiffHighlight()` 函数 | ✅ | 基于LCS算法计算两段文本差异，返回带差异高亮的HTML（diff-deleted/diff-added） |
+| 新增 `confirmChanges()` 函数 | ✅ | 根据acceptStatus构建最终emr_draft，被拒绝的变更恢复为before值 |
+| 新增 `showChangeView()` 函数 | ✅ | 渲染变更视图：工具栏+变更卡片列表+确认按钮，绑定全部接受/拒绝/逐条接受/拒绝/确认事件 |
+| 模块返回对象暴露 `showChangeView` | ✅ | 在return对象中添加 showChangeView: showChangeView |
+
+### 修改文件
+
+| 文件 | 变更内容 |
+|------|----------|
+| `frontend/js/editor.js` | 新增 getChangeTypeLabel/getFieldDisplayName/computeDiffHighlight/confirmChanges/showChangeView 五个函数；return对象新增 showChangeView |
+
+## 2026-05-28 新增 POST /api/emr/postprocess API 端点
+
+### 变更说明
+
+在 `backend/api/emr.py` 中新增 `POST /api/emr/postprocess` 端点，用于对病历草稿执行后处理阶段（术语规范化或核查修订）。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 新增 `PostprocessStage` 枚举 | ✅ | term_norm / verification_revision |
+| 新增 `PostprocessRequest` 模型 | ✅ | visit_id + stage + emr_draft |
+| 新增 `PostprocessChange` 模型 | ✅ | id/section/field/before/after/type/detail |
+| 新增 `PostprocessResponse` 模型 | ✅ | stage/changes/emr_draft_after/verification_issues/error |
+| 新增 `POST /api/emr/postprocess` 端点 | ✅ | 调用 PipelineOrchestrator.run_postprocess_stage |
+| 添加导入 | ✅ | 导入 Enum、PipelineOrchestrator |
+| 异常处理 | ✅ | try/except，失败时返回空变更列表和原始草稿 |
+| 日志输出 | ✅ | 请求接收、处理完成、异常均有日志 |
+
+### 修改文件
+
+| 文件 | 变更内容 |
+|------|----------|
+| `backend/api/emr.py` | 新增导入 Enum、PipelineOrchestrator；新增 PostprocessStage 枚举、PostprocessRequest/PostprocessChange/PostprocessResponse 模型；新增 postprocess_emr 端点 |
+
+## 2026-05-28 修改 /api/emr/process-stream SSE 端点
+
+### 变更说明
+
+在 `backend/api/emr.py` 中修改 `/api/emr/process-stream` SSE 端点，新增 `stop_after_draft` 查询参数和 `phase_complete` 事件处理。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 新增 `Query` 导入 | ✅ | 从 fastapi 导入 Query |
+| 函数签名新增 `stop_after_draft` 参数 | ✅ | 类型 bool，默认值 True，通过 Query 传入 |
+| 传递 `stop_after_draft` 给 pipeline | ✅ | process_with_callback 调用中新增 stop_after_draft 参数 |
+| 新增 `phase_complete` 事件处理 | ✅ | 检测 is_phase_complete 标记，推送 phase 事件 |
+| 日志输出 | ✅ | 记录 stop_after_draft 参数值和 phase_complete 事件 |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `backend/api/emr.py` | 新增 Query 导入；process_visit_stream 签名新增 stop_after_draft 参数；process_with_callback 调用传递 stop_after_draft；event_generator 新增 is_phase_complete 事件处理和日志 |# 完成状态记录
+
+## 2026-05-28 PipelineOrchestrator 新增 run_postprocess_stage 方法
+
+### 变更说明
+
+在 `backend/services/pipeline/orchestrator.py` 中新增 `run_postprocess_stage()` 方法，支持按阶段执行后处理（术语规范化或核查修订），并返回变更列表。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 新增 `run_postprocess_stage()` 方法 | ✅ | 接受 stage/emr_draft/visit_id 参数，按 stage 执行对应后处理逻辑 |
+| `stage="term_norm"` 分支 | ✅ | 调用 `_normalize_terms_in_draft()` 执行术语规范化 |
+| `stage="verification_revision"` 分支 | ✅ | 构建 PipelineContext，依次执行 ClaimVerificationStage 和 FieldRevisionStage |
+| 变更计算 | ✅ | 深拷贝 emr_draft 作为 before，调用 `_compute_changes()` 计算变更列表 |
+| 异常处理 | ✅ | try/except 包裹，失败时 logger.error 并返回包含 error 字段的降级结果 |
+| 日志输出 | ✅ | 记录 stage/visit_id、完成状态、变更数、失败错误信息 |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `backend/services/pipeline/orchestrator.py` | 在 `_compute_changes()` 方法前新增 `run_postprocess_stage()` 方法 |
+
+## 2026-05-28 PipelineOrchestrator 新增 stop_after_draft 参数和 _compute_changes 方法
+
+### 变更说明
+
+在 `backend/services/pipeline/orchestrator.py` 中修改 `process_with_callback()` 方法支持 `stop_after_draft` 参数，并新增 `_compute_changes()` 变更计算方法。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| `process_with_callback()` 新增 `stop_after_draft` 参数 | ✅ | 默认值为 True，控制草稿阶段后是否停止 |
+| `stop_after_draft=True` 分支 | ✅ | 执行阶段1和阶段2后推送 draft_ready 和 phase_complete 事件，然后 return |
+| `stop_after_draft=False` 分支 | ✅ | 执行全部4个阶段，推送 complete 事件（与原行为一致） |
+| `emit_progress` 新增 `is_phase_complete` 参数 | ✅ | 用于标记 phase_complete 事件 |
+| 新增 `_compute_changes()` 方法 | ✅ | 对比 before/after EMR 字段值差异，生成变更记录列表 |
+| 新增 `_determine_change_type()` 方法 | ✅ | 根据 stage 和变更特征判定变更类型（term_replacement/unsupported_claim_removed/missing_item_added/downgrade/revision） |
+| 新增 `_build_change_detail()` 方法 | ✅ | 生成人类可读的变更描述 |
+| 日志输出 | ✅ | 记录 stop_after_draft 参数值、流程走向、变更数量和类型分布 |
+| `LLMPipelineService` 包装类同步更新 | ✅ | 传递 stop_after_draft 参数到 PipelineOrchestrator |
+| 添加 `import copy` | ✅ | 用于后续深拷贝需求 |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `backend/services/pipeline/orchestrator.py` | 添加 import copy；修改 process_with_callback 签名和逻辑；新增 _compute_changes/_determine_change_type/_build_change_detail 方法 |
+| `backend/services/llm_pipeline_service.py` | process_with_callback 包装方法新增 stop_after_draft 参数 |
+
+## 2026-05-28 新增 POST /api/emr/finalize API 端点
+
+### 变更说明
+
+在 `backend/api/emr.py` 中新增 `POST /api/emr/finalize` 端点，用于前端编辑后的病历草稿定稿保存。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 新增 `FinalizeRequest` 模型 | ✅ | 包含 visit_id 和 emr_draft 字段 |
+| 新增 `FinalizeResponse` 模型 | ✅ | 包含 record_id、version、status 字段 |
+| 新增 `POST /api/emr/finalize` 端点 | ✅ | 规范化格式 -> 保存证据溯源 -> 保存病历记录 -> 返回结果 |
+| 添加导入 | ✅ | 导入 ValidationService 和 EMRPersistence |
+| 异常处理 | ✅ | try/except，失败时返回 status="failed" |
+| 日志输出 | ✅ | 每个关键步骤均有日志记录 |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `backend/api/emr.py` | 新增导入 ValidationService、EMRPersistence；新增 FinalizeRequest/FinalizeResponse 模型；新增 finalize_emr 端点 |
+
+## 2026-05-28 前端样式 -- 变更视图 CSS
+
+### 变更说明
+
+在 `frontend/css/ide.css` 文件末尾新增变更视图（Change View）相关的 CSS 样式，遵循文件中已有的 VS Code 暗色主题风格，使用 `--ide-*` CSS 变量。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| `.change-view` | ✅ | 变更视图容器，全高布局，背景色 var(--ide-editor-bg) |
+| `.change-view-toolbar` | ✅ | 变更视图工具栏，flex 水平布局，space-between |
+| `.change-card` | ✅ | 变更卡片，含 `.accepted` 和 `.rejected` 状态样式 |
+| `.diff-deleted` / `.diff-added` | ✅ | 差异高亮，删除为红色+删除线，新增为绿色 |
+| `.change-accept-btn` / `.change-reject-btn` | ✅ | 接受/拒绝按钮，含 hover 状态 |
+| `.postprocess-panel` | ✅ | 后处理面板容器 |
+| `.postprocess-stage-card` | ✅ | 后处理阶段卡片，含 `.running` 和 `.completed` 状态 |
+| `.change-type-tag` | ✅ | 变更类型标签，5 种类型颜色（term_replacement/unsupported_claim_removed/missing_item_added/downgrade/revision） |
+| `.change-field-path` | ✅ | 变更视图字段路径 |
+| `.change-text-before` / `.change-text-after` | ✅ | 变更前后文本，分别使用红色和绿色半透明背景 |
+| `.change-detail` | ✅ | 变更详情 |
+| `.change-actions` | ✅ | 变更操作按钮组，flex 布局 |
+| `.confirm-changes-btn` | ✅ | 确认变更按钮，全宽，primary 样式 |
+| `.finalize-btn` | ✅ | 后处理完成按钮，全宽，success 样式 |
+| `.stage-execute-btn` | ✅ | 阶段执行按钮，含 disabled 状态 |
+| `.change-summary` | ✅ | 变更摘要，success 颜色 |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `frontend/css/ide.css` | 在文件末尾新增 Change View Styles 区块，包含 16 组 CSS 选择器 |
+
+## 2026-05-28 重构 _normalize_terms_in_draft() 为两步流程
+
+### 变更说明
+
+重构 `PipelineOrchestrator._normalize_terms_in_draft()` 方法，从"仅中文+ICD-11直接匹配"改为"中英文双路径+LLM中间规范化"的两步流程。
+
+### 问题背景
+
+原有 `_normalize_terms_in_draft()` 存在三个问题：
+
+1. **仅支持中文**：非中文直接跳过（`if self.language != "zh": return emr_draft`）
+2. **ICD-11 不具备口语到规范术语的映射能力**：直接用 `ChineseTermClient.search_term()` 检索口语术语，ICD-11 是标准术语库，无法将口语表达映射到规范术语
+3. **缺少 LLM 中间规范化步骤**：没有利用 LLM 的语义理解能力将口语术语先规范化为医学标准用语
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 重构 `_normalize_terms_in_draft()` | ✅ | 改为两步流程：中文路径先 colloquial_synonyms 预处理，再统一调用 `normalize_draft_terms()`；英文路径直接调用 `normalize_draft_terms()` |
+| 删除 `_find_terms_in_text()` | ✅ | 已被 `TerminologyService._extract_terms_from_text()` 替代，移除冗余静态方法 |
+| 移除英文跳过逻辑 | ✅ | 删除 `if self.language != "zh": return emr_draft`，英文路径也执行规范化 |
+| 移除 ChineseTermClient 直接调用 | ✅ | 删除 `chinese_client.search_term()` 直接调用逻辑，统一通过 `normalize_draft_terms()` 处理 |
+| 移除 `re` 模块导入 | ✅ | `_find_terms_in_text()` 删除后不再使用 `re` 模块 |
+| 添加日志输出 | ✅ | 所有替换操作和关键步骤均添加日志记录 |
+
+### 重构后流程
+
+**中文路径（language=="zh"）**：
+
+1. colloquial_synonyms.json 快速替换（保留原有逻辑）
+2. 收集所有字段文本
+3. 调用 `terminology_service.normalize_draft_terms(text)` 获取替换映射
+4. 替换回草稿文本
+
+**英文路径（language!="zh"）**：
+
+1. 收集所有字段文本
+2. 调用 `terminology_service.normalize_draft_terms(text)` 获取替换映射
+3. 替换回草稿文本
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `backend/services/pipeline/orchestrator.py` | 重构 `_normalize_terms_in_draft()` 为两步流程；删除 `_find_terms_in_text()` 静态方法；移除 `re` 模块导入；移除英文跳过逻辑和 ChineseTermClient 直接调用 |
+
+## 2026-05-28 新增两步术语规范化方法（TerminologyService）
+
+### 变更说明
+
+在 `TerminologyService` 中新增5个方法，实现两步术语规范化流程：正则提取术语 → LLM批量规范化 → 术语库检索（ICD-11/UMLS）。主方法 `normalize_draft_terms()` 串联完整流程，返回原口语术语到最终规范化术语的替换映射。
+
+### 新增方法
+
+| 方法签名 | 核心逻辑 |
+|----------|----------|
+| `_extract_terms_from_text(self, text: str) -> List[str]` | 正则提取中文2-6字词组和英文2-4词医学短语，去重返回 |
+| `_llm_standardize_terms(self, terms: List[str]) -> Dict[str, str]` | 调用 `term_standardization` prompt 模板批量规范化，返回 `{原术语: 规范化术语}` 映射 |
+| `_lookup_standardized_terms_zh(self, term_mapping: Dict[str, str]) -> Dict[str, Tuple[str, Optional[str], Optional[str]]]` | 用 LLM 规范化结果在 ICD-11 本地术语库检索（先精确后模糊），返回 `{原术语: (最终术语, 编码, 编码系统)}` |
+| `_lookup_standardized_terms_en(self, term_mapping: Dict[str, str]) -> Dict[str, Tuple[str, Optional[str], Optional[str]]]` | 用 LLM 规范化结果在 UMLS 检索（选最高分 preferred term），返回 `{原术语: (最终术语, CUI, None)}` |
+| `normalize_draft_terms(self, text: str) -> Dict[str, str]` | 主方法：提取 → LLM 规范化 → 按 language 分流检索 → 构建替换映射（仅含原术语≠规范化术语的条目） |
+
+### 修改文件
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `backend/services/terminology_service.py` | 在 `get_cache_stats()` 方法之后新增5个方法 | 两步术语规范化：正则提取 + LLM规范化 + 术语库检索 |
+
+## 2026-05-28 删除废弃的 term_normalization 模块
+
+### 变更说明
+
+删除已标记为 DEPRECATED 的 `term_normalization.py` 文件。该文件属于六阶段流水线，已被四阶段流水线重构替代。术语规范化功能已融入 `orchestrator.py` 中的 `_normalize_terms_in_draft()` 方法。
+
+### 删除文件
+
+| 文件 | 说明 |
+|------|------|
+| `backend/services/pipeline/stages/term_normalization.py` | 整个文件删除，`TermNormalizationStage` 类不再存在 |
+
+### 清理引用
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `backend/services/pipeline/stages/__init__.py` | 移除 `from .term_normalization import TermNormalizationStage` | DEPRECATED 导入段中不再包含该类 |
+| `backend/services/pipeline/interactive.py` | 从废弃阶段元组中移除 `"term_normalization"` | 废弃阶段列表从4项减为3项 |
+| `backend/services/pipeline/debug_interactor.py` | 删除 `elif stage == "term_normalization"` 分支（4行） | 废弃阶段提示信息 |
+| `backend/services/llm_pipeline_service_en.py` | 删除4处引用：stage说明print、stages列表定义、next_stage跳转、elif分支 | role_annotation 完成后直接跳转 field_extraction |
+| `tests/test_llm_service.py` | 删除 `test_prompt_manager_render` 和 `test_prompt_manager_missing_var` 两个测试用例 | 测试依赖已不存在的 term_normalization prompt 模板 |
+
+## 2026-05-28 新增 term_standardization 中英文 prompt 模板
+
+### 变更说明
+
+在 `prompts.py` 中新增 `term_standardization` 模板，用于将口语化医学术语规范化为医学标准用语。支持中英文双语，输出 JSON 格式的术语映射。
+
+### 新增模板
+
+| 模板名称 | required_vars | 用途 |
+|----------|-------------|------|
+| `term_standardization`（中文） | `terms` | 将口语化医学术语规范为标准用语，支持 symptom/diagnosis/examination/treatment 四种类型指导 |
+| `term_standardization`（英文） | `terms` | 英文版术语规范化，功能与中文版一致 |
+
+### 修改文件
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `backend/services/llm/prompts.py` | `_load_chinese_templates()` 末尾新增 `term_standardization` 模板（~29行） | 在 `_load_chinese_evaluation_templates()` 调用之前 |
+| `backend/services/llm/prompts.py` | `_load_english_templates()` 末尾新增 `term_standardization` 模板（~29行） | 在 `_load_english_evaluation_templates()` 调用之前 |
+
+## 2026-05-27 新增草稿即时展示功能
+
+### 变更说明
+
+在 `frontend/js/agent.js` 中新增 SSE `draft_ready` 事件处理，使策展阶段生成 SOAP 草稿后编辑器能够即时渲染，无需等待全部4个阶段完成。
+
+### 修改文件
+
+`frontend/js/agent.js`：
+
+| 修改项 | 描述 |
+|--------|------|
+| `handleSSEEvent()` | 新增 `draft_ready` 分支，转发到 `handleDraftReady()` |
+| `handleDraftReady()` | 新增函数：接收 `emr_draft` 数据，包装为 `emrRecord` 格式，更新 state 并发射 `emrGenerated` 事件驱动编辑器即时渲染 |
+| `handleProcessComplete()` | 新增核查问题摘要显示：从 `verification_issues` 中提取 `unsupported_claims`、`missing_items`、`hard_rule_violations` 三类问题计数，以 warning 或 success 消息展示 |
+| `updateStageMessage()` | 阶段总数从 `/5` 改为 `/4`，success 状态 icon 从 `bot` 改为 `checkCircle` |
+
+### 草稿即时展示流程
+
+```
+后端SSE → event: draft_ready → handleDraftReady()
+  → 包装 emr_draft 为 emrRecord 格式
+  → 设置 state.emrRecord
+  → addMessage 告知用户草稿已生成
+  → App.emit('emrGenerated', { emrRecord })
+  → 编辑器监听事件，即时渲染草稿
+  → 后台继续执行核查阶段...
+  → event: stage_update (阶段3/4: 后置核查)
+  → event: stage_update (阶段4/4: 字段级修订)
+  → event: complete → handleProcessComplete() 显示核查问题摘要
+```
+
+### 核查问题摘要展示
+
+- 有核查问题：warning 消息，格式 `核查发现 N 个问题：无依据声明 X 项 | 关键遗漏 Y 项 | 规则冲突 Z 项`
+- 无核查问题：success 消息，格式 `核查通过，无问题发现`
+
+---
+
+## 2026-05-27 旧模板废弃标记与Stage导出更新
+
+### 变更说明
+
+在 `prompts.py` 中为7个旧六阶段流水线模板添加 DEPRECATED 标记，同时更新 `stages/__init__.py` 导出所有 Stage 类（含废弃的旧阶段）。
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `backend/services/llm/prompts.py` | 为7个旧模板注册行前添加 `# DEPRECATED: 六阶段流水线已重构为四阶段` 注释 |
+| `backend/services/pipeline/stages/__init__.py` | 导出所有 Stage 类（新4阶段 + 旧5阶段标记为 DEPRECATED） |
+
+### prompts.py 废弃标记详情
+
+| 旧模板名 | 行号范围 | 用途 |
+|----------|----------|------|
+| `fact_extraction` | ~233 | 增量抽取原子临床事实 |
+| `fact_consolidation` | ~294 | 重复事实合并 + 冲突标记 |
+| `soap_verification` | ~339 | SOAP 草稿核查 |
+| `emr_generation_so` | ~655 | 分节生成主观+客观数据 |
+| `emr_generation_assessment` | ~701 | 分节生成评估 |
+| `emr_generation_plan` | ~742 | 分节生成计划 |
+| `emr_generation_ap` | ~786 | 分节合并生成评估+计划 |
+
+未标记的新四阶段模板：`direct_soap_generation`、`claim_verification`、`checklist_verification`、`field_revision`。
+
+### stages/\_\_init\_\_.py 导出清单
+
+**新四阶段（活跃）**：
+
+| Stage 类 | 文件 |
+|----------|------|
+| `TurnCleaningStage` | `turn_cleaning.py` |
+| `DirectSOAPGenerationStage` | `direct_soap_generation.py` |
+| `ClaimVerificationStage` | `claim_verification.py` |
+| `FieldRevisionStage` | `field_revision.py` |
+
+**旧阶段（DEPRECATED，向后兼容保留）**：
+
+| Stage 类 | 文件 |
+|----------|------|
+| `FactExtractionStage` | `fact_extraction.py` |
+| `FactConsolidationStage` | `fact_consolidation.py` |
+| `TermNormalizationStage` | `term_normalization.py` |
+| `SOAPGenerationStage` | `soap_generation.py` |
+| `VerificationStage` | `verification.py` |
+
+---
+
+## 2026-05-27 修复：草稿病历生成后前端不显示的问题
+
+### 问题描述
+
+生成草稿后，前端没有显示草稿病历（`draft_ready` SSE 事件未触发编辑器渲染）。
+
+### 排查过程
+
+1. 检查 `orchestrator.py` L231-235：`draft_event` 正确设置 `is_draft_ready=True` 和 `emr_draft` 后 yield
+2. 检查 `emr.py` L206-210：正确检测 `is_draft_ready` 并发送 `event: draft_ready` SSE 事件
+3. 检查 `agent.js` L519-528：`handleSSEEvent` 正确将 `draft_ready` 事件路由到 `handleDraftReady`
+4. 检查 `agent.js` L561-589：`handleDraftReady` 正确构建 `emrRecord` 并调用 `App.emit('emrGenerated', ...)`
+5. 检查 `editor.js` L63-70：正确监听 `emrGenerated` 事件，调用 `displayEMR` 和 `setActivePanel('editor')`
+6. **发现 BUG**：`emr.py` L221 检查 `event.get("stage") == 0` 来判断是否为最终完成事件，但新4阶段流水线的最终结果没有 `stage` 字段，导致 `complete` SSE 事件永远不会被发送
+
+### 已修复
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 修复 `complete` 事件检查逻辑 | ✅ 完成 | `emr.py`：将 `event.get("stage") == 0` 改为 `"emr_result" in event`，直接匹配新流水线结果格式 |
+| 添加后端调试日志 | ✅ 完成 | `orchestrator.py`：记录 draft_event yield 时的 emr_draft 字段信息 |
+| 添加后端调试日志 | ✅ 完成 | `emr.py`：记录 draft_ready 和 complete SSE 事件发送时的详细信息 |
+| 添加前端调试日志 | ✅ 完成 | `agent.js`：在 handleSSEEvent、handleDraftReady 中添加 console.log |
+| 添加前端调试日志 | ✅ 完成 | `editor.js`：在 emrGenerated 事件监听器中添加 console.log |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `backend/api/emr.py` | L206-248：重写 draft_ready 和 complete 事件逻辑，添加调试日志，修复 `stage == 0` → `"emr_result" in event` |
+| `backend/services/pipeline/orchestrator.py` | L233-235：添加 yield draft_ready 事件的调试日志 |
+| `frontend/js/agent.js` | L519-585：在 handleSSEEvent 和 handleDraftReady 中添加 console.log 调试信息 |
+| `frontend/js/editor.js` | L63-64：在 emrGenerated 事件监听器中添加 console.log 调试信息 |
+
+### 待验证
+
+- 用户重新测试后，通过浏览器控制台和后端日志确认 `draft_ready` 事件是否正确传递
+
+---
+
+## 2026-05-27 前端添加关闭病历按钮
+
+### 问题背景
+
+用户从历史病历列表查看病历后，编辑器会显示病历内容，但没有途径返回到"未生成病历"的欢迎页面。
+
+### 已修改
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 添加关闭按钮 HTML | ✅ | `emr.html`：在 `.editor-toolbar-right` 最前面添加 `#closeEMRView` 按钮，使用 x-circle SVG 图标 |
+| 添加关闭逻辑 | ✅ | `app.js`：新增 `closeEMRView()` 函数，清空 visitId/emrRecord/currentRecordId 状态，显示 welcome 页面，更新标题栏为"未生成病历" |
+| 添加事件绑定 | ✅ | `app.js`：在 DOMContentLoaded 中绑定 `#closeEMRView` 的 click 事件 |
+| 添加按钮样式 | ✅ | `ide.css`：新增 `.editor-btn-close` 样式，灰色边框按钮，hover 时突出显示 |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `frontend/emr.html` | 在编辑器工具栏右侧添加关闭按钮 |
+| `frontend/js/app.js` | 新增 `closeEMRView()` 函数、事件绑定、导出 |
+| `frontend/css/ide.css` | 新增 `.editor-btn-close` 样式
+
+### 交互流程
+
+1. 用户在历史病历面板点击"查看" → 编辑器显示病历内容
+2. 用户点击编辑器工具栏的「关闭」按钮 → 清空病历状态 → 显示欢迎页面 → 标题栏恢复为"未生成病历"
+
+---
+
+## 2026-05-27 新增 ICD-11 术语规范化后处理步骤
+
+### 问题背景
+
+`TerminologyService` 初始化时已加载 ICD-11 中文术语库（`ChineseTermIndexer.load_icd11_terms()`）和口语化同义词映射表（`colloquial_synonyms.json`），但四阶段流水线从未调用术语规范化——`DirectSOAPGenerationStage` 仅依赖 LLM 内置知识，未利用本地 ICD-11 知识库。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 添加 `_normalize_terms_in_draft()` 方法 | ✅ | 在 `PipelineOrchestrator` 中新增后处理方法，遍历 SOAP 各节的 value 字段，执行口语词替换 + ICD-11 术语匹配 |
+| 添加 `_find_terms_in_text()` 静态方法 | ✅ | 从文本中提取 2-6 字中文候选医学术语，用于 ICD-11 匹配 |
+| 在两种处理模式中调用 | ✅ | `process_transcript()` 和 `process_with_callback()` 中，阶段2完成后、阶段3开始前调用 `_normalize_terms_in_draft()`（阶段2.5） |
+| 仅中文模式生效 | ✅ | 英文模式跳过术语规范化 |
+
+### 规范化步骤
+
+1. **口语词替换**：加载 `colloquial_synonyms.json`（如"发烧"→"发热"、"拉肚子"→"腹泻"），直接替换 SOAP 草稿中的口语词
+2. **ICD-11 匹配**：对 SOAP 各节文本提取 2-6 字医学术语，通过 `ChineseTermClient.search_term()` 在本地 ICD-11 数据中进行模糊匹配
+3. **遍历所有 SOAP 节**：subjective、objective、assessment、plan 四个节的 value 字段均参与规范化
+4. **日志记录**：每次替换都通过 `logger.info/debug` 输出，方便追踪
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `backend/services/pipeline/orchestrator.py` | 新增 `ChineseTermIndexer` 导入；新增 `_normalize_terms_in_draft()` 和 `_find_terms_in_text()` 方法；在 `process_transcript()` 和 `process_with_callback()` 中添加阶段2.5调用 |
+
+---
+
+## 2026-05-27 删除前端 LLM 标注片段展示
+
+### 问题背景
+
+当前四阶段流水线使用 `DirectSOAPGenerationStage` 直接从转写文本生成病历草稿，**不再经过 LLM 标注阶段**。但前端 `editor.js` 和 `emr.js` 仍保留"LLM 标注片段"标签和表格列，展示误导性信息。
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 删除 editor.js 中的 LLM 标注片段 | ✅ | 移除 `<div class="evidence-label">LLM标注片段</div>` 和 `<div class="evidence-content">`，标签改为"原始对话转写"；表格移除"标注片段"列头和对应 `<td>` |
+| 删除 emr.js 中的 LLM 标注片段 | ✅ | 移除 `<div class="evidence-label">LLM标注片段：</div>` 和 `<div class="evidence-content">`，标签改为"原始对话转写："；表格移除"标注片段"列头和对应 `<td>` |
+| 后端字段保留 | ✅ | `EvidenceSpan` 模型中的 `content` 字段保留（向后兼容），数据库和 API 不做修改 |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `frontend/js/editor.js` | 删除 LLM 标注片段标签和表格列，标签改为"原始对话转写" |
+| `frontend/js/emr.js` | 删除 LLM 标注片段标签和表格列，标签改为"原始对话转写：" |
+
+---
+
+## 2026-05-27 精简 direct_soap_generation 提示词
+
+### 变更说明
+
+精简 `direct_soap_generation` 提示词，去掉三层诊断策略、幻觉检测、evidence_traces 构建规则等复杂指令。提示词从 ~87 行缩减至 ~40 行，仅保留基础 SOAP 字段生成和 `source_turn_indices` 标注。幻觉检测和证据遗漏交给后续质量检查阶段（ClaimVerificationStage、FieldRevisionStage）处理。
+
+### 精简对比
+
+| 项目 | 精简前 | 精简后 |
+|------|--------|--------|
+| 提示词长度 | ~87 行 | ~40 行 |
+| 核心原则 | 3 条详细规则（防编造、三步验证） | 无（交给质量检查） |
+| 生成规则 | 逐段详细说明（S/O/A/P 各有子规则） | 仅列字段名 |
+| 诊断策略 | 三层诊断 per-item（explicit/suspected/symptom） | 无，直接填 diagnosis |
+| 输出字段 | 含 assessment_items、plan_items（medications/tests/follow_up/education） | 无，仅基础 SOAP 字段 |
+| source_turn_indices | 保留 | 保留 |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `backend/services/llm/prompts.py` | 精简 `direct_soap_generation` 模板，移除三层诊断策略、幻觉检测指令、assessment_items/plan_items 输出 |
+
+### 下游兼容性
+
+- `direct_soap_generation.py` 的 `_empty_draft()` 和 `_build_evidence_traces()` 无需修改，与精简输出结构一致
+- `emr_persistence.py` 有 `if assessment_items:` 守卫，跳过空的 assessment_items
+- `evidence_enricher.py` 有 `if assessment_items:` 守卫，跳过空的 assessment_items
+
 ## 2026-05-27 新增 certainty_errors 确定性核查（ClaimVerificationStage 步骤D）
 
 ### 变更说明
@@ -698,6 +2285,235 @@ Activity Bar (48px) | Sidebar (340px) | Editor Area (flex)
 | 总耗时 | 225秒 | 120-150秒 | 33-47% |
 
 ---
+
+
+## 2026-05-20 BugFix: 调试模式病历未保存到数据库
+
+### 问题描述
+
+调试模式完成所有阶段后，前端显示"所有阶段处理完成"，但没有生成病历（前端没有显示病历）。
+
+### 问题分析
+
+通过代码审查发现，调试模式的 `process_stage_with_user_input()` 方法在 `verification` 阶段完成后，只返回了 `completed: True`，但**没有调用 `_save_emr_record()` 方法保存病历到数据库**。
+
+正常模式（`process_visit()` 方法）在处理完所有阶段后会调用：
+```python
+self._save_evidence_spans_from_emr(emr_final, visit_id)
+self._save_emr_record(emr_final, visit_id)
+```
+
+但调试模式缺少这一步。
+
+### 修复内容
+
+在 `process_stage_with_user_input()` 方法的 `verification` 阶段处理逻辑中，添加病历保存逻辑：
+
+1. 从 context 中获取 `subjective`、`objective`、`assessment`、`plan`、`assessment_items`、`plan_items`
+2. 构建 `emr_final`（优先使用 `soap_final`，否则使用各部分数据）
+3. 调用 `_normalize_emr_format()` 格式化病历
+4. 调用 `_save_emr_record()` 保存到数据库
+5. 返回结果中新增 `emr_saved: True` 标记
+
+### 修改文件
+
+1. **backend/services/llm_pipeline_service.py**
+   - 修改 `process_stage_with_user_input()` 方法的 `verification` 分支
+   - 新增病历保存逻辑
+
+### 预期效果
+
+调试模式完成所有阶段后，病历会正确保存到数据库，前端可以正常显示病历内容。
+
+### 后续修复：证据溯源缺失
+
+**问题**：调试模式生成的病历没有证据溯源。
+
+**原因**：
+1. `fact_extraction` 阶段没有保存原子事实到数据库
+2. `verification` 阶段没有填充证据溯源（`_enrich_evidence_traces`）和保存证据溯源（`_save_evidence_spans_from_emr`）
+
+**修复内容**：
+
+1. 在 `fact_extraction` 阶段添加 `_save_atomic_facts(facts_data, visit_id)` 保存原子事实到数据库
+2. 在 `verification` 阶段添加：
+   - 从数据库加载原子事实：`fact_service.get_facts_by_visit(visit_id)`
+   - 填充证据溯源：`_enrich_evidence_traces(emr_final, fact_records, turns)`
+   - 保存证据溯源：`_save_evidence_spans_from_emr(emr_final, visit_id)`
+
+## 2026-05-20 BugFix: 商汤API调用400错误
+
+### 问题描述
+
+调用商汤API时出现400 Bad Request错误，导致LLM调用失败。
+
+### 问题分析（已修正）
+
+**初步分析（错误）**：
+误以为商汤API使用不同的参数格式（`max_new_tokens`、`{"enabled": true}`）
+
+**实际原因**：
+根据官方文档，DeepSeek V4 Flash模型的API格式是正确的：
+- 模型ID：`deepseek-v4-flash`
+- API endpoint：`https://token.sensenova.cn/v1/chat/completions`
+- thinking参数格式：`{"type": "enabled", "reasoning_effort": "high"}`（正确）
+- 使用`max_tokens`参数（正确）
+- 支持JSON模式`response_format`（正确）
+
+### 修复内容
+
+1. **撤销错误的参数格式修改**，恢复原有正确的格式
+2. **添加详细的错误日志**：
+   - 在HTTP错误时获取API返回的具体错误内容
+   - 记录完整的请求payload便于调试
+
+### 修改文件
+
+1. **backend/services/llm/openai_compatible_adapter.py**
+   - 撤销商汤API适配逻辑
+   - 恢复原有参数格式
+   - 添加`HTTPStatusError`详细错误日志
+   - 添加请求payload日志
+
+### 后续排查
+
+需要查看详细错误日志来确定400错误的具体原因：
+- API Key问题
+- 模型未开通
+- 其他参数问题
+
+### 真正原因（已定位）
+
+通过详细错误日志发现：
+```
+'messages' must contain the word 'json' in some form, to use 'response_format' of type 'json_object'.
+```
+
+**问题**：当使用 `response_format: {"type": "json_object"}` 时，messages 中必须包含 "json" 这个词，这是 OpenAI API 的要求。
+
+### 最终修复
+
+在启用 json_mode 时，在 messages 中添加 system message：
+```python
+if use_json_mode:
+    messages.append({"role": "system", "content": "请以JSON格式输出结果。"})
+```
+
+### 修改文件
+
+1. **backend/services/llm/openai_compatible_adapter.py**
+   - 在 json_mode 启用时添加包含 "json" 关键词的 system message
+
+## 2026-05-20 BugFix: 事实合并导致所有事实被删除
+
+### 问题描述
+
+病历生成后内容为空，证据溯源缺失。
+
+### 问题分析
+
+通过日志发现：
+```
+事实收束完成: 合并=20, 冲突=0, 补判=0, 最终=0
+从数据库查询到 0 条原子事实用于阶段3规范化
+```
+
+**根本原因**：LLM返回的事实收束结果中，`merged_from` 列表包含了 `fact_id` 本身：
+```json
+{
+  "fact_id": "fact_xxx",
+  "merged_from": ["fact_xxx"],
+  ...
+}
+```
+
+在合并逻辑中，代码会删除 `merged_from` 中的所有事实，包括要保留的事实本身！
+
+```python
+for from_id in merged_from_ids:
+    from_fact = self.db.query(AtomicFact).filter(AtomicFact.fact_id == from_id).first()
+    if from_fact:
+        ...
+        self.db.delete(from_fact)  # 这里删除了保留的事实！
+```
+
+### 修复内容
+
+在 `_apply_fact_merges()` 方法中添加检查，跳过 `from_id` 等于 `keep_fact_id` 的情况：
+
+```python
+for from_id in merged_from_ids:
+    if from_id == keep_fact_id:
+        continue  # 跳过要保留的事实
+    from_fact = self.db.query(AtomicFact).filter(AtomicFact.fact_id == from_id).first()
+    ...
+```
+
+### 修改文件
+
+1. **backend/services/llm_pipeline_service.py**
+   - 修改 `_apply_fact_merges()` 方法，添加跳过保留事实的逻辑
+
+### 预期效果
+
+事实合并后，保留的事实不会被错误删除，病历生成和证据溯源正常工作。
+
+## 2026-05-20 BugFix: ASR修正索引映射失败
+
+### 问题描述
+
+日志显示：
+```
+解析到 2 个清洗后的turn
+ASR修正跳过: 找不到turn_index=0对应的turn
+ASR修正跳过: 找不到turn_index=1对应的turn
+```
+
+### 问题分析
+
+**根本原因**：LLM返回的 `turn_id` 是相对于当前 segment 的位置索引（0, 1, 2...），而代码使用 `turn_by_index = {turn.turn_index: turn for turn in segment}` 进行查找，期望的是全局的 `turn_index`。
+
+当 segment 不是从 `turn_index=0` 开始时（例如 segment 包含 turn_index 为 100 和 101 的两个 turn），就会出现找不到对应 turn 的情况。
+
+**示例**：
+- segment 包含 turn_index 为 100 和 101 的两个 turn
+- `_format_segment` 输出 `[#100]` 和 `[#101]`
+- LLM 返回 `turn_id: 0` 和 `turn_id: 1`（相对于 segment 的位置）
+- 代码用 `turn_by_index.get(0)` 查找，找不到 turn_index=100 的 turn
+
+### 修复内容
+
+在 `_parse_cleaning_response()` 和 `_apply_asr_corrections()` 方法中添加回退逻辑：
+
+1. 添加调试日志显示 segment 中可用的 turn_index 列表
+2. 当 `turn_by_index.get(turn_id)` 找不到时，尝试按位置匹配：`segment[i]` 对应 `turn_id=i`
+3. 记录回退匹配的详细日志
+
+```python
+turn = turn_by_index.get(turn_id)
+if not turn:
+    if i < len(segment):
+        turn = segment[i]
+        logger.warning(
+            f"turn_id={turn_id}不在segment索引中, "
+            f"回退到位置匹配: 位置{i} -> turn_index={turn.turn_index}"
+        )
+    else:
+        logger.warning(
+            f"turn_id={turn_id}匹配失败: 位置{i}超出segment范围(len={len(segment)})"
+        )
+        continue
+```
+
+### 修改文件
+
+1. **backend/services/llm_pipeline_service.py**
+   - 修改 `_parse_cleaning_response()` 方法，添加索引映射回退逻辑
+   - 修改 `_apply_asr_corrections()` 方法，添加索引映射回退逻辑
+
+### 预期效果
+
+ASR修正和角色识别能够正确匹配到对应的 turn，不再出现"找不到turn"的警告。
 
 ## 2026-05-20 BugFix: turn_id索引匹配与max_tokens不足
 
@@ -4394,473 +6210,6 @@ tail -f data/logs/app_20260417.log
 
 影响：之前通过调试模式保存的评估结果中，文档质量数据被安全风险数据覆盖。需要重新运行调试模式以保存正确的评估结果。
 
----
 
-## 2026-05-20 BugFix: 调试模式病历未保存到数据库
 
-### 问题描述
 
-调试模式完成所有阶段后，前端显示"所有阶段处理完成"，但没有生成病历（前端没有显示病历）。
-
-### 问题分析
-
-通过代码审查发现，调试模式的 `process_stage_with_user_input()` 方法在 `verification` 阶段完成后，只返回了 `completed: True`，但**没有调用 `_save_emr_record()` 方法保存病历到数据库**。
-
-正常模式（`process_visit()` 方法）在处理完所有阶段后会调用：
-```python
-self._save_evidence_spans_from_emr(emr_final, visit_id)
-self._save_emr_record(emr_final, visit_id)
-```
-
-但调试模式缺少这一步。
-
-### 修复内容
-
-在 `process_stage_with_user_input()` 方法的 `verification` 阶段处理逻辑中，添加病历保存逻辑：
-
-1. 从 context 中获取 `subjective`、`objective`、`assessment`、`plan`、`assessment_items`、`plan_items`
-2. 构建 `emr_final`（优先使用 `soap_final`，否则使用各部分数据）
-3. 调用 `_normalize_emr_format()` 格式化病历
-4. 调用 `_save_emr_record()` 保存到数据库
-5. 返回结果中新增 `emr_saved: True` 标记
-
-### 修改文件
-
-1. **backend/services/llm_pipeline_service.py**
-   - 修改 `process_stage_with_user_input()` 方法的 `verification` 分支
-   - 新增病历保存逻辑
-
-### 预期效果
-
-调试模式完成所有阶段后，病历会正确保存到数据库，前端可以正常显示病历内容。
-
-### 后续修复：证据溯源缺失
-
-**问题**：调试模式生成的病历没有证据溯源。
-
-**原因**：
-1. `fact_extraction` 阶段没有保存原子事实到数据库
-2. `verification` 阶段没有填充证据溯源（`_enrich_evidence_traces`）和保存证据溯源（`_save_evidence_spans_from_emr`）
-
-**修复内容**：
-
-1. 在 `fact_extraction` 阶段添加 `_save_atomic_facts(facts_data, visit_id)` 保存原子事实到数据库
-2. 在 `verification` 阶段添加：
-   - 从数据库加载原子事实：`fact_service.get_facts_by_visit(visit_id)`
-   - 填充证据溯源：`_enrich_evidence_traces(emr_final, fact_records, turns)`
-   - 保存证据溯源：`_save_evidence_spans_from_emr(emr_final, visit_id)`
-
-## 2026-05-20 BugFix: 商汤API调用400错误
-
-### 问题描述
-
-调用商汤API时出现400 Bad Request错误，导致LLM调用失败。
-
-### 问题分析（已修正）
-
-**初步分析（错误）**：
-误以为商汤API使用不同的参数格式（`max_new_tokens`、`{"enabled": true}`）
-
-**实际原因**：
-根据官方文档，DeepSeek V4 Flash模型的API格式是正确的：
-- 模型ID：`deepseek-v4-flash`
-- API endpoint：`https://token.sensenova.cn/v1/chat/completions`
-- thinking参数格式：`{"type": "enabled", "reasoning_effort": "high"}`（正确）
-- 使用`max_tokens`参数（正确）
-- 支持JSON模式`response_format`（正确）
-
-### 修复内容
-
-1. **撤销错误的参数格式修改**，恢复原有正确的格式
-2. **添加详细的错误日志**：
-   - 在HTTP错误时获取API返回的具体错误内容
-   - 记录完整的请求payload便于调试
-
-### 修改文件
-
-1. **backend/services/llm/openai_compatible_adapter.py**
-   - 撤销商汤API适配逻辑
-   - 恢复原有参数格式
-   - 添加`HTTPStatusError`详细错误日志
-   - 添加请求payload日志
-
-### 后续排查
-
-需要查看详细错误日志来确定400错误的具体原因：
-- API Key问题
-- 模型未开通
-- 其他参数问题
-
-### 真正原因（已定位）
-
-通过详细错误日志发现：
-```
-'messages' must contain the word 'json' in some form, to use 'response_format' of type 'json_object'.
-```
-
-**问题**：当使用 `response_format: {"type": "json_object"}` 时，messages 中必须包含 "json" 这个词，这是 OpenAI API 的要求。
-
-### 最终修复
-
-在启用 json_mode 时，在 messages 中添加 system message：
-```python
-if use_json_mode:
-    messages.append({"role": "system", "content": "请以JSON格式输出结果。"})
-```
-
-### 修改文件
-
-1. **backend/services/llm/openai_compatible_adapter.py**
-   - 在 json_mode 启用时添加包含 "json" 关键词的 system message
-
-## 2026-05-20 BugFix: 事实合并导致所有事实被删除
-
-### 问题描述
-
-病历生成后内容为空，证据溯源缺失。
-
-### 问题分析
-
-通过日志发现：
-```
-事实收束完成: 合并=20, 冲突=0, 补判=0, 最终=0
-从数据库查询到 0 条原子事实用于阶段3规范化
-```
-
-**根本原因**：LLM返回的事实收束结果中，`merged_from` 列表包含了 `fact_id` 本身：
-```json
-{
-  "fact_id": "fact_xxx",
-  "merged_from": ["fact_xxx"],
-  ...
-}
-```
-
-在合并逻辑中，代码会删除 `merged_from` 中的所有事实，包括要保留的事实本身！
-
-```python
-for from_id in merged_from_ids:
-    from_fact = self.db.query(AtomicFact).filter(AtomicFact.fact_id == from_id).first()
-    if from_fact:
-        ...
-        self.db.delete(from_fact)  # 这里删除了保留的事实！
-```
-
-### 修复内容
-
-在 `_apply_fact_merges()` 方法中添加检查，跳过 `from_id` 等于 `keep_fact_id` 的情况：
-
-```python
-for from_id in merged_from_ids:
-    if from_id == keep_fact_id:
-        continue  # 跳过要保留的事实
-    from_fact = self.db.query(AtomicFact).filter(AtomicFact.fact_id == from_id).first()
-    ...
-```
-
-### 修改文件
-
-1. **backend/services/llm_pipeline_service.py**
-   - 修改 `_apply_fact_merges()` 方法，添加跳过保留事实的逻辑
-
-### 预期效果
-
-事实合并后，保留的事实不会被错误删除，病历生成和证据溯源正常工作。
-
-## 2026-05-20 BugFix: ASR修正索引映射失败
-
-### 问题描述
-
-日志显示：
-```
-解析到 2 个清洗后的turn
-ASR修正跳过: 找不到turn_index=0对应的turn
-ASR修正跳过: 找不到turn_index=1对应的turn
-```
-
-### 问题分析
-
-**根本原因**：LLM返回的 `turn_id` 是相对于当前 segment 的位置索引（0, 1, 2...），而代码使用 `turn_by_index = {turn.turn_index: turn for turn in segment}` 进行查找，期望的是全局的 `turn_index`。
-
-当 segment 不是从 `turn_index=0` 开始时（例如 segment 包含 turn_index 为 100 和 101 的两个 turn），就会出现找不到对应 turn 的情况。
-
-**示例**：
-- segment 包含 turn_index 为 100 和 101 的两个 turn
-- `_format_segment` 输出 `[#100]` 和 `[#101]`
-- LLM 返回 `turn_id: 0` 和 `turn_id: 1`（相对于 segment 的位置）
-- 代码用 `turn_by_index.get(0)` 查找，找不到 turn_index=100 的 turn
-
-### 修复内容
-
-在 `_parse_cleaning_response()` 和 `_apply_asr_corrections()` 方法中添加回退逻辑：
-
-1. 添加调试日志显示 segment 中可用的 turn_index 列表
-2. 当 `turn_by_index.get(turn_id)` 找不到时，尝试按位置匹配：`segment[i]` 对应 `turn_id=i`
-3. 记录回退匹配的详细日志
-
-```python
-turn = turn_by_index.get(turn_id)
-if not turn:
-    if i < len(segment):
-        turn = segment[i]
-        logger.warning(
-            f"turn_id={turn_id}不在segment索引中, "
-            f"回退到位置匹配: 位置{i} -> turn_index={turn.turn_index}"
-        )
-    else:
-        logger.warning(
-            f"turn_id={turn_id}匹配失败: 位置{i}超出segment范围(len={len(segment)})"
-        )
-        continue
-```
-
-### 修改文件
-
-1. **backend/services/llm_pipeline_service.py**
-   - 修改 `_parse_cleaning_response()` 方法，添加索引映射回退逻辑
-   - 修改 `_apply_asr_corrections()` 方法，添加索引映射回退逻辑
-
-### 预期效果
-
-ASR修正和角色识别能够正确匹配到对应的 turn，不再出现"找不到turn"的警告。
-
-## 2026-05-27 新增草稿即时展示功能
-
-### 变更说明
-
-在 `frontend/js/agent.js` 中新增 SSE `draft_ready` 事件处理，使策展阶段生成 SOAP 草稿后编辑器能够即时渲染，无需等待全部4个阶段完成。
-
-### 修改文件
-
-`frontend/js/agent.js`：
-
-| 修改项 | 描述 |
-|--------|------|
-| `handleSSEEvent()` | 新增 `draft_ready` 分支，转发到 `handleDraftReady()` |
-| `handleDraftReady()` | 新增函数：接收 `emr_draft` 数据，包装为 `emrRecord` 格式，更新 state 并发射 `emrGenerated` 事件驱动编辑器即时渲染 |
-| `handleProcessComplete()` | 新增核查问题摘要显示：从 `verification_issues` 中提取 `unsupported_claims`、`missing_items`、`hard_rule_violations` 三类问题计数，以 warning 或 success 消息展示 |
-| `updateStageMessage()` | 阶段总数从 `/5` 改为 `/4`，success 状态 icon 从 `bot` 改为 `checkCircle` |
-
-### 草稿即时展示流程
-
-```
-后端SSE → event: draft_ready → handleDraftReady()
-  → 包装 emr_draft 为 emrRecord 格式
-  → 设置 state.emrRecord
-  → addMessage 告知用户草稿已生成
-  → App.emit('emrGenerated', { emrRecord })
-  → 编辑器监听事件，即时渲染草稿
-  → 后台继续执行核查阶段...
-  → event: stage_update (阶段3/4: 后置核查)
-  → event: stage_update (阶段4/4: 字段级修订)
-  → event: complete → handleProcessComplete() 显示核查问题摘要
-```
-
-### 核查问题摘要展示
-
-- 有核查问题：warning 消息，格式 `核查发现 N 个问题：无依据声明 X 项 | 关键遗漏 Y 项 | 规则冲突 Z 项`
-- 无核查问题：success 消息，格式 `核查通过，无问题发现`
-
----
-
-## 2026-05-27 旧模板废弃标记与Stage导出更新
-
-### 变更说明
-
-在 `prompts.py` 中为7个旧六阶段流水线模板添加 DEPRECATED 标记，同时更新 `stages/__init__.py` 导出所有 Stage 类（含废弃的旧阶段）。
-
-### 修改文件
-
-| 文件 | 修改内容 |
-|------|----------|
-| `backend/services/llm/prompts.py` | 为7个旧模板注册行前添加 `# DEPRECATED: 六阶段流水线已重构为四阶段` 注释 |
-| `backend/services/pipeline/stages/__init__.py` | 导出所有 Stage 类（新4阶段 + 旧5阶段标记为 DEPRECATED） |
-
-### prompts.py 废弃标记详情
-
-| 旧模板名 | 行号范围 | 用途 |
-|----------|----------|------|
-| `fact_extraction` | ~233 | 增量抽取原子临床事实 |
-| `fact_consolidation` | ~294 | 重复事实合并 + 冲突标记 |
-| `soap_verification` | ~339 | SOAP 草稿核查 |
-| `emr_generation_so` | ~655 | 分节生成主观+客观数据 |
-| `emr_generation_assessment` | ~701 | 分节生成评估 |
-| `emr_generation_plan` | ~742 | 分节生成计划 |
-| `emr_generation_ap` | ~786 | 分节合并生成评估+计划 |
-
-未标记的新四阶段模板：`direct_soap_generation`、`claim_verification`、`checklist_verification`、`field_revision`。
-
-### stages/\_\_init\_\_.py 导出清单
-
-**新四阶段（活跃）**：
-
-| Stage 类 | 文件 |
-|----------|------|
-| `TurnCleaningStage` | `turn_cleaning.py` |
-| `DirectSOAPGenerationStage` | `direct_soap_generation.py` |
-| `ClaimVerificationStage` | `claim_verification.py` |
-| `FieldRevisionStage` | `field_revision.py` |
-
-**旧阶段（DEPRECATED，向后兼容保留）**：
-
-| Stage 类 | 文件 |
-|----------|------|
-| `FactExtractionStage` | `fact_extraction.py` |
-| `FactConsolidationStage` | `fact_consolidation.py` |
-| `TermNormalizationStage` | `term_normalization.py` |
-| `SOAPGenerationStage` | `soap_generation.py` |
-| `VerificationStage` | `verification.py` |
-
----
-
-## 2026-05-27 修复：草稿病历生成后前端不显示的问题
-
-### 问题描述
-
-生成草稿后，前端没有显示草稿病历（`draft_ready` SSE 事件未触发编辑器渲染）。
-
-### 排查过程
-
-1. 检查 `orchestrator.py` L231-235：`draft_event` 正确设置 `is_draft_ready=True` 和 `emr_draft` 后 yield
-2. 检查 `emr.py` L206-210：正确检测 `is_draft_ready` 并发送 `event: draft_ready` SSE 事件
-3. 检查 `agent.js` L519-528：`handleSSEEvent` 正确将 `draft_ready` 事件路由到 `handleDraftReady`
-4. 检查 `agent.js` L561-589：`handleDraftReady` 正确构建 `emrRecord` 并调用 `App.emit('emrGenerated', ...)`
-5. 检查 `editor.js` L63-70：正确监听 `emrGenerated` 事件，调用 `displayEMR` 和 `setActivePanel('editor')`
-6. **发现 BUG**：`emr.py` L221 检查 `event.get("stage") == 0` 来判断是否为最终完成事件，但新4阶段流水线的最终结果没有 `stage` 字段，导致 `complete` SSE 事件永远不会被发送
-
-### 已修复
-
-| 任务 | 状态 | 说明 |
-|------|------|------|
-| 修复 `complete` 事件检查逻辑 | ✅ 完成 | `emr.py`：将 `event.get("stage") == 0` 改为 `"emr_result" in event`，直接匹配新流水线结果格式 |
-| 添加后端调试日志 | ✅ 完成 | `orchestrator.py`：记录 draft_event yield 时的 emr_draft 字段信息 |
-| 添加后端调试日志 | ✅ 完成 | `emr.py`：记录 draft_ready 和 complete SSE 事件发送时的详细信息 |
-| 添加前端调试日志 | ✅ 完成 | `agent.js`：在 handleSSEEvent、handleDraftReady 中添加 console.log |
-| 添加前端调试日志 | ✅ 完成 | `editor.js`：在 emrGenerated 事件监听器中添加 console.log |
-
-### 修改文件
-
-| 文件 | 修改内容 |
-|------|----------|
-| `backend/api/emr.py` | L206-248：重写 draft_ready 和 complete 事件逻辑，添加调试日志，修复 `stage == 0` → `"emr_result" in event` |
-| `backend/services/pipeline/orchestrator.py` | L233-235：添加 yield draft_ready 事件的调试日志 |
-| `frontend/js/agent.js` | L519-585：在 handleSSEEvent 和 handleDraftReady 中添加 console.log 调试信息 |
-| `frontend/js/editor.js` | L63-64：在 emrGenerated 事件监听器中添加 console.log 调试信息 |
-
-### 待验证
-
-- 用户重新测试后，通过浏览器控制台和后端日志确认 `draft_ready` 事件是否正确传递
-
----
-
-## 2026-05-27 前端添加关闭病历按钮
-
-### 问题背景
-
-用户从历史病历列表查看病历后，编辑器会显示病历内容，但没有途径返回到"未生成病历"的欢迎页面。
-
-### 已修改
-
-| 任务 | 状态 | 说明 |
-|------|------|------|
-| 添加关闭按钮 HTML | ✅ | `emr.html`：在 `.editor-toolbar-right` 最前面添加 `#closeEMRView` 按钮，使用 x-circle SVG 图标 |
-| 添加关闭逻辑 | ✅ | `app.js`：新增 `closeEMRView()` 函数，清空 visitId/emrRecord/currentRecordId 状态，显示 welcome 页面，更新标题栏为"未生成病历" |
-| 添加事件绑定 | ✅ | `app.js`：在 DOMContentLoaded 中绑定 `#closeEMRView` 的 click 事件 |
-| 添加按钮样式 | ✅ | `ide.css`：新增 `.editor-btn-close` 样式，灰色边框按钮，hover 时突出显示 |
-
-### 修改文件
-
-| 文件 | 修改内容 |
-|------|----------|
-| `frontend/emr.html` | 在编辑器工具栏右侧添加关闭按钮 |
-| `frontend/js/app.js` | 新增 `closeEMRView()` 函数、事件绑定、导出 |
-| `frontend/css/ide.css` | 新增 `.editor-btn-close` 样式
-
-### 交互流程
-
-1. 用户在历史病历面板点击"查看" → 编辑器显示病历内容
-2. 用户点击编辑器工具栏的「关闭」按钮 → 清空病历状态 → 显示欢迎页面 → 标题栏恢复为"未生成病历"
-
----
-
-## 2026-05-27 新增 ICD-11 术语规范化后处理步骤
-
-### 问题背景
-
-`TerminologyService` 初始化时已加载 ICD-11 中文术语库（`ChineseTermIndexer.load_icd11_terms()`）和口语化同义词映射表（`colloquial_synonyms.json`），但四阶段流水线从未调用术语规范化——`DirectSOAPGenerationStage` 仅依赖 LLM 内置知识，未利用本地 ICD-11 知识库。
-
-### 已完成
-
-| 任务 | 状态 | 说明 |
-|------|------|------|
-| 添加 `_normalize_terms_in_draft()` 方法 | ✅ | 在 `PipelineOrchestrator` 中新增后处理方法，遍历 SOAP 各节的 value 字段，执行口语词替换 + ICD-11 术语匹配 |
-| 添加 `_find_terms_in_text()` 静态方法 | ✅ | 从文本中提取 2-6 字中文候选医学术语，用于 ICD-11 匹配 |
-| 在两种处理模式中调用 | ✅ | `process_transcript()` 和 `process_with_callback()` 中，阶段2完成后、阶段3开始前调用 `_normalize_terms_in_draft()`（阶段2.5） |
-| 仅中文模式生效 | ✅ | 英文模式跳过术语规范化 |
-
-### 规范化步骤
-
-1. **口语词替换**：加载 `colloquial_synonyms.json`（如"发烧"→"发热"、"拉肚子"→"腹泻"），直接替换 SOAP 草稿中的口语词
-2. **ICD-11 匹配**：对 SOAP 各节文本提取 2-6 字医学术语，通过 `ChineseTermClient.search_term()` 在本地 ICD-11 数据中进行模糊匹配
-3. **遍历所有 SOAP 节**：subjective、objective、assessment、plan 四个节的 value 字段均参与规范化
-4. **日志记录**：每次替换都通过 `logger.info/debug` 输出，方便追踪
-
-### 修改文件
-
-| 文件 | 修改内容 |
-|------|----------|
-| `backend/services/pipeline/orchestrator.py` | 新增 `ChineseTermIndexer` 导入；新增 `_normalize_terms_in_draft()` 和 `_find_terms_in_text()` 方法；在 `process_transcript()` 和 `process_with_callback()` 中添加阶段2.5调用 |
-
----
-
-## 2026-05-27 删除前端 LLM 标注片段展示
-
-### 问题背景
-
-当前四阶段流水线使用 `DirectSOAPGenerationStage` 直接从转写文本生成病历草稿，**不再经过 LLM 标注阶段**。但前端 `editor.js` 和 `emr.js` 仍保留"LLM 标注片段"标签和表格列，展示误导性信息。
-
-### 已完成
-
-| 任务 | 状态 | 说明 |
-|------|------|------|
-| 删除 editor.js 中的 LLM 标注片段 | ✅ | 移除 `<div class="evidence-label">LLM标注片段</div>` 和 `<div class="evidence-content">`，标签改为"原始对话转写"；表格移除"标注片段"列头和对应 `<td>` |
-| 删除 emr.js 中的 LLM 标注片段 | ✅ | 移除 `<div class="evidence-label">LLM标注片段：</div>` 和 `<div class="evidence-content">`，标签改为"原始对话转写："；表格移除"标注片段"列头和对应 `<td>` |
-| 后端字段保留 | ✅ | `EvidenceSpan` 模型中的 `content` 字段保留（向后兼容），数据库和 API 不做修改 |
-
-### 修改文件
-
-| 文件 | 修改内容 |
-|------|----------|
-| `frontend/js/editor.js` | 删除 LLM 标注片段标签和表格列，标签改为"原始对话转写" |
-| `frontend/js/emr.js` | 删除 LLM 标注片段标签和表格列，标签改为"原始对话转写：" |
-
----
-
-## 2026-05-27 精简 direct_soap_generation 提示词
-
-### 变更说明
-
-精简 `direct_soap_generation` 提示词，去掉三层诊断策略、幻觉检测、evidence_traces 构建规则等复杂指令。提示词从 ~87 行缩减至 ~40 行，仅保留基础 SOAP 字段生成和 `source_turn_indices` 标注。幻觉检测和证据遗漏交给后续质量检查阶段（ClaimVerificationStage、FieldRevisionStage）处理。
-
-### 精简对比
-
-| 项目 | 精简前 | 精简后 |
-|------|--------|--------|
-| 提示词长度 | ~87 行 | ~40 行 |
-| 核心原则 | 3 条详细规则（防编造、三步验证） | 无（交给质量检查） |
-| 生成规则 | 逐段详细说明（S/O/A/P 各有子规则） | 仅列字段名 |
-| 诊断策略 | 三层诊断 per-item（explicit/suspected/symptom） | 无，直接填 diagnosis |
-| 输出字段 | 含 assessment_items、plan_items（medications/tests/follow_up/education） | 无，仅基础 SOAP 字段 |
-| source_turn_indices | 保留 | 保留 |
-
-### 修改文件
-
-| 文件 | 修改内容 |
-|------|----------|
-| `backend/services/llm/prompts.py` | 精简 `direct_soap_generation` 模板，移除三层诊断策略、幻觉检测指令、assessment_items/plan_items 输出 |
-
-### 下游兼容性
-
-- `direct_soap_generation.py` 的 `_empty_draft()` 和 `_build_evidence_traces()` 无需修改，与精简输出结构一致
-- `emr_persistence.py` 有 `if assessment_items:` 守卫，跳过空的 assessment_items
-- `evidence_enricher.py` 有 `if assessment_items:` 守卫，跳过空的 assessment_items

@@ -18,11 +18,17 @@ class PipelineContext:
     all_cleaned_turns: list = field(default_factory=list)
     combined_text: str = ""
     emr_draft: dict = field(default_factory=dict)
+    draft_text: str = ""
     emr_final: dict = field(default_factory=dict)
     save_evidence: bool = True
     extraction_result: dict = field(default_factory=dict)
     verification_result: dict = field(default_factory=dict)
     verification_issues: dict = field(default_factory=dict)
+    hallucination_result: dict = field(default_factory=dict)
+    skip_cleaning: bool = False
+    skip_hallucination_check: bool = False
+    skip_structuring: bool = False
+    stop_after_draft: bool = True
 
 
 class PipelineStage(ABC):

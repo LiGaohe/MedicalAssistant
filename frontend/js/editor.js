@@ -2,6 +2,7 @@ window.EditorModule = (function() {
     var state = App.getState();
     var isEditing = false;
     var evidenceVisible = false;
+    var originalEMRJson = null;
 
     function initEditor() {
         var versionSelect = document.getElementById('versionSelect');
@@ -34,7 +35,7 @@ window.EditorModule = (function() {
         }
 
         if (cancelBtn) {
-            cancelBtn.addEventListener('click', function() { exitEditMode(); });
+            cancelBtn.addEventListener('click', function() { exitEditMode(true); });
         }
 
         var deleteBtn = document.getElementById('deleteVersion');
@@ -244,6 +245,8 @@ window.EditorModule = (function() {
 
     function enterEditMode() {
         isEditing = true;
+        originalEMRJson = JSON.parse(JSON.stringify(currentEMRRecord.emr_json));
+
         var editBtn = document.getElementById('editEMR');
         var saveBtn = document.getElementById('saveEMR');
         var cancelBtn = document.getElementById('cancelEdit');
@@ -261,8 +264,17 @@ window.EditorModule = (function() {
         App.updateStatusBar('编辑模式');
     }
 
-    function exitEditMode() {
+    function exitEditMode(shouldPrompt) {
+        if (shouldPrompt && hasUnsavedChanges()) {
+            if (!confirm('取消会丢失编辑内容，确定取消？')) {
+                return;
+            }
+            restoreOriginalContent();
+        }
+
         isEditing = false;
+        originalEMRJson = null;
+
         var editBtn = document.getElementById('editEMR');
         var saveBtn = document.getElementById('saveEMR');
         var cancelBtn = document.getElementById('cancelEdit');
@@ -270,6 +282,18 @@ window.EditorModule = (function() {
         if (editBtn) editBtn.style.display = 'inline-block';
         if (saveBtn) saveBtn.style.display = 'none';
         if (cancelBtn) cancelBtn.style.display = 'none';
+    }
+
+    function hasUnsavedChanges() {
+        if (!originalEMRJson || !currentEMRRecord) return false;
+        return JSON.stringify(currentEMRRecord.emr_json) !== JSON.stringify(originalEMRJson);
+    }
+
+    function restoreOriginalContent() {
+        if (originalEMRJson && currentEMRRecord) {
+            currentEMRRecord.emr_json = JSON.parse(JSON.stringify(originalEMRJson));
+            displayEMR(currentEMRRecord);
+        }
     }
 
     function makeSectionEditable(section) {
@@ -571,6 +595,210 @@ window.EditorModule = (function() {
         });
     }
 
+    function getChangeTypeLabel(type) {
+        var labels = {
+            'term_replacement': '术语替换',
+            'unsupported_claim_removed': '删除无依据声明',
+            'missing_item_added': '补充遗漏项',
+            'downgrade': '降级措辞',
+            'revision': '修订'
+        };
+        return labels[type] || type;
+    }
+
+    function getFieldDisplayName(section, field) {
+        var sectionNames = {
+            'subjective': '主观症状',
+            'objective': '客观体征',
+            'assessment': '评估诊断',
+            'plan': '治疗计划'
+        };
+        return (sectionNames[section] || section) + ' > ' + App.getFieldName(field);
+    }
+
+    function computeDiffHighlight(beforeText, afterText) {
+        var beforeChars = beforeText.split('');
+        var afterChars = afterText.split('');
+        var m = beforeChars.length;
+        var n = afterChars.length;
+        var dp = [];
+        for (var i = 0; i <= m; i++) {
+            dp[i] = [];
+            dp[i][0] = 0;
+        }
+        for (var j = 0; j <= n; j++) {
+            dp[0][j] = 0;
+        }
+        for (var i = 1; i <= m; i++) {
+            for (var j = 1; j <= n; j++) {
+                if (beforeChars[i - 1] === afterChars[j - 1]) {
+                    dp[i][j] = dp[i - 1][j - 1] + 1;
+                } else {
+                    dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+                }
+            }
+        }
+        var beforeHtml = '';
+        var afterHtml = '';
+        var i = m;
+        var j = n;
+        var beforeParts = [];
+        var afterParts = [];
+        while (i > 0 || j > 0) {
+            if (i > 0 && j > 0 && beforeChars[i - 1] === afterChars[j - 1]) {
+                beforeParts.unshift({ type: 'same', char: beforeChars[i - 1] });
+                afterParts.unshift({ type: 'same', char: afterChars[j - 1] });
+                i--;
+                j--;
+            } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+                afterParts.unshift({ type: 'added', char: afterChars[j - 1] });
+                j--;
+            } else {
+                beforeParts.unshift({ type: 'deleted', char: beforeChars[i - 1] });
+                i--;
+            }
+        }
+        var inDeleted = false;
+        for (var k = 0; k < beforeParts.length; k++) {
+            var part = beforeParts[k];
+            if (part.type === 'deleted') {
+                if (!inDeleted) {
+                    beforeHtml += '<span class="diff-deleted">';
+                    inDeleted = true;
+                }
+                beforeHtml += App.escapeHtml(part.char);
+            } else {
+                if (inDeleted) {
+                    beforeHtml += '</span>';
+                    inDeleted = false;
+                }
+                beforeHtml += App.escapeHtml(part.char);
+            }
+        }
+        if (inDeleted) beforeHtml += '</span>';
+        var inAdded = false;
+        for (var k = 0; k < afterParts.length; k++) {
+            var part = afterParts[k];
+            if (part.type === 'added') {
+                if (!inAdded) {
+                    afterHtml += '<span class="diff-added">';
+                    inAdded = true;
+                }
+                afterHtml += App.escapeHtml(part.char);
+            } else {
+                if (inAdded) {
+                    afterHtml += '</span>';
+                    inAdded = false;
+                }
+                afterHtml += App.escapeHtml(part.char);
+            }
+        }
+        if (inAdded) afterHtml += '</span>';
+        return { beforeHtml: beforeHtml, afterHtml: afterHtml };
+    }
+
+    function confirmChanges(changes, emrDraftBefore, emrDraftAfter, acceptStatus) {
+        var finalDraft = JSON.parse(JSON.stringify(emrDraftAfter));
+        for (var i = 0; i < changes.length; i++) {
+            var change = changes[i];
+            if (acceptStatus[change.id] === false) {
+                var section = change.section;
+                var field = change.field;
+                if (finalDraft[section] && emrDraftBefore[section]) {
+                    if (field === 'text') {
+                        finalDraft[section].text = emrDraftBefore[section].text;
+                    } else if (emrDraftBefore[section][field]) {
+                        finalDraft[section][field] = JSON.parse(JSON.stringify(emrDraftBefore[section][field]));
+                    }
+                }
+            }
+        }
+        return finalDraft;
+    }
+
+    function showChangeView(changes, emrDraftBefore, emrDraftAfter, stageName) {
+        var editorContent = document.getElementById('emrContent');
+        if (!editorContent) return;
+        if (!changes || changes.length === 0) {
+            editorContent.innerHTML = '<div class="change-view-empty"><p>无变更</p></div>';
+            return;
+        }
+        var acceptStatus = {};
+        var html = '<div class="change-view-toolbar">';
+        html += '<span class="change-view-stage">' + App.escapeHtml(stageName || '') + '</span>';
+        html += '<span class="change-view-count">共 ' + changes.length + ' 处变更</span>';
+        html += '<button class="change-accept-all-btn">' + App.icon('checkCircle', 14) + ' 全部接受</button>';
+        html += '<button class="change-reject-all-btn">' + App.icon('xCircle', 14) + ' 全部拒绝</button>';
+        html += '</div>';
+        html += '<div class="change-list">';
+        for (var i = 0; i < changes.length; i++) {
+            var change = changes[i];
+            acceptStatus[change.id] = null;
+            var beforeValue = change.before || '';
+            var afterValue = change.after || '';
+            var diffResult = computeDiffHighlight(String(beforeValue), String(afterValue));
+            html += '<div class="change-card" data-change-id="' + App.escapeHtml(change.id) + '">';
+            html += '<div class="change-field-path">' + App.escapeHtml(getFieldDisplayName(change.section, change.field)) + '</div>';
+            html += '<div class="change-text-before">' + diffResult.beforeHtml + '</div>';
+            html += '<div class="change-text-after">' + diffResult.afterHtml + '</div>';
+            html += '<span class="change-type-tag change-type-' + App.escapeHtml(change.type) + '">' + App.escapeHtml(getChangeTypeLabel(change.type)) + '</span>';
+            if (change.detail) {
+                html += '<div class="change-detail">' + App.escapeHtml(change.detail) + '</div>';
+            }
+            html += '<div class="change-actions">';
+            html += '<button class="change-accept-btn">' + App.icon('check', 14) + ' 接受</button>';
+            html += '<button class="change-reject-btn">' + App.icon('x', 14) + ' 拒绝</button>';
+            html += '</div>';
+            html += '</div>';
+        }
+        html += '</div>';
+        html += '<button class="confirm-changes-btn">' + App.icon('checkCircle', 16) + ' 确认变更</button>';
+        editorContent.innerHTML = html;
+        editorContent.querySelectorAll('.change-accept-all-btn').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                editorContent.querySelectorAll('.change-card').forEach(function(card) {
+                    card.classList.remove('change-rejected');
+                    card.classList.add('change-accepted');
+                    acceptStatus[card.dataset.changeId] = true;
+                });
+            });
+        });
+        editorContent.querySelectorAll('.change-reject-all-btn').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                editorContent.querySelectorAll('.change-card').forEach(function(card) {
+                    card.classList.remove('change-accepted');
+                    card.classList.add('change-rejected');
+                    acceptStatus[card.dataset.changeId] = false;
+                });
+            });
+        });
+        editorContent.querySelectorAll('.change-accept-btn').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                var card = this.closest('.change-card');
+                card.classList.remove('change-rejected');
+                card.classList.add('change-accepted');
+                acceptStatus[card.dataset.changeId] = true;
+            });
+        });
+        editorContent.querySelectorAll('.change-reject-btn').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                var card = this.closest('.change-card');
+                card.classList.remove('change-accepted');
+                card.classList.add('change-rejected');
+                acceptStatus[card.dataset.changeId] = false;
+            });
+        });
+        editorContent.querySelectorAll('.confirm-changes-btn').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                var finalDraft = confirmChanges(changes, emrDraftBefore, emrDraftAfter, acceptStatus);
+                if (currentEMRRecord) {
+                    currentEMRRecord.emr_json = finalDraft;
+                    displayEMR(currentEMRRecord);
+                }
+            });
+        });
+    }
+
     document.addEventListener('DOMContentLoaded', function() {
         initEditor();
     });
@@ -578,6 +806,9 @@ window.EditorModule = (function() {
     return {
         displayEMR: displayEMR,
         loadEMRVersions: loadEMRVersions,
-        deleteCurrentVersion: deleteCurrentVersion
+        deleteCurrentVersion: deleteCurrentVersion,
+        showChangeView: showChangeView,
+        enterEditMode: enterEditMode,
+        exitEditMode: exitEditMode
     };
 })();

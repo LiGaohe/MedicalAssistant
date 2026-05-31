@@ -111,7 +111,7 @@ MedicalAssisstant/
 │   │   ├── pipeline/            # LLM流水线子模块（SOLID重构后 16 个文件）
 │   │   │   ├── __init__.py
 │   │   │   ├── base.py            # PipelineContext 数据传递对象 + PipelineStage 抽象接口
-│   │   │   ├── orchestrator.py    # PipelineOrchestrator 核心编排器（531行）
+│   │   │   ├── orchestrator.py    # PipelineOrchestrator 核心编排器（含skip_cleaning/skip_hallucination_check/stop_after_draft流程控制、幻觉检查、_format_turns直接格式化、_compute_changes变更计算）
 │   │   │   ├── utils.py           # JSON解析工具函数
 │   │   │   ├── speaker_handler.py # 说话人角色处理
 │   │   │   ├── debug_interactor.py # Debug交互器
@@ -122,8 +122,10 @@ MedicalAssisstant/
 │   │   │   │   ├── __init__.py
 │   │   │   │   ├── turn_cleaning.py    # 阶段1: 转写清洗与角色纠错
 │   │   │   │   ├── direct_soap_generation.py  # 阶段2: 直接草稿生成
+│   │   │   │   ├── hallucination_check.py    # 阶段2.5: 幻觉检查（草稿生成后立即核查全SOAP各字段与对话的一致性）
 │   │   │   │   ├── claim_verification.py    # 阶段3: 后置核查（Claim/Checklist/硬规则/确定性四步核查）
-│   │   │   │   └── field_revision.py        # 阶段4: 字段级修订与落盘
+│   │   │   ├── soap_structuring.py      # 阶段3: 草稿结构化（自由文本草稿→SOAP JSON）
+│   │   │   └── field_revision.py        # 阶段4: 字段级修订与落盘
 │   ├── utils/                 # 工具函数
 │   │   ├── __init__.py
 │   │   └── audio_utils.py     # 音频处理工具
@@ -149,6 +151,11 @@ MedicalAssisstant/
 ├── .trae/                      # Trae工具目录
 │   └── documents/              # Trae文档
 │       └── 病历生成流程性能优化计划.md # 性能优化计划文档
+├── scripts/                    # 实验与工具脚本
+│   ├── __init__.py
+│   ├── prepare_test_data.py   # 测试数据准备脚本（从IMCS-MRG抽取样本）
+│   ├── run_batch_experiments.py # 批量实验运行脚本（四种方案 × 五种消融配置）
+│   └── aggregate_results.py   # 评估结果汇总脚本（ROUGE/BLEU/字段级聚合）
 ├── frontend/                   # 前端界面
 │   ├── css/
 │   │   ├── style.css          # 样式文件
@@ -156,7 +163,7 @@ MedicalAssisstant/
 │   ├── js/
 │   │   ├── app.js             # IDE主控制器（全局状态、活动栏、事件总线）
 │   │   ├── cache.js           # localStorage 缓存管理（EMR数据持久化）
-│   │   ├── agent.js           # Agent助手面板（音频上传、转写、病历生成）
+│   │   ├── agent.js           # Agent助手面板（音频上传、转写、病历生成、后处理阶段选择、定稿保存）
 │   │   ├── editor.js          # 病历编辑器面板（SOAP显示、编辑、版本管理、打印）
 │   │   ├── debug.js           # 调试面板（LLM多阶段调试）
 │   │   ├── config-sidebar.js  # LLM配置面板
@@ -752,9 +759,28 @@ identify_colloquial_terms (批量识别)
 | 7. 兜底保留 | 保留原词 | 0.30 | 所有方法都失败时保留原词，标记unresolved |
 
 **中英文路径互斥**：
+
 - 中文模式（language=="zh"）：只使用本地术语库（ChineseTerm/ICD-11+口语同义词映射），不走UMLS
 - 英文模式（language!="zh"）：只使用UMLS，不走本地术语库
 - 并行模式 `extract_and_normalize_terms_parallel()` 同样遵循语言分流
+
+##### 3.3.4 草稿后处理两步规范化流程（`normalize_draft_terms()`）
+
+在四阶段流水线中，阶段2.5 使用 `normalize_draft_terms()` 对 SOAP 草稿进行术语规范化，采用两步流程：
+
+| 步骤 | 处理方式 | 说明 |
+| --- | --- | --- |
+| 1. 术语提取 | 正则提取 | 中文提取2-6字词组，英文提取2-4词短语 |
+| 2. LLM规范化 | `term_standardization` prompt | 批量将口语术语规范为医学标准用语，输出术语而非句子 |
+| 3a. ICD-11检索（中文） | 先精确后模糊（≥0.7） | 用LLM规范化结果在本地ICD-11术语库检索标准术语和编码 |
+| 3b. UMLS检索（英文） | 选最高分preferred term | 用LLM规范化结果在UMLS检索标准术语和CUI |
+| 4. 替换回草稿 | 字符串替换 | 仅替换原术语≠规范化术语的条目 |
+
+**关键设计**：
+
+- ICD-11不具备口语到规范术语的映射能力，因此先由LLM将口语规范为医学标准用语，再用术语库检索
+- 术语库无匹配时保留LLM规范化结果，不回退到原口语术语
+- 中文路径在LLM规范化前先用 colloquial_synonyms.json 做快速替换
 
 **UMLS集成特性：**
 
@@ -1047,12 +1073,16 @@ graph TB
 | /api/asr/transcribe/{visit_id} | POST | 启动ASR转写任务 | backend/api/asr.py |
 | /api/task/{task_id} | GET | 查询任务状态 | backend/api/task.py |
 | /api/emr/process | POST | 处理就诊记录生成病历 | backend/api/emr.py |
+| /api/emr/process-stream | POST | SSE实时推送病历生成进度（支持stop_after_draft/skip_cleaning/skip_hallucination_check参数） | backend/api/emr.py |
 | /api/emr/status/{visit_id} | GET | 查询病历处理状态 | backend/api/emr.py |
 | /api/emr/record/{visit_id} | GET | 获取病历记录 | backend/api/emr.py |
 | /api/emr/record/{visit_id} | PUT | 更新病历记录 | backend/api/emr.py |
 | /api/emr/record/{visit_id} | DELETE | 删除病历记录（全部或指定版本） | backend/api/emr.py |
 | /api/emr/versions/{visit_id} | GET | 获取病历所有版本 | backend/api/emr.py |
 | /api/emr/visits | GET | 列出所有有EMR记录的就诊 | backend/api/emr.py |
+| /api/emr/postprocess | POST | 病历草稿后处理（术语规范化/核查修订） | backend/api/emr.py |
+| /api/emr/finalize | POST | 病历草稿定稿保存（规范化+证据溯源+落盘） | backend/api/emr.py |
+| /api/emr/structure | POST | 自由文本草稿结构化为SOAP JSON | backend/api/emr.py |
 | / | GET | 首页（上传界面） | backend/main.py |
 | /health | GET | 健康检查 | backend/main.py |
 
@@ -1090,6 +1120,20 @@ graph TB
 | created_at | DateTime | 创建时间 |
 | updated_at | DateTime | 更新时间 |
 
+#### EMRRecord 字段说明
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| record_id | Integer | 主键，自增 |
+| visit_id | String | 外键，关联就诊记录 |
+| version | Integer | 版本号，默认1 |
+| record_type | String | 记录类型，默认"system_draft" |
+| emr_json | JSON | 病历结构化JSON内容 |
+| evidence_mapping | JSON | 证据映射，可为空 |
+| validation_errors | JSON | 验证错误，可为空 |
+| created_at | DateTime | 创建时间 |
+| draft_text | Text | 病历草稿纯文本，可为空 |
+
 #### TranscriptTurn 字段说明
 
 | 字段 | 类型 | 说明 |
@@ -1115,15 +1159,15 @@ graph TB
 | TranscriptNormalizer | 文本标准化，说话人映射 | backend/services/normalizer.py |
 | SpeakerRoleClassifier | 说话人角色识别，基于语义分析识别医生/患者 | backend/services/speaker_role_classifier.py |
 | EvidenceService | 证据选择，基于触发词、置信度和LLM筛选相关片段 | backend/services/evidence_service.py |
-| TerminologyService | 术语规范化，分级触发链路(预检→拆解→分流检索→Rewrite→约束选择→unresolved)，中英文路径互斥(中文走本地术语库含ICD-11+口语同义词映射/英文走UMLS)，支持并行处理 | backend/services/terminology_service.py |
+| TerminologyService | 术语规范化，分级触发链路(预检→拆解→分流检索→Rewrite→约束选择→unresolved)，中英文路径互斥(中文走本地术语库含ICD-11+口语同义词映射/英文走UMLS)，支持并行处理；新增两步规范化方法(normalize_draft_terms: 正则提取→LLM批量规范化→术语库检索) | backend/services/terminology_service.py |
 | TermRewriter | 术语改写服务，口语→临床改写、多概念拆解、alternative phrasing生成 | backend/services/term_rewriter.py |
 | TranslationService | 中英文翻译，使用专门翻译小模型提升翻译速度 | backend/services/translation_service.py |
 | FactService | 原子事实CRUD服务，封装AtomicFact的增删改查操作 | backend/services/fact_service.py |
 | ExtractionService | 病历要素抽取，从证据中抽取SOAP要素 | backend/services/extraction_service.py |
 | EMRGenerationService | 病历生成，基于模板和LLM生成结构化病历 | backend/services/emr_generation_service.py |
 | MedicalRecordPipeline | 整合服务，串联所有处理步骤，支持并行处理 | backend/services/medical_record_pipeline.py |
-| LLMPipelineService | **向后兼容包装类**（38行），全部逻辑委托给 PipelineOrchestrator。阶段1:转写清洗与角色纠错，阶段2:直接草稿生成，阶段2.5:ICD-11术语规范化，阶段3:后置核查，阶段4:字段级修订与落盘 | backend/services/llm_pipeline_service.py |
-| PipelineOrchestrator | 核心编排器，串联 4 个 PipelineStage + ICD-11 术语规范化后处理（TurnCleaningStage → DirectSOAPGenerationStage → _normalize_terms_in_draft → ClaimVerificationStage → FieldRevisionStage） | backend/services/pipeline/orchestrator.py |
+| LLMPipelineService | **向后兼容包装类**（38行），全部逻辑委托给 PipelineOrchestrator。阶段1:转写清洗与角色纠错，阶段2:直接草稿生成，阶段3:草稿结构化(free_text模式)，阶段4:幻觉检查，阶段5:后置核查，阶段6:字段级修订与落盘 | backend/services/llm_pipeline_service.py |
+| PipelineOrchestrator | 核心编排器，串联 6 个 PipelineStage + 术语规范化后处理（TurnCleaningStage → DirectSOAPGenerationStage → SoapStructuringStage[free_text模式] → _normalize_terms_in_draft → HallucinationCheckStage → ClaimVerificationStage → FieldRevisionStage）；HallucinationCheckStage 在草稿结构化后使用 consistency_check 模板核查全SOAP各字段与对话的一致性，标记无依据的虚假内容；process_transcript/process_with_callback 支持 skip_cleaning/skip_hallucination_check/stop_after_draft/skip_verification 参数控制各阶段执行与跳过；free_text模式下推送 draft_text_ready 事件（含draft_text字段），结构化完成后推送 draft_ready 事件（含emr_draft字段）；_format_turns 方法用于 skip_cleaning=True 时直接构建 combined_text；_compute_changes 方法对比 before/after EMR 字段值差异生成变更记录（term_replacement/unsupported_claim_removed/missing_item_added/downgrade/revision） | backend/services/pipeline/orchestrator.py |
 | LLMPipelineServiceEnglish | 英文多阶段LLM处理，跳过翻译步骤优化 | backend/services/llm_pipeline_service_en.py |
 | LLMService | LLM服务，支持多适配器、模板渲染、JSON模式和思考模式 | backend/services/llm/llm_service.py |
 | PromptManager | Prompt模板管理器，支持中英文模板，按需渲染（Template.safe_substitute） | backend/services/llm/prompts.py |
@@ -1140,10 +1184,13 @@ graph TB
 | `emr_generation_with_role` | `["extracted_data", "transcript", "template_requirements"]` | 含角色识别的病历生成 |
 | `turn_cleaning` | `["transcript"]` | 对话轮次角色纠错和ASR修正 |
 | `direct_soap_generation` | `["transcript"]` | 四阶段：单次LLM调用直接生成完整SOAP（含source_turn_indices） |
+| `free_soap_generation` | `["transcript"]` | 自由文本SOAP草稿生成（按SOAP四段自由叙述，不分字段） |
+| `soap_structuring` | `["draft_text", "transcript"]` | 将自由文本SOAP草稿结构化为标准JSON格式（含source_turn_indices） |
 | `claim_verification` | `["transcript", "draft_emr"]` | 四阶段：A/P逐claim原子核查（supported/unsupported/not_addressed） |
 | `checklist_verification` | `["transcript", "draft_emr"]` | 四阶段：检查SOAP关键信息遗漏 |
 | `certainty_verification` | `["transcript", "assessment_json"]` | 四阶段：检查诊断确定性层级是否被拔高 |
 | `field_revision` | `["draft_emr", "issues_json", "transcript"]` | 四阶段：定点修订SOAP草稿（仅改失败字段） |
+| `term_standardization` | `["terms"]` | 两步术语规范化第一步：LLM将口语术语批量规范为医学标准用语（中英文） |
 | `fact_extraction` | `["new_turns_json", "existing_facts_summary"]` | **DEPRECATED**：增量抽取原子临床事实 |
 | `fact_consolidation` | `["facts_json"]` | **DEPRECATED**：重复事实合并+冲突标记 |
 | `soap_verification` | `["draft_emr", "fact_table", "role_mapping"]` | **DEPRECATED**：SOAP草稿核查（4类问题×最多1个） |
@@ -1178,12 +1225,14 @@ graph TB
     end
 
     subgraph "编排层"
-        ORC[PipelineOrchestrator<br/>含ICD-11术语规范化]
+        ORC[PipelineOrchestrator<br/>含术语规范化]
     end
 
     subgraph "阶段层 (PipelineStage)"
         TCS[TurnCleaningStage<br/>转写清洗与角色纠错]
-        DSG[DirectSOAPGenerationStage<br/>直接草稿生成]
+        DSG[DirectSOAPGenerationStage<br/>端到端草稿生成<br/>free_text/json双模式]
+        SSS[SoapStructuringStage<br/>草稿结构化<br/>free_text模式]
+        HCS[HallucinationCheckStage<br/>幻觉检查]
         CVS[ClaimVerificationStage<br/>后置核查]
         FRS[FieldRevisionStage<br/>字段级修订与落盘]
     end
@@ -1202,7 +1251,9 @@ graph TB
     LSP --> ORC
     ORC --> TCS
     TCS --> DSG
-    DSG --> CVS
+    DSG --> SSS
+    SSS --> HCS
+    HCS --> CVS
     CVS --> FRS
     ORC --> CTX
     ORC --> EMR_P
@@ -1216,10 +1267,12 @@ graph TB
 | 阶段 | Stage 类 | 输入 | 输出 | 核心文件 |
 |------|----------|------|------|----------|
 | 1 | TurnCleaningStage | turns (原始转写 TranscriptTurn[]) | cleaned_turns, role_mappings | [stages/turn_cleaning.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/turn_cleaning.py) |
-| 2 | DirectSOAPGenerationStage | combined_text (清洗后全文) | emr_draft (完整SOAP草稿，含evidence_traces) | [stages/direct_soap_generation.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/direct_soap_generation.py) |
-| 2.5 | _normalize_terms_in_draft (后处理) | emr_draft (中文模式) | emr_draft (ICD-11术语规范化后) | [orchestrator.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/orchestrator.py) |
-| 3 | ClaimVerificationStage | emr_draft + combined_text | verification_issues (Claim/Checklist/硬规则/确定性) | [stages/claim_verification.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/claim_verification.py) |
-| 4 | FieldRevisionStage | emr_draft + verification_issues | emr_draft (修订后，覆盖原草稿) | [stages/field_revision.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/field_revision.py) |
+| 2 | DirectSOAPGenerationStage | combined_text (清洗后全文) | free_text模式: draft_text (自由文本草稿); json模式: emr_draft (完整SOAP草稿，含evidence_traces) | [stages/direct_soap_generation.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/direct_soap_generation.py) |
+| 3 | SoapStructuringStage (free_text模式) | draft_text + combined_text | emr_draft (SOAP JSON，含evidence_traces) | [stages/soap_structuring.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/soap_structuring.py) |
+| 3.5 | _normalize_terms_in_draft (后处理) | emr_draft | emr_draft (术语规范化后，中文路径: colloquial_synonyms预处理+normalize_draft_terms; 英文路径: normalize_draft_terms) | [orchestrator.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/orchestrator.py) |
+| 4 | HallucinationCheckStage | emr_draft + combined_text | hallucination_result (一致性核查结果) | [stages/hallucination_check.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/hallucination_check.py) |
+| 5 | ClaimVerificationStage | emr_draft + combined_text | verification_issues (Claim/Checklist/硬规则/确定性) | [stages/claim_verification.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/claim_verification.py) |
+| 6 | FieldRevisionStage | emr_draft + verification_issues | emr_draft (修订后，覆盖原草稿) | [stages/field_revision.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/field_revision.py) |
 
 #### PipelineStage 接口
 
@@ -1249,18 +1302,24 @@ class PipelineStage(ABC):
 | all_role_mappings | Dict | 角色映射结果（阶段1输出） |
 | all_cleaned_turns | List[Dict] | 清洗后轮次（阶段1输出） |
 | combined_text | str | 合并清洗文本（阶段1输出） |
-| terminology_service | TerminologyService | 术语规范化服务（含ICD-11本地术语库，阶段2.5后处理使用） |
-| emr_draft | Dict | SOAP 草稿（阶段2输出，阶段2.5 ICD-11规范化，阶段4修订后覆盖） |
+| terminology_service | TerminologyService | 术语规范化服务（阶段2.5后处理使用，内部根据language自动分流中文/英文路径） |
+| emr_draft | Dict | SOAP 草稿（阶段2输出，阶段2.5术语规范化，阶段4修订后覆盖） |
+| draft_text | str | 自由文本SOAP草稿（free_text模式下阶段2输出） |
 | emr_final | Dict | 最终SOAP病历（阶段4输出，经normalize_format后落盘） |
 | verification_issues | Dict | 后置核查问题清单（阶段3输出，含unsupported_claims/not_addressed_claims/missing_items/hard_rule_violations） |
+| skip_cleaning | bool | 跳过阶段1: 转写清洗与角色纠错（默认False） |
+| skip_hallucination_check | bool | 跳过阶段2.5: 幻觉检查（默认False） |
+| stop_after_draft | bool | 草稿生成后停止（默认True） |
+| skip_verification | bool | 术语规范化后停止，跳过阶段5+6（默认False） |
 
 #### 关键设计决策
 
 - **PipelineStage 模式**：`execute(ctx) -> Dict` 统一入口，4 个阶段可独立测试和替换，符合开闭原则（新增阶段无需修改编排器）
 - **PipelineContext**：作为各阶段间的数据传递对象，阶段间通过 Context 读写数据而非直接引用，避免阶段间直接耦合
-- **ICD-11 术语规范化**：阶段2完成后、阶段3开始前，使用本地 ICD-11 中文术语库和口语同义词映射表对 SOAP 草稿进行后处理规范化（`_normalize_terms_in_draft()`），仅中文模式生效
+- **可选流程控制**：通过 `skip_cleaning`、`skip_hallucination_check`、`stop_after_draft`、`skip_verification` 参数控制各阶段执行与跳过，跳过的阶段返回值为 `None`
+- **术语规范化**：阶段2完成后、阶段3开始前，对 SOAP 草稿进行术语规范化（`_normalize_terms_in_draft()`）。中文路径：先使用 colloquial_synonyms.json 做快速替换，再调用 `normalize_draft_terms()`（LLM批量规范化+术语库检索）；英文路径：直接调用 `normalize_draft_terms()`。中英文均生效
 - **Orchestrator 单一职责**：`PipelineOrchestrator` 只负责流程编排和资源初始化，不包含领域逻辑（领域逻辑在 Stage 类中）
-- **向后兼容包装**：`LLMPipelineService` 保留为 38 行包装类，所有公共方法委托给 `PipelineOrchestrator`，确保 `api/emr.py` 和外部调用方零修改
+- **向后兼容包装**：`LLMPipelineService` 保留为包装类，所有公共方法委托给 `PipelineOrchestrator`，确保 `api/emr.py` 和外部调用方零修改
 - **依赖注入**：`InteractivePipelineService` 依赖从 `LLMPipelineService` 改为 `PipelineOrchestrator`，支持独立测试
 
 ### 配置项
@@ -1282,6 +1341,7 @@ class PipelineStage(ABC):
 | TRANSLATION_DEVICE | cpu | 翻译模型运行设备 |
 | UMLS_MAX_CONCURRENT | 5 | UMLS API最大并发请求数 |
 | TERMINOLOGY_PARALLEL_ENABLED | true | 启用术语规范化并行模式 |
+| DRAFT_GENERATION_MODE | free_text | 草稿生成模式（free_text: 自由文本草稿+结构化两步模式） |
 
 ## 依赖关系
 
@@ -1409,8 +1469,8 @@ def run_async(coro):
 | frontend/css/style.css | 全局样式、响应式布局（保留原有页面样式） |
 | frontend/css/ide.css | IDE布局专用样式（VS Code暗色主题） |
 | frontend/js/app.js | IDE主控制器（状态管理、活动栏切换、事件总线） |
-| frontend/js/agent.js | Agent侧边栏（消息展示、音频上传、ASR流程、病历生成流程） |
-| frontend/js/editor.js | 病历编辑器（SOAP展示/编辑、版本管理、证据溯源、打印） |
+| frontend/js/agent.js | Agent侧边栏（消息展示、音频上传、ASR流程、流程模式选择组件、病历生成流程、后处理阶段选择面板、定稿保存、draft_text_ready事件处理、草稿结构化按钮处理） |
+| frontend/js/editor.js | 病历编辑器（SOAP展示/编辑、版本管理、证据溯源、打印、变更视图渲染、草稿预览面板displayDraftText/switchEditorTab/getDraftTextFromPanel） |
 | frontend/js/debug.js | 调试侧边栏（阶段选择、提示词展示、手动输入、提交/跳过） |
 | frontend/js/config-sidebar.js | 配置侧边栏（LLM配置表单、配置列表管理） |
 | frontend/js/upload.js | 上传页面逻辑、拖拽处理、进度更新 |
@@ -1430,11 +1490,59 @@ def run_async(coro):
 1. 在IDE界面Agent面板中直接拖拽上传音频（或从结果页跳转）
 2. Agent面板显示上传成功，自动开始语音转写
 3. 转写完成后Agent面板显示轮次统计
-4. 点击「生成病历」→ Agent面板逐步显示LLM处理阶段
-5. 所有阶段完成后，SOAP病历自动在主编辑区展示
-6. 可在编辑区进行查看、折叠、编辑、版本切换、证据溯源、打印
-7. 可切换到调试面板进行逐阶段手动调试
-8. 可切换到配置面板管理LLM配置
+4. 选择流程模式（快速草稿/标准流程/完整流程）→ 点击「生成病历」
+5. Agent面板逐步显示LLM处理阶段
+6. 所有阶段完成后，SOAP病历自动在主编辑区展示
+7. 可在编辑区进行查看、折叠、编辑、版本切换、证据溯源、打印
+8. 可切换到调试面板进行逐阶段手动调试
+9. 可切换到配置面板管理LLM配置
+
+### PipelineModeSelector 组件
+
+流程模式选择组件位于 Agent 侧边栏上传区域下方，支持用户在生成病历前选择处理流程。
+
+**组件结构**：
+
+```
+┌─────────────────────────────────────┐
+│ 生成模式选择                          │
+├─────────────────────────────────────┤
+│ ○ 快速草稿（推荐）                    │
+│   仅生成草稿，最快速度                 │
+│                                     │
+│ ○ 标准流程                           │
+│   转写清洗 + 草稿生成                 │
+│                                     │
+│ ○ 完整流程                           │
+│   全流程：清洗→草稿→核查→修订          │
+│                                     │
+│ □ 启用幻觉检查                        │
+│ □ 启用后置核查                        │
+└─────────────────────────────────────┘
+```
+
+**参数映射**：
+
+| 模式 | skip_cleaning | skip_hallucination_check | stop_after_draft | skip_verification |
+|------|---------------|--------------------------|------------------|-------------------|
+| 快速草稿 | true | true | true | false |
+| 简化流程 | true | true | false | true |
+| 标准流程 | false | true | false | false |
+| 完整流程 | false | false | false | false |
+
+**复选框覆盖规则**：
+
+- 启用幻觉检查：`skip_hallucination_check = false`
+- 启用后置核查：`stop_after_draft = false`
+
+**核心函数**：
+
+| 函数 | 功能 |
+|------|------|
+| `renderPipelineModeSelector()` | 渲染组件HTML |
+| `initPipelineModeSelectorEvents()` | 绑定事件 |
+| `setPipelineMode(mode)` | 设置模式 |
+| `getPipelineParams()` | 计算API参数 |
 
 ## 数据流程
 
@@ -1445,15 +1553,19 @@ graph LR
     A[音频输入] --> B[ASR转写]
     B --> C[说话人分离]
     C --> D[阶段1: 转写清洗与角色纠错]
-    D --> E[阶段2: 直接草稿生成<br/>单次LLM调用生成完整SOAP]
-    E --> F[阶段3: 后置核查<br/>Claim核查+Checklist核查+硬规则核查]
-    F --> G[阶段4: 字段级修订与落盘<br/>定点修订+schema约束校验]
-    G --> H[病历输出]
+    D --> E[阶段2: 直接草稿生成<br/>free_text/json双模式]
+    E --> F[阶段3: 草稿结构化<br/>free_text模式: 自由文本→SOAP JSON]
+    F --> G[阶段4: 幻觉检查<br/>一致性核查]
+    G --> H[阶段5: 后置核查<br/>Claim核查+Checklist核查+硬规则核查]
+    H --> I[阶段6: 字段级修订与落盘<br/>定点修订+schema约束校验]
+    I --> J[病历输出]
     style D fill:#e1f5ff
     style E fill:#fff3e0
-    style F fill:#fce4ec
-    style G fill:#e8f5e9
-    style H fill:#e8f5e9
+    style F fill:#e8f5e9
+    style G fill:#fce4ec
+    style H fill:#fff3e0
+    style I fill:#e8f5e9
+    style J fill:#e8f5e9
 ```
 
 ### 并行处理流程

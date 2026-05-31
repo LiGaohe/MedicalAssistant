@@ -298,7 +298,7 @@ class InteractivePipelineService:
                 }
             }
 
-        elif stage in ("role_annotation", "term_normalization", "field_extraction", "emr_generation"):
+        elif stage in ("role_annotation", "field_extraction", "emr_generation"):
             return {
                 "error": f"阶段 '{stage}' 已废弃，请使用新版分步流程",
                 "deprecated": True

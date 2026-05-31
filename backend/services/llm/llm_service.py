@@ -1,12 +1,37 @@
+import logging
+import threading
+from pathlib import Path
+from datetime import datetime
 from typing import Dict, Any, Optional, List
 from sqlalchemy.orm import Session
 from .base import LLMAdapter, LLMRequest, LLMResponse
 from .openai_compatible_adapter import OpenAICompatibleAdapter
 from .prompts import PromptManager
 from ...models.llm_config import LLMConfig
-import json
-import threading
 from ...utils.logger import logger
+
+
+def setup_llm_raw_logger() -> logging.Logger:
+    llm_logger = logging.getLogger("llm_raw_response")
+    if llm_logger.handlers:
+        return llm_logger
+    
+    llm_logger.setLevel(logging.DEBUG)
+    
+    log_dir = Path("data/logs/llm_raw")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    
+    log_file = log_dir / f"llm_raw_{datetime.now().strftime('%Y%m%d_%H')}.log"
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_format = logging.Formatter(
+        '%(asctime)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_handler.setFormatter(file_format)
+    
+    llm_logger.addHandler(file_handler)
+    return llm_logger
 
 
 class LLMService:
@@ -17,6 +42,7 @@ class LLMService:
         self.prompt_manager = PromptManager()
         self._config_lock = threading.Lock()
         self._load_adapters()
+        self._llm_raw_logger = setup_llm_raw_logger()
         
     def _load_adapters(self):
         configs = self.db.query(LLMConfig).filter(LLMConfig.is_active == True).all()
@@ -58,7 +84,8 @@ class LLMService:
         json_mode: Optional[bool] = None,
         thinking_enabled: Optional[bool] = None,
         thinking_effort: Optional[str] = None,
-        timeout: Optional[float] = None
+        timeout: Optional[float] = None,
+        call_id: Optional[str] = None
     ) -> LLMResponse:
         if not self.adapters:
             with self._config_lock:
@@ -94,6 +121,13 @@ class LLMService:
             timeout=timeout
         )
         
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        call_id = call_id or f"{adapter_name}_{timestamp}"
+        
+        logger.info(f"=== LLM调用开始 === call_id={call_id}, adapter={adapter_name}")
+        logger.debug(f"[{call_id}] 请求提示词长度: {len(prompt)} 字符")
+        logger.debug(f"[{call_id}] 请求配置: max_tokens={request.max_tokens}, temperature={request.temperature}, json_mode={request.json_mode}, thinking_enabled={request.thinking_enabled}")
+        
         response = adapter.generate(request)
         
         logger.debug(f"LLM响应 - 模型: {response.model}, 提供商: {response.provider}")
@@ -101,6 +135,8 @@ class LLMService:
         logger.debug(f"LLM响应 - usage: {response.usage}")
         logger.info(f"LLM响应 - 返回文本长度: {len(response.text)} 字符")
         logger.debug(f"LLM响应 - 返回文本内容:\n{response.text}")
+        
+        self._llm_raw_logger.info(f"\n{'='*80}\n[LLM RAW RESPONSE] call_id={call_id}, adapter={adapter_name}, timestamp={timestamp}\n{'='*80}\n[PROMPT]\n{prompt}\n\n[RESPONSE - {response.model}]\n{response.text}\n{'='*80}\n")
         
         if not adapter.validate_response(response):
             logger.error(f"LLM响应验证失败")

@@ -424,6 +424,101 @@ $transcript
             required_vars=["transcript"]
         )
 
+        self.templates["free_soap_generation"] = PromptTemplate(
+            template="""你是一个医疗病历撰写专家。请根据以下医患对话，按SOAP格式撰写病历草稿。
+
+## 原始对话
+$transcript
+
+## 撰写要求
+1. 按以下四段组织内容，每段用标题标注：
+   - **S（主观症状）**：患者主诉、现病史、否认症状、既往史
+   - **O（客观体征）**：体格检查、辅助检查
+   - **A（评估诊断）**：诊断
+   - **P（治疗计划）**：治疗方案、医嘱
+2. 必须忠实于对话原文，不得添加、推断或改写对话中未明确提及的内容
+3. 对话中未提及的信息不要编造，直接不写
+4. 时间表述必须与对话原文一致，不得改写（如"7月份至今"不能改为"7月余"）
+5. 每段内自由叙述，不需要分字段""",
+            required_vars=["transcript"]
+        )
+
+        self.templates["soap_structuring"] = PromptTemplate(
+            template="""你是一个医疗病历结构化专家。请将以下自由文本SOAP病历草稿结构化为标准JSON格式。
+
+## 自由文本草稿
+$draft_text
+
+## 原始对话（供参考）
+$transcript
+
+## 字段说明
+- **S**：chief_complaint（主诉）、history_present_illness（现病史）、denied_symptoms（否认症状）、past_history（既往史）
+- **O**：physical_examination（体格检查）、auxiliary_examination（辅助检查）
+- **A**：diagnosis（诊断）
+- **P**：treatment（治疗方案）、advice（医嘱）
+
+每个字段包含 value（文本内容）和 source_turn_indices（对话turn序号数组，从0开始）。
+草稿中未提及的字段 value 为空字符串，source_turn_indices 为空数组。
+
+## 结构化原则
+1. 以草稿文本为主要依据，从草稿中提取各字段内容
+2. 不得添加草稿中未出现的内容
+3. source_turn_indices 标注该字段内容引用了哪些对话turn序号
+
+## 输出JSON格式
+{
+  "subjective": {
+    "text": "",
+    "chief_complaint": {"value": "", "source_turn_indices": []},
+    "history_present_illness": {"value": "", "source_turn_indices": []},
+    "denied_symptoms": {"value": "", "source_turn_indices": []},
+    "past_history": {"value": "", "source_turn_indices": []}
+  },
+  "objective": {
+    "text": "",
+    "physical_examination": {"value": "", "source_turn_indices": []},
+    "auxiliary_examination": {"value": "", "source_turn_indices": []}
+  },
+  "assessment": {
+    "text": "",
+    "diagnosis": {"value": "", "source_turn_indices": []}
+  },
+  "plan": {
+    "text": "",
+    "treatment": {"value": "", "source_turn_indices": []},
+    "advice": {"value": "", "source_turn_indices": []}
+  }
+}""",
+            required_vars=["draft_text", "transcript"]
+        )
+
+        self.templates["evidence_mapping"] = PromptTemplate(
+            template="""你是一个医疗病历证据溯源专家。请为以下SOAP病历内容的每个部分标注来源对话轮次编号。
+
+## 原始对话
+$transcript
+
+## SOAP病历
+$emr_draft
+
+## 任务说明
+为每个SOAP部分的内容找出对应的对话轮次编号（从0开始）。
+- 如果某个部分的内容来自多个对话轮次，列出所有相关轮次编号
+- 如果某个部分的内容在对话中没有明确依据，返回空数组
+
+## 输出JSON格式
+{
+  "subjective": {"source_turn_indices": [0, 1, 4]},
+  "objective": {"source_turn_indices": [6]},
+  "assessment": {"source_turn_indices": [17, 18, 19]},
+  "plan": {"source_turn_indices": [22, 24]}
+}
+
+请严格按照上述JSON格式输出，不要添加其他字段。""",
+            required_vars=["transcript", "emr_draft"]
+        )
+
         # ========== 新增：逐claim核查（claim_verification） ==========
         self.templates["claim_verification"] = PromptTemplate(
             template="""你是一个医疗病历审核专家。请对以下SOAP病历草稿的A（评估）和P（计划）部分做**逐claim原子核查**。
@@ -842,6 +937,123 @@ $facts_json
   }
 }""",
             required_vars=["subjective_text", "objective_text", "facts_json"]
+        )
+
+        self.templates["term_standardization"] = PromptTemplate(
+            template="""你是医学术语规范化助手。
+
+任务：
+对以下候选术语列表进行两项处理：
+1. **过滤**：剔除非医学术语的词汇，只保留真正的医学术语
+2. **规范化**：将口语化医学术语改写为标准医学用语
+
+## 过滤规则（重要）
+以下类型的词**不是医学术语**，必须从输出中移除：
+- 普通动词："出现"、"使用"、"进行"、"给予"、"建议"
+- 时间副词："至今"、"期间"、"当时"、"近期"
+- 程度副词："反复"、"明显"、"显著"、"为主"
+- 通用名词："患者"、"药物"、"原因"、"问题"
+- 连词/介词："及其"、"以及"、"根据"
+- 判断性动词："考虑"、"排除"、"确认"、"待查"
+- 状态描述："正常"、"异常"、"好转"、"暂无"、"稳定"
+- 地点/机构："当地"、"外院"
+- 量词/数词片段："至少"、"十个"、"半个"
+- 破碎的语法片段："后易"、"以晨起"、"未行"、"行肺"（这些是分词错误产生的碎片）
+
+**只保留与医学相关的词汇**：症状、疾病名、检查项目、药物名、身体部位、治疗方案等。
+
+## 去重规则
+如果多个术语实质相同，只保留一个最优表述：
+- "月余" / "1月余" / "一个月余" → 统一为 "1月余"，只输出一次
+- "周前" / "1周前" → 统一为 "1周前"
+- "疗程" / "半个月" / "半月" → 统一为 "半月"
+
+## 规范化要求
+1. 保留原始语义，不把症状升级为诊断
+2. 如果术语已足够规范，原样返回
+3. 输出为术语（词或短语），不是句子
+4. 不输出编码或解释性内容
+
+类型指导：
+- symptom（症状）：保留症状属性，补全部位和性质，不升级为诊断
+- diagnosis（诊断）：拆解并列和省略表达，避免把症状升级为疾病
+- examination（检查）：统一俗称与正式检查名称，明确检查方式和部位
+- treatment（治疗）：统一俗称与规范术式名称，明确操作类型和部位
+
+术语列表：
+$terms
+
+输出格式（JSON）：
+{"医学术语1": "规范化结果1", "医学术语2": "规范化结果2", ...}
+
+注意：
+- 只输出JSON，不要输出其他内容
+- 非医学术语直接不输出，不要出现在JSON中
+- 重复的术语合并为一个输出""",
+            required_vars=["terms"]
+        )
+
+        self.templates["extract_medical_terms"] = PromptTemplate(
+            template="""你是医学术语提取助手。
+
+任务：
+从以下病历草稿文本中，识别并提取所有**真正需要标准化的医学术语**。只提取医学术语，不提取非医学术语。
+
+## 什么是医学术语
+- **症状**：咳嗽、发热、淋巴结肿大、鼻塞、流涕、喘息、胸痛、乏力、头晕等
+- **体征**：肺部啰音、咽部充血、皮疹、浮肿等
+- **疾病名称**：支气管哮喘、过敏性鼻炎、贫血、上呼吸道感染、支原体肺炎等
+- **检查项目**：血常规、胸片、肺功能检查、支原体抗体检测等
+- **药物名称**：免疫调节剂、抗生素、糖皮质激素等
+- **治疗方案**：口服给药、雾化吸入、静脉输液等
+- **身体部位**：颈部、淋巴结、咽喉、肺部等
+- **时间描述与医学结合体**：1周前（作为病程时间描述）、1月余（作为病程时间描述）等
+
+## 什么是非医学术语（必须排除）
+- 普通动词/副词："出现"、"使用"、"进行"、"给予"、"建议"、"继续"、"反复"
+- 纯时间词："至今"、"期间"、"当时"、"近期"
+- 通用名词："患者"、"药物"、"原因"、"问题"
+- 连词/介词："及其"、"以及"、"根据"
+- 判断动词："考虑"、"排除"、"确认"、"待查"
+- 状态描述："正常"、"异常"、"好转"、"暂无"、"稳定"
+- 地点/机构："当地"、"外院"
+- 量词碎片："至少"、"十个"、"半个"
+- 分词错误碎片："后易"、"以晨起"、"未行"、"行肺"、"十声"
+- 普通形容词："特殊"、"明确"、"明显"、"显著"
+
+## 去重规则（重要）
+如果多个术语描述同一医学概念，只保留最完整的表述：
+- "淋巴结" / "淋巴结肿大" / "颈部淋巴结肿大" → 只保留 "颈部淋巴结肿大"
+- "月余" / "1月余" → 只保留 "1月余"
+- "周前" / "1周前" → 只保留 "1周前"
+- "口服" / "口服给药" → 只保留 "口服给药"（如果是给药途径）
+- "发烧" / "发热" → 只保留 "发热"
+
+## 术语归类
+为每个术语标注类型：
+- symptom：症状
+- sign：体征  
+- diagnosis：疾病/诊断
+- examination：检查
+- drug：药物
+- treatment：治疗
+- body_part：身体部位
+
+病历文本：
+$draft_text
+
+输出格式（JSON数组，只输出JSON）：
+[
+  {"term": "医学术语1", "type": "类型"},
+  {"term": "医学术语2", "type": "类型"}
+]
+
+注意：
+- 不输出非医学术语
+- 不输出重复术语，保留最完整表述
+- 不输出破碎的分词片段
+- 只输出JSON数组""",
+            required_vars=["draft_text"]
         )
 
         self._load_chinese_evaluation_templates()
@@ -1318,6 +1530,104 @@ Please output JSON format:
             required_vars=["extracted_data", "transcript", "template_requirements"]
         )
         
+        self.templates["free_soap_generation"] = PromptTemplate(
+            template="""You are a medical record writing expert. Please write a medical record draft in SOAP format based on the following doctor-patient conversation.
+
+## Original Conversation
+$transcript
+
+## Writing Requirements
+1. Organize content into the following four sections, each with a heading:
+   - **S (Subjective)**: Chief complaint, history of present illness, denied symptoms, past medical history
+   - **O (Objective)**: Physical examination, auxiliary examination
+   - **A (Assessment)**: Diagnosis
+   - **P (Plan)**: Treatment plan, medical advice
+2. Must be faithful to the original conversation, do not add, infer, or rewrite content not explicitly mentioned
+3. Do not fabricate information not mentioned in the conversation, simply omit it
+4. Time expressions must be consistent with the original conversation, do not rewrite (e.g., "since July" cannot be changed to "over 1 month")
+5. Write freely within each section, no need to split into fields""",
+            required_vars=["transcript"]
+        )
+
+        self.templates["soap_structuring"] = PromptTemplate(
+            template="""You are a medical record structuring expert. Please structure the following free-text SOAP medical record draft into standard JSON format.
+
+## Free-text Draft
+$draft_text
+
+## Original Conversation (for reference)
+$transcript
+
+## Field Descriptions
+- **S**: chief_complaint, history_present_illness, denied_symptoms, past_history
+- **O**: physical_examination, auxiliary_examination
+- **A**: diagnosis
+- **P**: treatment, advice
+
+Each field contains value (text content) and source_turn_indices (conversation turn index array, starting from 0).
+Fields not mentioned in the draft should have value as empty string and source_turn_indices as empty array.
+
+## Structuring Principles
+1. Use the draft text as the primary basis, extract field content from the draft
+2. Do not add content not present in the draft
+3. source_turn_indices indicates which conversation turn indices the field content references
+
+## Output JSON Format
+{
+  "subjective": {
+    "text": "",
+    "chief_complaint": {"value": "", "source_turn_indices": []},
+    "history_present_illness": {"value": "", "source_turn_indices": []},
+    "denied_symptoms": {"value": "", "source_turn_indices": []},
+    "past_history": {"value": "", "source_turn_indices": []}
+  },
+  "objective": {
+    "text": "",
+    "physical_examination": {"value": "", "source_turn_indices": []},
+    "auxiliary_examination": {"value": "", "source_turn_indices": []}
+  },
+  "assessment": {
+    "text": "",
+    "diagnosis": {"value": "", "source_turn_indices": []}
+  },
+  "plan": {
+    "text": "",
+    "treatment": {"value": "", "source_turn_indices": []},
+    "advice": {"value": "", "source_turn_indices": []}
+  }
+}""",
+            required_vars=["draft_text", "transcript"]
+        )
+
+        self.templates["term_standardization"] = PromptTemplate(
+            template="""You are a medical terminology standardization assistant.
+
+Task:
+Standardize the following colloquial medical terms into formal medical terminology. Output terms (words or short phrases), not sentences.
+
+Requirements:
+1. Output only one best standardization result per term
+2. Preserve original semantics, do not upgrade symptoms to diagnoses
+3. If a term is already standardized, return it as-is
+4. Output terms (words or short phrases), not sentences
+5. Do not output codes or explanatory content
+
+Type guidance:
+- symptom: Preserve symptom attributes, supplement body part and quality; do not upgrade to diagnosis
+- diagnosis: Decompose parallel/abbreviated expressions; avoid upgrading symptoms to diseases
+- examination: Unify colloquial names with formal examination names; clarify method and body part
+- treatment: Unify colloquial names with standard procedure names; clarify procedure type and body part
+
+Terms:
+$terms
+
+Output format (JSON):
+{"term1": "standardized_result1", "term2": "standardized_result2", ...}
+
+Note: Only output JSON, no other content.""",
+            required_vars=["terms"]
+        )
+
         self._load_english_evaluation_templates()
     
     def _load_english_evaluation_templates(self):

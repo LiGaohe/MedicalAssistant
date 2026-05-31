@@ -4,6 +4,230 @@ window.AgentModule = (function() {
     var isProcessing = false;
     var uploadInProgress = false;
     var stageElements = {};
+    var receivedPhaseComplete = false;
+
+    var pipelineMode = 'quick';
+    var enableHallucinationCheck = false;
+    var enablePostVerification = false;
+
+    /**
+     * 渲染流程选择UI组件
+     * @returns {string} HTML字符串
+     */
+    function renderPipelineModeSelector() {
+        var currentModeName = getModeDisplayName(pipelineMode);
+        var html = '<div class="pipeline-mode-selector" id="pipelineModeSelector">' +
+            '<div class="pipeline-mode-header" id="pipelineModeHeader">' +
+            '<span class="pipeline-mode-header-label">生成模式</span>' +
+            '<span class="pipeline-mode-header-value" id="pipelineModeHeaderValue">' + App.escapeHtml(currentModeName) + '</span>' +
+            '<span class="pipeline-mode-header-arrow" id="pipelineModeHeaderArrow">▼</span>' +
+            '</div>' +
+            '<div class="pipeline-mode-body" id="pipelineModeBody">' +
+            '<div class="pipeline-mode-options">' +
+            // 快速草稿模式（推荐）
+            '<div class="pipeline-mode-option' + (pipelineMode === 'quick' ? ' selected' : '') + '" data-mode="quick">' +
+            '<div class="mode-radio">' +
+            '<span class="radio-icon">' + (pipelineMode === 'quick' ? App.icon('checkCircle', 14) : App.icon('circle', 14)) + '</span>' +
+            '<span class="mode-label">快速草稿（推荐）</span>' +
+            '</div>' +
+            '<div class="mode-desc">仅生成草稿，最快速度</div>' +
+            '</div>' +
+            // 标准流程模式
+            '<div class="pipeline-mode-option' + (pipelineMode === 'standard' ? ' selected' : '') + '" data-mode="standard">' +
+            '<div class="mode-radio">' +
+            '<span class="radio-icon">' + (pipelineMode === 'standard' ? App.icon('checkCircle', 14) : App.icon('circle', 14)) + '</span>' +
+            '<span class="mode-label">标准流程</span>' +
+            '</div>' +
+            '<div class="mode-desc">转写清洗 + 草稿生成</div>' +
+            '</div>' +
+            // 完整流程模式
+            '<div class="pipeline-mode-option' + (pipelineMode === 'full' ? ' selected' : '') + '" data-mode="full">' +
+            '<div class="mode-radio">' +
+            '<span class="radio-icon">' + (pipelineMode === 'full' ? App.icon('checkCircle', 14) : App.icon('circle', 14)) + '</span>' +
+            '<span class="mode-label">完整流程</span>' +
+            '</div>' +
+            '<div class="mode-desc">全流程：清洗→草稿→核查→修订</div>' +
+            '</div>' +
+            '</div>' +
+            // 可选复选框
+            '<div class="pipeline-mode-checkboxes">' +
+            '<div class="pipeline-checkbox' + (enableHallucinationCheck ? ' checked' : '') + '" id="hallucinationCheckToggle">' +
+            '<span class="checkbox-icon">' + (enableHallucinationCheck ? App.icon('checkSquare', 14) : App.icon('square', 14)) + '</span>' +
+            '<span class="checkbox-label">启用幻觉检查</span>' +
+            '</div>' +
+            '<div class="pipeline-checkbox' + (enablePostVerification ? ' checked' : '') + '" id="postVerificationToggle">' +
+            '<span class="checkbox-icon">' + (enablePostVerification ? App.icon('checkSquare', 14) : App.icon('square', 14)) + '</span>' +
+            '<span class="checkbox-label">启用后置核查</span>' +
+            '</div>' +
+            '</div>' +
+            '</div>' +
+            '</div>';
+        return html;
+    }
+
+    /**
+     * 初始化流程选择组件事件绑定
+     */
+    function initPipelineModeSelectorEvents() {
+        var selector = document.getElementById('pipelineModeSelector');
+        if (!selector) return;
+
+        var header = document.getElementById('pipelineModeHeader');
+        if (header) {
+            header.addEventListener('click', function() {
+                togglePipelineModeBody();
+            });
+        }
+
+        selector.querySelectorAll('.pipeline-mode-option').forEach(function(option) {
+            option.addEventListener('click', function(e) {
+                e.stopPropagation();
+                var mode = this.getAttribute('data-mode');
+                setPipelineMode(mode);
+            });
+        });
+
+        var hallucinationToggle = document.getElementById('hallucinationCheckToggle');
+        if (hallucinationToggle) {
+            hallucinationToggle.addEventListener('click', function(e) {
+                e.stopPropagation();
+                enableHallucinationCheck = !enableHallucinationCheck;
+                updateCheckboxState(this, enableHallucinationCheck);
+            });
+        }
+
+        var postVerificationToggle = document.getElementById('postVerificationToggle');
+        if (postVerificationToggle) {
+            postVerificationToggle.addEventListener('click', function(e) {
+                e.stopPropagation();
+                enablePostVerification = !enablePostVerification;
+                updateCheckboxState(this, enablePostVerification);
+            });
+        }
+    }
+
+    var pipelineModeBodyExpanded = false;
+
+    function togglePipelineModeBody() {
+        var body = document.getElementById('pipelineModeBody');
+        var arrow = document.getElementById('pipelineModeHeaderArrow');
+        if (!body) return;
+
+        pipelineModeBodyExpanded = !pipelineModeBodyExpanded;
+        if (pipelineModeBodyExpanded) {
+            body.style.display = 'block';
+            if (arrow) arrow.textContent = '▲';
+        } else {
+            body.style.display = 'none';
+            if (arrow) arrow.textContent = '▼';
+        }
+    }
+
+    /**
+     * 设置流程模式
+     * @param {string} mode - 模式名称 (quick/standard/full)
+     */
+    function setPipelineMode(mode) {
+        pipelineMode = mode;
+        var selector = document.getElementById('pipelineModeSelector');
+        if (!selector) return;
+
+        selector.querySelectorAll('.pipeline-mode-option').forEach(function(option) {
+            var optionMode = option.getAttribute('data-mode');
+            if (optionMode === mode) {
+                option.classList.add('selected');
+                option.querySelector('.radio-icon').innerHTML = App.icon('checkCircle', 14);
+            } else {
+                option.classList.remove('selected');
+                option.querySelector('.radio-icon').innerHTML = App.icon('circle', 14);
+            }
+        });
+
+        var headerValue = document.getElementById('pipelineModeHeaderValue');
+        if (headerValue) {
+            headerValue.textContent = getModeDisplayName(mode);
+        }
+
+        if (pipelineModeBodyExpanded) {
+            pipelineModeBodyExpanded = false;
+            var body = document.getElementById('pipelineModeBody');
+            var arrow = document.getElementById('pipelineModeHeaderArrow');
+            if (body) body.style.display = 'none';
+            if (arrow) arrow.textContent = '▼';
+        }
+
+        console.log('[PipelineModeSelector] 模式切换为: ' + mode);
+    }
+
+    /**
+     * 更新复选框状态
+     * @param {HTMLElement} checkboxEl - 复选框元素
+     * @param {boolean} checked - 是否选中
+     */
+    function updateCheckboxState(checkboxEl, checked) {
+        if (checked) {
+            checkboxEl.classList.add('checked');
+            checkboxEl.querySelector('.checkbox-icon').innerHTML = App.icon('checkSquare', 14);
+        } else {
+            checkboxEl.classList.remove('checked');
+            checkboxEl.querySelector('.checkbox-icon').innerHTML = App.icon('square', 14);
+        }
+    }
+
+    /**
+     * 获取当前流程参数配置
+     * @returns {Object} 参数对象
+     */
+    function getPipelineParams() {
+        var params = {
+            skip_cleaning: true,
+            skip_hallucination_check: true,
+            stop_after_draft: true
+        };
+
+        // 根据模式设置参数
+        if (pipelineMode === 'quick') {
+            // 快速草稿：skip_cleaning=true&skip_hallucination_check=true&stop_after_draft=true
+            params.skip_cleaning = true;
+            params.skip_hallucination_check = true;
+            params.stop_after_draft = true;
+        } else if (pipelineMode === 'standard') {
+            // 标准流程：skip_cleaning=false&skip_hallucination_check=true&stop_after_draft=true
+            params.skip_cleaning = false;
+            params.skip_hallucination_check = true;
+            params.stop_after_draft = true;
+        } else if (pipelineMode === 'full') {
+            // 完整流程：skip_cleaning=false&skip_hallucination_check=false&stop_after_draft=false
+            params.skip_cleaning = false;
+            params.skip_hallucination_check = false;
+            params.stop_after_draft = false;
+        }
+
+        // 复选框覆盖参数
+        if (enableHallucinationCheck) {
+            params.skip_hallucination_check = false;
+        }
+        if (enablePostVerification) {
+            params.stop_after_draft = false;
+        }
+
+        console.log('[PipelineModeSelector] 当前参数配置:', params);
+        return params;
+    }
+
+    /**
+     * 获取模式的显示名称
+     * @param {string} mode - 模式名称
+     * @returns {string} 显示名称
+     */
+    function getModeDisplayName(mode) {
+        var names = {
+            'quick': '快速草稿',
+            'standard': '标准流程',
+            'full': '完整流程'
+        };
+        return names[mode] || mode;
+    }
 
     function addMessage(type, content, details) {
         var container = document.getElementById('agentMessages');
@@ -202,8 +426,38 @@ window.AgentModule = (function() {
                         '<p class="agent-hint">请上传音频文件开始，或使用文本调试模式输入对话内容</p>' +
                         '</div>';
                     container.appendChild(welcomeMsg);
+                    
+                    renderAndInitPipelineSelector();
                 }
             });
+        }
+
+        renderAndInitPipelineSelector();
+        initActionBar();
+    }
+    
+    /**
+     * 渲染并初始化流程选择组件
+     */
+    function renderAndInitPipelineSelector() {
+        var inputArea = document.querySelector('.agent-input-area');
+        if (!inputArea) return;
+        
+        // 检查是否已存在组件，如果存在则移除
+        var existingSelector = document.getElementById('pipelineModeSelector');
+        if (existingSelector) {
+            existingSelector.remove();
+        }
+        
+        // 在上传区域之后插入流程选择组件
+        var uploadZone = document.getElementById('agentDropZone');
+        if (uploadZone) {
+            var selectorDiv = document.createElement('div');
+            selectorDiv.innerHTML = renderPipelineModeSelector();
+            uploadZone.parentNode.insertBefore(selectorDiv.firstChild, uploadZone.nextSibling);
+            
+            // 初始化事件绑定
+            initPipelineModeSelectorEvents();
         }
     }
 
@@ -278,6 +532,7 @@ window.AgentModule = (function() {
     async function uploadAndTranscribe() {
         if (!selectedFile) return;
         isProcessing = true;
+        receivedPhaseComplete = false;
         var processBtn = document.getElementById('agentProcess');
         if (processBtn) processBtn.disabled = true;
 
@@ -434,13 +689,38 @@ window.AgentModule = (function() {
         var processBtn = document.getElementById('agentProcess');
         if (processBtn) processBtn.disabled = true;
 
-        addMessage('agent', '<p>开始生成SOAP病历...</p>');
-        App.updateStatusBar('正在生成病历...');
+        // 获取流程参数配置
+        var pipelineParams = getPipelineParams();
+        
+        // 构建Query参数URL（后端API期望控制参数作为Query参数）
+        var queryParams = new URLSearchParams({
+            stop_after_draft: pipelineParams.stop_after_draft,
+            skip_cleaning: pipelineParams.skip_cleaning,
+            skip_hallucination_check: pipelineParams.skip_hallucination_check
+        });
+        var sseUrl = '/api/emr/process-stream?' + queryParams.toString();
+        
+        // 构建模式描述信息
+        var modeDesc = getModeDisplayName(pipelineMode);
+        var extraFeatures = [];
+        if (enableHallucinationCheck) extraFeatures.push('幻觉检查');
+        if (enablePostVerification) extraFeatures.push('后置核查');
+        if (extraFeatures.length > 0) {
+            modeDesc += ' | ' + extraFeatures.join(' | ');
+        }
+        
+        addMessage('agent', '<p>开始生成SOAP病历...</p>' +
+            '<p class="agent-hint">执行模式: ' + modeDesc + '</p>');
+        App.updateStatusBar('正在生成病历 [' + modeDesc + ']...');
 
-        var currentStageEl = null;
+        // 重置阶段跟踪状态
+        stageElements = {};
+        stageIdMap = {};
+        executedStageCount = 0;
+        receivedPhaseComplete = false;
 
         try {
-            var response = await fetch('/api/emr/process-stream', {
+            var response = await fetch(sseUrl, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -488,6 +768,13 @@ window.AgentModule = (function() {
                 handleProcessComplete(result);
             }
 
+            if (!result && receivedPhaseComplete) {
+                App.updateStatusBar('草稿阶段完成，请选择后处理', 'success');
+            } else if (!result && !receivedPhaseComplete) {
+                addMessage('error', '<p>病历生成未完成：未收到完成信号</p>');
+                App.updateStatusBar('病历生成未完成', 'error');
+            }
+
         } catch (error) {
             var isNetworkError = error.name === 'TypeError' || 
                                  error.message.includes('NetworkError') ||
@@ -516,17 +803,36 @@ window.AgentModule = (function() {
         }
     }
 
+    // 阶段计数器：跟踪实际执行的阶段数量
+    var executedStageCount = 0;
+    var stageIdMap = {}; // 将后端stage编号映射到实际执行顺序
+    
     function handleSSEEvent(eventType, data) {
         console.log('[DEBUG] SSE事件:', eventType, data);
         if (eventType === 'stage_update') {
+            if (data.status === 'skipped') {
+                console.log('[DEBUG] 阶段跳过:', data.stage, data.name);
+                return;
+            }
             updateStageMessage(data.stage, data.name, data.status, data.detail);
         } else if (eventType === 'draft_ready') {
             console.log('[DEBUG] 收到draft_ready事件, data:', data);
             handleDraftReady(data);
+        } else if (eventType === 'draft_text_ready') {
+            console.log('[DEBUG] 收到draft_text_ready事件, data:', data);
+            if (data.draft_text) {
+                addMessage('success',
+                    '<p>' + App.icon('sparkles', 14) + ' 草稿已生成</p>' +
+                    '<p class="agent-hint">可在编辑器中查看/编辑病历，点击右下角按钮继续处理或保存</p>'
+                );
+                App.updateStatusBar('草稿已生成', 'success');
+            }
         } else if (eventType === 'error') {
             addMessage('error', '<p>病历生成失败: ' + App.escapeHtml(data.error || '未知错误') + '</p>');
             App.updateStatusBar('病历生成失败', 'error');
             isProcessing = false;
+        } else if (eventType === 'phase_complete') {
+            handlePhaseComplete(data);
         }
     }
 
@@ -534,7 +840,24 @@ window.AgentModule = (function() {
         var type = status === 'running' ? 'progress' : 
                    status === 'completed' ? 'success' : 'error';
 
-        var content = '<div class="stage-name">阶段' + stageNum + '/4: ' + stageName + '</div>';
+        // 动态计算实际执行的阶段顺序
+        if (!stageIdMap[stageNum] && status !== 'skipped') {
+            executedStageCount++;
+            stageIdMap[stageNum] = executedStageCount;
+        }
+        var actualStageIndex = stageIdMap[stageNum] || executedStageCount;
+        
+        // 计算总阶段数（根据当前模式）
+        var totalStages = 4; // 默认完整流程4阶段
+        var params = getPipelineParams();
+        if (params.skip_cleaning) totalStages--; // 跳过清洗阶段
+        if (params.skip_hallucination_check) totalStages--; // 跳过幻觉检查
+        if (params.stop_after_draft) totalStages = Math.min(totalStages, 2); // 草稿后停止
+        
+        // 确保总阶段数至少为当前已执行阶段数
+        totalStages = Math.max(totalStages, actualStageIndex);
+
+        var content = '<div class="stage-name">阶段' + actualStageIndex + '/' + totalStages + ': ' + stageName + '</div>';
         if (detail) {
             content += '<div class="stage-detail">' + App.escapeHtml(detail) + '</div>';
         }
@@ -557,6 +880,11 @@ window.AgentModule = (function() {
             if (contentEl) contentEl.innerHTML = content;
         } else {
             stageElements[stageNum] = addMessage(type, content);
+        }
+        
+        // 更新状态栏显示当前阶段
+        if (status === 'running') {
+            App.updateStatusBar('正在处理: ' + stageName + ' [' + actualStageIndex + '/' + totalStages + ']');
         }
     }
 
@@ -589,12 +917,190 @@ window.AgentModule = (function() {
         
         addMessage('success',
             '<p>' + App.icon('sparkles', 14) + ' 草稿已生成！</p>' +
-            '<p class="agent-hint">主编辑区已显示草稿，后台正在进行质量核查...</p>'
+            '<p class="agent-hint">主编辑区已显示草稿，等待后处理...</p>'
         );
         
-        App.updateStatusBar('草稿已生成，正在进行质量核查...', 'success');
+        App.updateStatusBar('草稿已生成，等待后处理...', 'success');
         
         App.emit('emrGenerated', { emrRecord: emrRecord });
+    }
+
+    function handlePhaseComplete(data) {
+        receivedPhaseComplete = true;
+        addMessage('success',
+            '<p>' + App.icon('checkCircle', 14) + ' 草稿生成阶段完成</p>' +
+            '<p class="agent-hint">可在编辑器中查看/编辑病历，点击右下角按钮继续处理或保存</p>'
+        );
+        updateActionBarState('draft_complete');
+    }
+
+    var pipelineState = {
+        currentStageIndex: 2,
+        stageNames: ['转写清洗', '草稿生成', '证据溯源', '幻觉检查', '完成'],
+        canFinalize: false
+    };
+
+    function initActionBar() {
+        var nextStageBtn = document.getElementById('nextStageBtn');
+        var finalizeEMRBtn = document.getElementById('finalizeEMRBtn');
+
+        if (nextStageBtn) {
+            nextStageBtn.addEventListener('click', function() {
+                executeNextStage();
+            });
+        }
+
+        if (finalizeEMRBtn) {
+            finalizeEMRBtn.addEventListener('click', function() {
+                finalizeEMRRecord();
+            });
+        }
+
+        updateActionBarState('initial');
+    }
+
+    function updateActionBarState(stateName) {
+        var stageLabel = document.getElementById('currentStageLabel');
+        var nextStageBtn = document.getElementById('nextStageBtn');
+        var finalizeEMRBtn = document.getElementById('finalizeEMRBtn');
+
+        if (stateName === 'initial') {
+            if (stageLabel) stageLabel.textContent = '当前阶段：未开始';
+            if (nextStageBtn) { nextStageBtn.textContent = '下一步'; nextStageBtn.disabled = true; }
+            if (finalizeEMRBtn) { finalizeEMRBtn.disabled = true; }
+            pipelineState.currentStageIndex = 0;
+            pipelineState.canFinalize = false;
+        } else if (stateName === 'draft_complete') {
+            if (stageLabel) stageLabel.textContent = '当前阶段：草稿生成';
+            if (nextStageBtn) { nextStageBtn.textContent = '证据溯源'; nextStageBtn.disabled = false; }
+            if (finalizeEMRBtn) { finalizeEMRBtn.disabled = false; }
+            pipelineState.currentStageIndex = 2;
+            pipelineState.canFinalize = true;
+        } else if (stateName === 'evidence_complete') {
+            if (stageLabel) stageLabel.textContent = '当前阶段：证据溯源';
+            if (nextStageBtn) { nextStageBtn.textContent = '幻觉检查'; nextStageBtn.disabled = false; }
+            if (finalizeEMRBtn) { finalizeEMRBtn.disabled = false; }
+            pipelineState.currentStageIndex = 3;
+            pipelineState.canFinalize = true;
+        } else if (stateName === 'hallucination_complete') {
+            if (stageLabel) stageLabel.textContent = '当前阶段：幻觉检查';
+            if (nextStageBtn) { nextStageBtn.textContent = '完成'; nextStageBtn.disabled = true; }
+            if (finalizeEMRBtn) { finalizeEMRBtn.disabled = false; }
+            pipelineState.currentStageIndex = 4;
+            pipelineState.canFinalize = true;
+        } else if (stateName === 'complete') {
+            if (stageLabel) stageLabel.textContent = '当前阶段：已完成';
+            if (nextStageBtn) { nextStageBtn.disabled = true; }
+            if (finalizeEMRBtn) { finalizeEMRBtn.disabled = false; }
+            pipelineState.currentStageIndex = 5;
+            pipelineState.canFinalize = true;
+        }
+    }
+
+    async function executeNextStage() {
+        var nextStageBtn = document.getElementById('nextStageBtn');
+        if (nextStageBtn) {
+            nextStageBtn.disabled = true;
+            nextStageBtn.innerHTML = App.icon('loader', 14) + ' 处理中...';
+        }
+
+        App.updateStatusBar('正在执行下一阶段处理...');
+
+        var emrDraft = state.emrRecord ? state.emrRecord.emr_json : null;
+
+        try {
+            var response = await fetch('/api/emr/process', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    visit_id: state.visitId,
+                    mode: 'next_stage_only',
+                    current_stage: pipelineState.currentStageIndex,
+                    emr_draft: emrDraft
+                })
+            });
+            var result = await response.json();
+
+            if (result.status === 'success') {
+                if (result.emr_record && result.emr_record.emr_json) {
+                    state.emrRecord = { emr_json: result.emr_record.emr_json };
+                    App.setState({ emrRecord: state.emrRecord });
+                    EditorModule.displayEMR(state.emrRecord);
+                }
+
+                var newState = '';
+                if (pipelineState.currentStageIndex === 2) newState = 'evidence_complete';
+                else if (pipelineState.currentStageIndex === 3) newState = 'hallucination_complete';
+                else if (pipelineState.currentStageIndex === 4) newState = 'complete';
+
+                updateActionBarState(newState);
+                addMessage('success', '<p>' + App.icon('checkCircle', 14) + ' 阶段处理完成</p>');
+                App.updateStatusBar('阶段处理完成', 'success');
+            } else {
+                addMessage('error', '<p>处理失败: ' + App.escapeHtml(result.errors ? result.errors.join(', ') : '未知错误') + '</p>');
+                App.updateStatusBar('处理失败', 'error');
+                if (nextStageBtn) nextStageBtn.disabled = false;
+            }
+        } catch (error) {
+            addMessage('error', '<p>请求失败: ' + error.message + '</p>');
+            App.updateStatusBar('请求失败', 'error');
+            if (nextStageBtn) nextStageBtn.disabled = false;
+        } finally {
+            if (nextStageBtn && !nextStageBtn.disabled) {
+                nextStageBtn.innerHTML = pipelineState.currentStageIndex < 4 ? pipelineState.stageNames[pipelineState.currentStageIndex + 1] : '完成';
+            }
+        }
+    }
+
+    async function finalizeEMRRecord() {
+        var finalizeEMRBtn = document.getElementById('finalizeEMRBtn');
+        if (finalizeEMRBtn) {
+            finalizeEMRBtn.disabled = true;
+            finalizeEMRBtn.innerHTML = App.icon('loader', 14) + ' 保存中...';
+        }
+
+        App.updateStatusBar('正在保存病历...');
+
+        var emrDraft = state.emrRecord ? state.emrRecord.emr_json : null;
+
+        try {
+            var response = await fetch('/api/emr/finalize', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ visit_id: state.visitId, emr_draft: emrDraft })
+            });
+            var result = await response.json();
+
+            if (result.status === 'success' || response.ok) {
+                addMessage('success',
+                    '<p>' + App.icon('checkCircle', 14) + ' 病历已保存</p>'
+                );
+
+                if (result.record_id) {
+                    state.emrRecord.record_id = result.record_id;
+                }
+                if (result.version !== undefined) {
+                    state.emrRecord.version = result.version;
+                }
+                App.setState({ emrRecord: state.emrRecord });
+
+                App.updateStatusBar('病历已保存', 'success');
+                App.updateTitlebar(state.visitId, true);
+                updateActionBarState('complete');
+            } else {
+                addMessage('error', '<p>病历保存失败: ' + App.escapeHtml(result.error || '未知错误') + '</p>');
+                App.updateStatusBar('病历保存失败', 'error');
+                if (finalizeEMRBtn) finalizeEMRBtn.disabled = false;
+            }
+        } catch (error) {
+            addMessage('error', '<p>病历保存失败: ' + error.message + '</p>');
+            App.updateStatusBar('病历保存失败', 'error');
+            if (finalizeEMRBtn) finalizeEMRBtn.disabled = false;
+        } finally {
+            if (finalizeEMRBtn && !finalizeEMRBtn.disabled) {
+                finalizeEMRBtn.innerHTML = App.icon('save', 14) + ' 保存病历';
+            }
+        }
     }
 
     function handleProcessComplete(result) {

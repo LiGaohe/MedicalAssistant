@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
+from enum import Enum
 import json
 
 from ..database import get_db
@@ -11,8 +12,14 @@ from ..services.emr_generation_service import EMRGenerationService
 from ..services.llm_pipeline_service import LLMPipelineService
 from ..services.llm_pipeline_service_en import LLMPipelineServiceEnglish
 from ..services.llm.llm_service import LLMService
+from ..services.pipeline.orchestrator import PipelineOrchestrator
+from ..services.pipeline.base import PipelineContext
+from ..services.pipeline.stages.soap_structuring import SoapStructuringStage
+from ..services.llm.prompts import PromptManager
 from ..utils.logger import logger
 from ..config import settings
+from ..services.validation_service import ValidationService
+from ..services.pipeline.emr_persistence import EMRPersistence
 
 router = APIRouter(prefix="/api/emr", tags=["EMR"])
 
@@ -21,6 +28,9 @@ class ProcessRequest(BaseModel):
     visit_id: str
     use_llm: bool = True
     save_intermediate: bool = True
+    mode: Optional[str] = "full"
+    current_stage: Optional[int] = None
+    emr_draft: Optional[Dict[str, Any]] = None
 
 
 class ProcessResponse(BaseModel):
@@ -40,7 +50,7 @@ async def process_visit(
     request: ProcessRequest,
     db: Session = Depends(get_db)
 ):
-    logger.info(f"收到病历处理请求: visit_id={request.visit_id}")
+    logger.info(f"收到病历处理请求: visit_id={request.visit_id}, mode={request.mode}, current_stage={request.current_stage}")
     logger.info(f"DEBUG模式: {settings.LLM_DEBUG_MODE}")
     
     if settings.LLM_DEBUG_MODE:
@@ -61,6 +71,79 @@ async def process_visit(
         visit = db.query(Visit).filter(Visit.visit_id == request.visit_id).first()
         language = visit.language if visit and visit.language else "zh"
         
+        if request.mode == "next_stage_only":
+            logger.info(f"分阶段处理模式: current_stage={request.current_stage}")
+            
+            stage_mapping = {
+                2: "evidence_mapping",
+                3: "hallucination_check",
+                4: "verification_revision"
+            }
+            
+            stage_name = stage_mapping.get(request.current_stage)
+            if not stage_name:
+                logger.warning(f"未知的阶段编号: {request.current_stage}")
+                return ProcessResponse(
+                    visit_id=request.visit_id,
+                    status="failed",
+                    evidence_count=0,
+                    normalized_terms_count=0,
+                    extracted_items_count=0,
+                    emr_record=None,
+                    errors=[f"未知的阶段编号: {request.current_stage}"]
+                )
+            
+            if not request.emr_draft:
+                logger.warning("分阶段处理需要提供emr_draft")
+                return ProcessResponse(
+                    visit_id=request.visit_id,
+                    status="failed",
+                    evidence_count=0,
+                    normalized_terms_count=0,
+                    extracted_items_count=0,
+                    emr_record=None,
+                    errors=["分阶段处理需要提供emr_draft"]
+                )
+            
+            orchestrator = PipelineOrchestrator(db, llm_service, language=language)
+            result = orchestrator.run_postprocess_stage(stage_name, request.emr_draft, request.visit_id)
+            
+            if result.get("error"):
+                logger.error(f"阶段处理失败: {result['error']}")
+                return ProcessResponse(
+                    visit_id=request.visit_id,
+                    status="failed",
+                    evidence_count=0,
+                    normalized_terms_count=0,
+                    extracted_items_count=0,
+                    emr_record=None,
+                    errors=[result["error"]]
+                )
+            
+            emr_draft_after = result.get("emr_draft_after", request.emr_draft)
+            emr_record = {
+                "record_id": None,
+                "version": None,
+                "emr_json": {
+                    "subjective": emr_draft_after.get("subjective", {}),
+                    "objective": emr_draft_after.get("objective", {}),
+                    "assessment": emr_draft_after.get("assessment", {}),
+                    "plan": emr_draft_after.get("plan", {})
+                }
+            }
+            
+            logger.info(f"阶段处理完成: stage={stage_name}")
+            return ProcessResponse(
+                visit_id=request.visit_id,
+                status="success",
+                evidence_count=0,
+                normalized_terms_count=0,
+                extracted_items_count=0,
+                verification_issues=result.get("verification_issues"),
+                emr_record=emr_record,
+                errors=[]
+            )
+        
         if request.use_llm:
             if language == "en":
                 pipeline = LLMPipelineServiceEnglish(db, llm_service)
@@ -68,7 +151,6 @@ async def process_visit(
                 pipeline = LLMPipelineService(db, llm_service)
             result = pipeline.process_transcript(request.visit_id)
             
-            # 四阶段流水线后，以下字段已不再生成，设为0保持向后兼容
             fact_count = 0
             normalized_terms_count = 0
             verification_issues = result.get("verification_issues", {})
@@ -149,14 +231,22 @@ from fastapi.responses import StreamingResponse
 @router.post("/process-stream")
 async def process_visit_stream(
     request: ProcessRequest,
+    stop_after_draft: bool = Query(True),
+    skip_cleaning: bool = Query(False),
+    skip_hallucination_check: bool = Query(False),
     db: Session = Depends(get_db)
 ):
     """
     SSE端点：实时推送病历生成进度
     
     返回 Server-Sent Events 流，包含各阶段的处理进度
+    
+    流程控制参数：
+    - stop_after_draft: 草稿生成后是否停止（默认True）
+    - skip_cleaning: 跳过阶段1转写清洗与角色纠错（默认False）
+    - skip_hallucination_check: 跳过阶段2.5幻觉检查（默认False）
     """
-    logger.info(f"收到SSE病历处理请求: visit_id={request.visit_id}")
+    logger.info(f"收到SSE病历处理请求: visit_id={request.visit_id}, stop_after_draft={stop_after_draft}, skip_cleaning={skip_cleaning}, skip_hallucination_check={skip_hallucination_check}")
     logger.info(f"DEBUG模式: {settings.LLM_DEBUG_MODE}")
     
     if settings.LLM_DEBUG_MODE:
@@ -189,7 +279,10 @@ async def process_visit_stream(
             
             for event in pipeline.process_with_callback(
                 request.visit_id,
-                save_evidence=request.save_intermediate
+                save_evidence=request.save_intermediate,
+                stop_after_draft=stop_after_draft,
+                skip_cleaning=skip_cleaning,
+                skip_hallucination_check=skip_hallucination_check
             ):
                 event_data = {
                     "stage": event.get("stage"),
@@ -202,6 +295,14 @@ async def process_visit_stream(
                     event_data["extra"] = event["extra"]
                 
                 yield f"event: stage_update\ndata: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+                
+                if event.get("is_draft_text_ready"):
+                    draft_text_data = {
+                        "draft_text": event.get("draft_text", "")
+                    }
+                    logger.info(f"SSE draft_text_ready: draft_text长度={len(event.get('draft_text', ''))}")
+                    draft_text_json = json.dumps(draft_text_data, ensure_ascii=False)
+                    yield f"event: draft_text_ready\ndata: {draft_text_json}\n\n"
                 
                 if event.get("is_draft_ready"):
                     draft_data = {
@@ -217,6 +318,14 @@ async def process_visit_stream(
                     draft_json = json.dumps(draft_data, ensure_ascii=False)
                     logger.debug(f"SSE draft_ready JSON长度: {len(draft_json)}")
                     yield f"event: draft_ready\ndata: {draft_json}\n\n"
+                
+                if event.get("is_phase_complete"):
+                    phase_data = {
+                        "phase": event.get("extra", {}).get("phase", "draft_generation"),
+                        "status": event.get("extra", {}).get("status", "completed")
+                    }
+                    logger.info(f"SSE phase_complete: phase={phase_data['phase']}")
+                    yield f"event: phase_complete\ndata: {json.dumps(phase_data, ensure_ascii=False)}\n\n"
                 
                 if event.get("status") == "completed" and "emr_result" in event:
                     result = event
@@ -835,3 +944,172 @@ async def get_evidence_by_visit(
     except Exception as e:
         logger.error(f"获取证据失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class PostprocessStage(str, Enum):
+    term_norm = "term_norm"
+    verification_revision = "verification_revision"
+
+
+class PostprocessRequest(BaseModel):
+    visit_id: str
+    stage: PostprocessStage
+    emr_draft: Dict[str, Any]
+
+
+class PostprocessChange(BaseModel):
+    id: str
+    section: str
+    field: str
+    before: str
+    after: str
+    type: str
+    detail: str
+
+
+class PostprocessResponse(BaseModel):
+    stage: str
+    changes: List[PostprocessChange] = []
+    emr_draft_after: Dict[str, Any]
+    verification_issues: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+@router.post("/postprocess", response_model=PostprocessResponse)
+async def postprocess_emr(request: PostprocessRequest, db: Session = Depends(get_db)):
+    logger.info(f"收到后处理请求: visit_id={request.visit_id}, stage={request.stage.value}")
+    try:
+        llm_service = LLMService(db)
+        visit = db.query(Visit).filter(Visit.visit_id == request.visit_id).first()
+        language = visit.language if visit and visit.language else "zh"
+        orchestrator = PipelineOrchestrator(db, llm_service, language=language)
+        result = orchestrator.run_postprocess_stage(
+            stage=request.stage.value,
+            emr_draft=request.emr_draft,
+            visit_id=request.visit_id
+        )
+        logger.info(f"后处理完成: visit_id={request.visit_id}, stage={request.stage.value}, 变更数={len(result.get('changes', []))}")
+        return PostprocessResponse(
+            stage=result.get("stage", request.stage.value),
+            changes=[PostprocessChange(**c) for c in result.get("changes", [])],
+            emr_draft_after=result.get("emr_draft_after", request.emr_draft),
+            verification_issues=result.get("verification_issues"),
+            error=result.get("error")
+        )
+    except Exception as e:
+        logger.error(f"后处理失败: visit_id={request.visit_id}, stage={request.stage.value}, error={str(e)}", exc_info=True)
+        return PostprocessResponse(
+            stage=request.stage.value,
+            changes=[],
+            emr_draft_after=request.emr_draft,
+            error=str(e)
+        )
+
+
+class FinalizeRequest(BaseModel):
+    visit_id: str
+    emr_draft: Dict[str, Any]
+
+
+class FinalizeResponse(BaseModel):
+    record_id: Optional[int] = None
+    version: Optional[int] = None
+    status: str = "completed"
+
+
+@router.post("/finalize", response_model=FinalizeResponse)
+async def finalize_emr(request: FinalizeRequest, db: Session = Depends(get_db)):
+    logger.info(f"收到病历定稿请求: visit_id={request.visit_id}")
+    try:
+        emr_persistence = EMRPersistence(db, ValidationService())
+
+        emr_final = emr_persistence.normalize_format(request.emr_draft)
+        logger.info(f"病历格式规范化完成: visit_id={request.visit_id}")
+
+        emr_persistence.save_evidence_spans_from_emr(emr_final, request.visit_id)
+        logger.info(f"证据溯源保存完成: visit_id={request.visit_id}")
+
+        emr_persistence.save_emr_record(emr_final, request.visit_id)
+        logger.info(f"病历记录保存完成: visit_id={request.visit_id}")
+
+        latest_emr = db.query(EMRRecord).filter(
+            EMRRecord.visit_id == request.visit_id
+        ).order_by(EMRRecord.version.desc()).first()
+
+        record_id = latest_emr.record_id if latest_emr else None
+        version = latest_emr.version if latest_emr else None
+        logger.info(f"病历定稿成功: visit_id={request.visit_id}, record_id={record_id}, version={version}")
+
+        return FinalizeResponse(
+            record_id=record_id,
+            version=version,
+            status="completed"
+        )
+    except Exception as e:
+        logger.error(f"病历定稿失败: {str(e)}", exc_info=True)
+        return FinalizeResponse(
+            record_id=None,
+            version=None,
+            status="failed"
+        )
+
+
+class StructureRequest(BaseModel):
+    visit_id: str
+    draft_text: str
+
+
+class StructureResponse(BaseModel):
+    status: str
+    emr_draft: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+@router.post("/structure", response_model=StructureResponse)
+async def structure_draft(request: StructureRequest, db: Session = Depends(get_db)):
+    logger.info(f"收到草稿结构化请求: visit_id={request.visit_id}")
+    try:
+        llm_service = LLMService(db)
+
+        visit = db.query(Visit).filter(Visit.visit_id == request.visit_id).first()
+        language = visit.language if visit and visit.language else "zh"
+        logger.info(f"检测到语言: {language}")
+
+        from ..models import TranscriptTurn
+        turns = db.query(TranscriptTurn).filter(
+            TranscriptTurn.visit_id == request.visit_id
+        ).order_by(TranscriptTurn.turn_index).all()
+        logger.info(f"查询到 {len(turns)} 个对话轮次")
+
+        prompt_manager = PromptManager(language=language)
+
+        orchestrator = PipelineOrchestrator(db, llm_service, language=language)
+        combined_text = orchestrator._format_turns(turns) if turns else ""
+        logger.info(f"构建combined_text完成, 长度={len(combined_text)}")
+
+        ctx = PipelineContext(
+            db=db,
+            llm_service=llm_service,
+            prompt_manager=prompt_manager,
+            language=language,
+            debug_mode=False,
+            visit_id=request.visit_id,
+            turns=turns,
+            save_evidence=False
+        )
+        ctx.draft_text = request.draft_text
+        ctx.combined_text = combined_text
+
+        result = SoapStructuringStage().execute(ctx)
+        logger.info(f"草稿结构化完成: status={result.get('status')}")
+
+        return StructureResponse(
+            status=result.get("status", "completed"),
+            emr_draft=ctx.emr_draft
+        )
+    except Exception as e:
+        logger.error(f"草稿结构化失败: {str(e)}", exc_info=True)
+        return StructureResponse(
+            status="failed",
+            error=str(e)
+        )

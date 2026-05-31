@@ -25,11 +25,30 @@ class LLMPipelineService:
     def __init__(self, db: Session, llm_service: Optional[LLMService] = None, language: str = "zh"):
         self._orchestrator = PipelineOrchestrator(db, llm_service, language)
 
-    def process_transcript(self, visit_id: str, save_evidence: bool = True) -> Dict[str, Any]:
-        return self._orchestrator.process_transcript(visit_id, save_evidence)
+    def process_transcript(
+        self,
+        visit_id: str,
+        save_evidence: bool = True,
+        skip_cleaning: bool = False,
+        skip_hallucination_check: bool = False
+    ) -> Dict[str, Any]:
+        return self._orchestrator.process_transcript(
+            visit_id, save_evidence, skip_cleaning, skip_hallucination_check
+        )
 
-    def process_with_callback(self, visit_id: str, progress_callback=None, save_evidence: bool = True):
-        return self._orchestrator.process_with_callback(visit_id, progress_callback, save_evidence)
+    def process_with_callback(
+        self,
+        visit_id: str,
+        progress_callback=None,
+        save_evidence: bool = True,
+        stop_after_draft: bool = True,
+        skip_cleaning: bool = False,
+        skip_hallucination_check: bool = False
+    ):
+        return self._orchestrator.process_with_callback(
+            visit_id, progress_callback, save_evidence, stop_after_draft,
+            skip_cleaning, skip_hallucination_check
+        )
 
     def get_all_prompts(self, turns: List) -> List[Dict[str, Any]]:
         return self._orchestrator.get_all_prompts(turns)

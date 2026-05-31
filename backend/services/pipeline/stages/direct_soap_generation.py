@@ -5,19 +5,15 @@ from ..base import PipelineContext, PipelineStage
 from ..utils import parse_json_response, JSONParseError
 from ..debug_interactor import DebugInteractor
 from ....utils.logger import logger
+from ....config import settings
 
 
 class DirectSOAPGenerationStage(PipelineStage):
-    """直接根据清洗后的对话全文生成SOAP草稿。
-
-    与 SOAPGenerationStage 不同，本阶段不依赖事实抽取和分节流程，
-    而是直接将完整对话文本送入LLM，一次性生成完整的SOAP病历草稿。
-    """
 
     STAGE_DELAY = 0.5
 
     def stage_name(self) -> str:
-        return "直接草稿生成"
+        return "端到端草稿生成"
 
     def execute(self, ctx: PipelineContext) -> Dict[str, Any]:
         logger.info(f">>> 阶段: {self.stage_name()}")
@@ -25,11 +21,114 @@ class DirectSOAPGenerationStage(PipelineStage):
 
         combined_text = ctx.combined_text
         if not combined_text:
-            logger.warning("combined_text为空，无法生成SOAP草稿，返回空结构")
-            empty_draft = self._empty_draft()
-            ctx.emr_draft = empty_draft
-            return {"emr_draft": empty_draft, "status": "skipped"}
+            if settings.DRAFT_GENERATION_MODE == "json":
+                empty_draft = self._empty_draft()
+                ctx.emr_draft = empty_draft
+                return {"emr_draft": empty_draft, "status": "skipped"}
+            else:
+                ctx.draft_text = ""
+                return {"draft_text": "", "status": "skipped"}
 
+        if settings.DRAFT_GENERATION_MODE == "json":
+            return self._execute_json_mode(ctx, combined_text, stage_start)
+        else:
+            return self._execute_free_text_mode(ctx, combined_text, stage_start)
+
+    def _execute_free_text_mode(self, ctx: PipelineContext, combined_text: str, stage_start: float) -> Dict[str, Any]:
+        prompt = ctx.prompt_manager.render(
+            "free_soap_generation",
+            transcript=combined_text
+        )
+        logger.debug(f"自由文本草稿生成提示词长度: {len(prompt)} 字符")
+
+        debug_interactor = DebugInteractor(ctx.llm_service)
+
+        if ctx.debug_mode:
+            try:
+                response_text = debug_interactor.interact(
+                    stage="free_soap_generation",
+                    prompt=prompt
+                )
+            except RuntimeError as e:
+                logger.error(f"DEBUG模式交互失败: {e}")
+                ctx.draft_text = ""
+                ctx.emr_draft = self._empty_draft()
+                return {"draft_text": "", "emr_draft": self._empty_draft(), "status": "debug_cancelled"}
+        else:
+            if not ctx.llm_service:
+                logger.warning("LLM服务不可用，自由文本草稿生成跳过")
+                ctx.draft_text = ""
+                ctx.emr_draft = self._empty_draft()
+                return {"draft_text": "", "emr_draft": self._empty_draft(), "status": "llm_unavailable"}
+
+            try:
+                response = ctx.llm_service.generate(prompt, thinking_enabled=False)
+                logger.debug("自由文本草稿生成阶段: thinking模式已禁用")
+                response_text = response.text
+            except Exception as e:
+                logger.error(f"自由文本草稿生成LLM调用失败: {e}")
+                ctx.draft_text = ""
+                ctx.emr_draft = self._empty_draft()
+                return {"draft_text": "", "emr_draft": self._empty_draft(), "status": "llm_error"}
+
+        draft_json = self._parse_simple_soap_json(response_text)
+        if draft_json:
+            ctx.draft_text = self._format_draft_text_from_json(draft_json)
+            ctx.emr_draft = draft_json
+            ctx.skip_structuring = True
+            stage_time = time.time() - stage_start
+            logger.info(f"自由文本草稿生成完成（JSON已解析为标准格式），耗时: {stage_time:.2f}秒")
+            return {"draft_text": ctx.draft_text, "emr_draft": draft_json, "skip_structuring": True, "status": "success"}
+        
+        ctx.draft_text = response_text
+        stage_time = time.time() - stage_start
+        logger.info(f"自由文本草稿生成完成（非JSON格式，需后续结构化），耗时: {stage_time:.2f}秒")
+        return {"draft_text": response_text, "status": "success"}
+
+    def _parse_simple_soap_json(self, response_text: str) -> Dict[str, Any]:
+        try:
+            simple_json = parse_json_response(response_text, "自由文本草稿", raise_on_error=False)
+            if not simple_json or not isinstance(simple_json, dict):
+                return None
+            
+            if not all(k in simple_json for k in ["S", "O", "A", "P"]):
+                return None
+            
+            draft = {
+                "subjective": {"text": simple_json.get("S", "")},
+                "objective": {"text": simple_json.get("O", "")},
+                "assessment": {"text": simple_json.get("A", "")},
+                "plan": {"text": simple_json.get("P", "")}
+            }
+            logger.info(f"LLM返回S/O/A/P JSON，已转换为标准SOAP格式")
+            return draft
+        except Exception as e:
+            logger.debug(f"JSON解析失败: {e}")
+            return None
+
+    def _format_draft_text_from_json(self, draft_json: Dict[str, Any]) -> str:
+        sections = []
+
+        def _text(val):
+            if isinstance(val, list):
+                return "\n".join(str(item) for item in val)
+            return str(val) if val else ""
+
+        subj_text = _text(draft_json.get("subjective", {}).get("text", ""))
+        if subj_text:
+            sections.append("S - 主观症状\n" + subj_text)
+        obj_text = _text(draft_json.get("objective", {}).get("text", ""))
+        if obj_text:
+            sections.append("O - 客观体征\n" + obj_text)
+        assessment_text = _text(draft_json.get("assessment", {}).get("text", ""))
+        if assessment_text:
+            sections.append("A - 评估诊断\n" + assessment_text)
+        plan_text = _text(draft_json.get("plan", {}).get("text", ""))
+        if plan_text:
+            sections.append("P - 治疗计划\n" + plan_text)
+        return "\n\n".join(sections) if sections else ""
+
+    def _execute_json_mode(self, ctx: PipelineContext, combined_text: str, stage_start: float) -> Dict[str, Any]:
         prompt = ctx.prompt_manager.render(
             "direct_soap_generation",
             transcript=combined_text
@@ -88,20 +187,6 @@ class DirectSOAPGenerationStage(PipelineStage):
 
     @staticmethod
     def _build_evidence_traces(draft: Dict[str, Any], turns: List) -> Dict[str, Any]:
-        """将LLM输出的 source_turn_indices 转换为 evidence_traces。
-
-        遍历 subjective/objective/assessment/plan 每个section的每个子字段，
-        将 source_turn_indices 中的 turn_index 匹配到 turns 列表中的具体轮次，
-        构建包含对话原文证据的 evidence_trace 对象。
-
-        Args:
-            draft: LLM生成的SOAP草稿，每个子字段格式为
-                   {"value": "...", "source_turn_indices": [...]}
-            turns: 转写对话轮次列表（TranscriptTurn对象列表）
-
-        Returns:
-            转换后的草稿，source_turn_indices 被替换为 evidence_traces
-        """
         logger.info("开始构建证据溯源")
 
         turn_map = {}
@@ -162,11 +247,6 @@ class DirectSOAPGenerationStage(PipelineStage):
 
     @staticmethod
     def _empty_draft() -> Dict[str, Any]:
-        """返回空的SOAP兜底结构。
-
-        当LLM调用失败或JSON解析失败时，使用此结构作为兜底，
-        确保流水线不会因单阶段失败而中断。
-        """
         return {
             "subjective": {
                 "chief_complaint": {"value": "", "evidence_traces": []},

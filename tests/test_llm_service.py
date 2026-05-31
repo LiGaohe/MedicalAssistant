@@ -30,23 +30,6 @@ def test_llm_response_dataclass():
     assert response.provider == "modelscope"
 
 
-def test_prompt_manager_render():
-    manager = PromptManager()
-    prompt = manager.render(
-        "term_normalization",
-        term="头疼",
-        context="患者主诉头疼三天"
-    )
-    assert "头疼" in prompt
-    assert "患者主诉头疼三天" in prompt
-
-
-def test_prompt_manager_missing_var():
-    manager = PromptManager()
-    with pytest.raises(ValueError, match="Missing required variables"):
-        manager.render("term_normalization", term="头疼")
-
-
 @patch('httpx.Client')
 def test_openai_compatible_adapter_generate(mock_client):
     mock_response = Mock()

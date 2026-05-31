@@ -16,6 +16,7 @@ class EMRRecord(Base):
     evidence_mapping = Column(JSON, nullable=True)
     validation_errors = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    draft_text = Column(Text, nullable=True)
     
     visit = relationship("Visit", back_populates="emr_records")
     evaluations = relationship("EvaluationRecord", back_populates="emr_record")

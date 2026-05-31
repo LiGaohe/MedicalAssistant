@@ -754,13 +754,6 @@ Notes:
    - <advice>...</advice>
 3. Output result in JSON format
 """)
-                elif stage == "term_normalization":
-                    print("""
-1. Identify colloquial medical terms in the text
-2. Replace colloquial terms with standard medical terms
-3. Keep XML tags and conversation format unchanged
-4. Output result in JSON format
-""")
                 elif stage == "field_extraction":
                     print("""
 1. Extract field content from XML tags
@@ -831,23 +824,6 @@ Notes:
 }
 """
             })
-
-        stages.append({
-            "stage": "term_normalization",
-            "prompt": "[Pending: waiting for Stage 1 to complete]",
-            "description": "Stage 2: Terminology Normalization",
-            "instructions": """
-1. Identify colloquial medical terms in the text
-2. Replace colloquial terms with standard medical terms
-3. Keep XML tags and conversation format unchanged
-4. Output result in JSON format:
-{
-  "normalized_text": "complete normalized text",
-  "terms": [{"original": "original term", "normalized": "standard term", "category": "category"}]
-}
-""",
-            "pending": True
-        })
 
         stages.append({
             "stage": "field_extraction",
@@ -932,10 +908,10 @@ Notes:
                 )
                 next_description = f"Stage 1.{next_segment_index + 1}/{total_segments}: Role Identification & Evidence Annotation"
             else:
-                next_stage = "term_normalization"
+                next_stage = "field_extraction"
                 combined_annotated_text = "\n\n".join(all_annotated_texts)
-                next_prompt = self._build_normalization_prompt(combined_annotated_text)
-                next_description = "Stage 2: Terminology Normalization"
+                next_prompt = self._build_extraction_prompt(combined_annotated_text, context.get("role_mapping", {}))
+                next_description = "Stage 2: Field Extraction"
 
             return {
                 "result": result,
@@ -947,24 +923,6 @@ Notes:
                     "all_annotated_texts": all_annotated_texts,
                     "all_evidence_traces": all_evidence_traces,
                     "role_mapping": {**context.get("role_mapping", {}), **result.get("role_mapping", {})}
-                }
-            }
-
-        elif stage == "term_normalization":
-            all_annotated_texts = context.get("all_annotated_texts", [])
-            combined_annotated_text = "\n\n".join(all_annotated_texts) if all_annotated_texts else "\n\n".join([self._format_segment(s) for s in segments])
-
-            result = self._parse_normalization_response(user_response, combined_annotated_text)
-
-            normalized_text = result.get("normalized_text", combined_annotated_text)
-
-            return {
-                "result": result,
-                "next_stage": "field_extraction",
-                "next_prompt": self._build_extraction_prompt(normalized_text, context.get("role_mapping", {})),
-                "next_description": "Stage 3: Field Extraction",
-                "context_update": {
-                    "normalized_text": normalized_text
                 }
             }
 
