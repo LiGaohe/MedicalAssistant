@@ -88,7 +88,7 @@ class LoggedCompletenessEvaluator(CompletenessEvaluator):
         return self._parse_json_response(response.text)
 
 
-def evaluate_jsonl(jsonl_path, samples, overwrite):
+def evaluate_jsonl(jsonl_path, samples, overwrite, sample_ids=None):
     entries = []
     with open(jsonl_path, "r", encoding="utf-8") as f:
         for line in f:
@@ -102,6 +102,16 @@ def evaluate_jsonl(jsonl_path, samples, overwrite):
 
     if not entries:
         logger.info(f"{jsonl_path.name}: 无条目")
+        return
+
+    # 如果指定了样本ID列表，只处理这些样本
+    if sample_ids:
+        sample_ids_set = set(sample_ids)
+        entries = [e for e in entries if e.get("sample_id") in sample_ids_set]
+        logger.info(f"过滤后剩余 {len(entries)} 个指定样本")
+
+    if not entries:
+        logger.info(f"{jsonl_path.name}: 无匹配的条目")
         return
 
     config_name = entries[0].get("config", jsonl_path.stem)
@@ -231,10 +241,17 @@ def main():
         action="store_true",
         help="覆盖已有的评估结果",
     )
+    parser.add_argument(
+        "--sample-ids",
+        nargs="+",
+        help="只评估指定的样本ID（用空格分隔）",
+    )
     args = parser.parse_args()
 
     logger.info("=== 消融实验完整性评估开始 ===")
     logger.info("results=%s, overwrite=%s", args.results, args.overwrite)
+    if args.sample_ids:
+        logger.info("指定评估的样本ID: %s", args.sample_ids)
 
     samples = load_samples(args.samples)
     if not samples:
@@ -260,7 +277,7 @@ def main():
         logger.info("  - %s", f.name)
 
     for jsonl_file in jsonl_files:
-        evaluate_jsonl(jsonl_file, samples, args.overwrite)
+        evaluate_jsonl(jsonl_file, samples, args.overwrite, args.sample_ids)
 
     logger.info("=== 所有评估完成 ===")
 
