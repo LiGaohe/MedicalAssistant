@@ -10,6 +10,10 @@ from .emr_record import EMRRecord
 from .evaluation_record import EvaluationRecord
 from .chinese_term import ChineseTerm, ChineseSearchResult
 from .atomic_fact import AtomicFact
+from .benchmark import (
+    BenchmarkRun, BenchmarkStage, BenchmarkEvaluation,
+    BenchmarkLLMCall, BenchmarkSummary, BenchmarkBase
+)
 
 __all__ = [
     "Visit",
@@ -24,5 +28,11 @@ __all__ = [
     "EvaluationRecord",
     "ChineseTerm",
     "ChineseSearchResult",
-    "AtomicFact"
+    "AtomicFact",
+    "BenchmarkRun",
+    "BenchmarkStage",
+    "BenchmarkEvaluation",
+    "BenchmarkLLMCall",
+    "BenchmarkSummary",
+    "BenchmarkBase",
 ]

@@ -52,6 +52,7 @@ from backend.models.transcript import TranscriptTurn
 from backend.models.visit import Visit
 from backend.services.pipeline.orchestrator import PipelineOrchestrator
 from backend.services.llm.llm_service import LLMService
+from backend.services.evaluation.consistency import ConsistencyEvaluator
 from backend.services.evaluation.completeness import CompletenessEvaluator
 from backend.services.evaluation.quality import QualityEvaluator
 from backend.services.evaluation.safety import SafetyEvaluator
@@ -438,7 +439,7 @@ class BatchExperimentRunner:
                     dialogue_text = sample.get("dialogue_text", "")
                     if dialogue_text:
                         print(f"(eval...)", end=" ", flush=True)
-                        eval_result = self._run_llm_evaluation(dialogue_text, emr, llm_service)
+                        eval_result = self._run_llm_evaluation(dialogue_text, emr, llm_service, sample_id=sid)
                         entry["llm_evaluation"] = eval_result
 
                 results.append(entry)
@@ -615,13 +616,45 @@ class BatchExperimentRunner:
                 sections.append("\n".join(lines))
         return "\n\n".join(sections)
 
-    def _run_llm_evaluation(self, transcript: str, emr: Dict, llm_service) -> Dict[str, Any]:
+    def _run_llm_evaluation(self, transcript: str, emr: Dict, llm_service, sample_id: str = "unknown") -> Dict[str, Any]:
         emr_text = self._format_emr_for_evaluation(emr)
         if not emr_text:
-            return {"error": "emr text is empty after formatting"}
+            error_msg = f"样本 {sample_id}: EMR格式化后为空，停止评估流程"
+            logger.error(error_msg)
+            logger.error(f"样本 {sample_id}: EMR结构: {json.dumps(emr, ensure_ascii=False, indent=2)[:500]}...")
+            
+            exception_log_path = Path("data/logs/evaluation_exceptions.log")
+            exception_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(exception_log_path, 'a', encoding='utf-8') as f:
+                f.write(f"\n{'='*80}\n")
+                f.write(f"[{datetime.now().isoformat()}] 样本评估异常\n")
+                f.write(f"样本ID: {sample_id}\n")
+                f.write(f"异常类型: EMR格式化后为空\n")
+                f.write(f"异常详情: _format_emr_for_evaluation 返回空字符串\n")
+                f.write(f"EMR结构预览:\n{json.dumps(emr, ensure_ascii=False, indent=2)[:1000]}\n")
+                f.write(f"{'='*80}\n")
+            
+            return {
+                "error": "emr text is empty after formatting",
+                "error_type": "EMR_FORMAT_EMPTY",
+                "sample_id": sample_id,
+                "stopped_at": "evaluation_formatting"
+            }
 
         result = {}
-        logger.info("开始LLM评估：完整性 → 质量 → 安全")
+        logger.info(f"样本 {sample_id}: 开始LLM评估：一致性 → 完整性 → 质量 → 安全")
+
+        try:
+            consistency_evaluator = ConsistencyEvaluator(llm_service)
+            consistency_result = consistency_evaluator.evaluate(transcript, emr)
+            result["consistency"] = consistency_result
+            support_rate = consistency_result.get("summary", {}).get("support_rate", 0)
+            hallucination_rate = 1 - support_rate
+            consistency_score = consistency_result.get("consistency_score", 1.0)
+            logger.info(f"样本 {sample_id}: 一致性评估完成: support_rate={support_rate}, hallucination_rate={hallucination_rate}, consistency_score={consistency_score}")
+        except Exception as e:
+            logger.error(f"样本 {sample_id}: 一致性评估失败: {e}")
+            result["consistency"] = None
 
         try:
             completeness_evaluator = CompletenessEvaluator(llm_service)
@@ -630,9 +663,9 @@ class BatchExperimentRunner:
             result["completeness"] = completeness_result
             recall = completeness_result.get("summary", {}).get("recall_rate", 0)
             omission = completeness_result.get("summary", {}).get("omission_rate", 0)
-            logger.info(f"完整性评估完成: recall={recall}, omission={omission}")
+            logger.info(f"样本 {sample_id}: 完整性评估完成: recall={recall}, omission={omission}")
         except Exception as e:
-            logger.error(f"完整性评估失败: {e}")
+            logger.error(f"样本 {sample_id}: 完整性评估失败: {e}")
             result["completeness"] = None
 
         try:
@@ -640,9 +673,9 @@ class BatchExperimentRunner:
             quality_result = quality_evaluator.evaluate(emr)
             result["quality"] = quality_result
             total_score = quality_result.get("total_score", 0)
-            logger.info(f"质量评估完成: total_score={total_score}")
+            logger.info(f"样本 {sample_id}: 质量评估完成: total_score={total_score}")
         except Exception as e:
-            logger.error(f"质量评估失败: {e}")
+            logger.error(f"样本 {sample_id}: 质量评估失败: {e}")
             result["quality"] = None
 
         try:
@@ -651,9 +684,9 @@ class BatchExperimentRunner:
             result["safety"] = safety_result
             high_risk = safety_result.get("has_high_risk", False)
             high_risk_count = safety_result.get("high_risk_count", 0)
-            logger.info(f"安全评估完成: has_high_risk={high_risk}, count={high_risk_count}")
+            logger.info(f"样本 {sample_id}: 安全评估完成: has_high_risk={high_risk}, count={high_risk_count}")
         except Exception as e:
-            logger.error(f"安全评估失败: {e}")
+            logger.error(f"样本 {sample_id}: 安全评估失败: {e}")
             result["safety"] = None
 
         return result
@@ -735,7 +768,7 @@ class BatchExperimentRunner:
 
             logger.info(f"评估: {sample_id} ({entry.get('config', '')})")
             print(f"  [{jsonl_file.stem}] 评估 {sample_id}...", end=" ", flush=True)
-            eval_result = self._run_llm_evaluation(dialogue_text, emr, llm_service)
+            eval_result = self._run_llm_evaluation(dialogue_text, emr, llm_service, sample_id=sample_id)
             entry["llm_evaluation"] = eval_result
             print("OK")
             updated_entries.append(entry)

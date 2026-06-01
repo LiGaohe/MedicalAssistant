@@ -78,6 +78,79 @@ class PipelineOrchestrator:
     
     
         
+    def _run_stages_4_to_6(
+        self,
+        ctx: PipelineContext,
+        skip_term_norm: bool = False,
+        skip_hallucination_check: bool = False,
+        skip_verification: bool = False,
+        skip_field_revision: bool = False,
+        save_evidence: bool = False,
+        visit_id: str = ""
+    ) -> Tuple[Optional[Dict], Optional[Dict], Dict[str, Any]]:
+        """
+        执行阶段4-6：术语规范化、幻觉检查、后置核查、字段修订
+        
+        Args:
+            ctx: Pipeline上下文对象
+            skip_term_norm: 是否跳过术语规范化
+            skip_hallucination_check: 是否跳过幻觉检查
+            skip_verification: 是否跳过后置核查
+            skip_field_revision: 是否跳过字段修订
+            save_evidence: 是否保存证据
+            visit_id: 访问ID
+            
+        Returns:
+            Tuple: (hallucination_result, verification_issues, emr_final)
+        """
+        hallucination_result = None
+        verification_issues = None
+        
+        if skip_term_norm:
+            logger.info("skip_term_norm=True, 跳过术语规范化")
+            emr_draft = ctx.emr_draft
+        else:
+            emr_draft = self._normalize_terms_in_draft(ctx.emr_draft)
+            ctx.emr_draft = emr_draft
+        
+        if skip_hallucination_check:
+            logger.info("skip_hallucination_check=True, 跳过阶段4: 幻觉检查")
+        else:
+            logger.info("阶段4: 幻觉检查")
+            hallucination_result = HallucinationCheckStage().execute(ctx)
+            logger.info(f"幻觉检查完成: 严重程度={hallucination_result.get('severity', 'unknown')}, "
+                        f"支持率={hallucination_result.get('summary', {}).get('support_rate', 0)}")
+        
+        if skip_verification:
+            logger.info("skip_verification=True, 跳过阶段5+6: 后置核查与字段修订")
+            emr_final = emr_draft
+            return hallucination_result, verification_issues, emr_final
+        
+        time.sleep(self.STAGE_DELAY)
+        
+        logger.info("阶段5: 后置核查")
+        verification_result = ClaimVerificationStage().execute(ctx)
+        verification_issues = ctx.verification_issues
+        logger.info(f"后置核查完成, 问题数={verification_result.get('issues_count', 0)}")
+        
+        time.sleep(self.STAGE_DELAY)
+        
+        if skip_field_revision:
+            logger.info("skip_field_revision=True, 跳过阶段6: 字段级修订")
+            emr_final = ctx.emr_draft
+        else:
+            logger.info("阶段6: 字段级修订与落盘")
+            FieldRevisionStage().execute(ctx)
+            emr_final = ctx.emr_draft
+        
+        emr_final = self.emr_persistence.normalize_format(emr_final)
+        if save_evidence and visit_id:
+            self.emr_persistence.save_evidence_spans_from_emr(emr_final, visit_id)
+            self.emr_persistence.save_emr_record(emr_final, visit_id)
+            logger.info(f"已保存最终病历记录及证据溯源到数据库: visit_id={visit_id}")
+        
+        return hallucination_result, verification_issues, emr_final
+    
     def process_transcript(
         self,
         visit_id: str,
@@ -155,60 +228,15 @@ class PipelineOrchestrator:
             SoapStructuringStage().execute(ctx)
             logger.info("草稿结构化完成")
         
-        if skip_term_norm:
-            logger.info("skip_term_norm=True, 跳过术语规范化")
-            emr_draft = ctx.emr_draft
-        else:
-            emr_draft = self._normalize_terms_in_draft(ctx.emr_draft)
-            ctx.emr_draft = emr_draft
-        
-        hallucination_result = None
-        
-        if skip_hallucination_check:
-            logger.info("skip_hallucination_check=True, 跳过阶段4: 幻觉检查")
-        else:
-            logger.info("阶段4: 幻觉检查")
-            hallucination_result = HallucinationCheckStage().execute(ctx)
-            logger.info(f"幻觉检查完成: 严重程度={hallucination_result.get('severity', 'unknown')}, "
-                        f"支持率={hallucination_result.get('summary', {}).get('support_rate', 0)}")
-        
-        if skip_verification:
-            total_time = time.time() - start_time
-            logger.info(f"skip_verification=True, 跳过阶段5+6: 后置核查与字段修订, 总耗时: {total_time:.2f}秒")
-            return {
-                "status": "completed",
-                "role_mapping": all_role_mappings,
-                "cleaned_turns": all_cleaned_turns,
-                "combined_text": combined_text,
-                "emr_result": emr_draft,
-                "emr_draft": emr_draft,
-                "verification_issues": None,
-                "hallucination_result": hallucination_result,
-                "processing_time": total_time
-            }
-        
-        time.sleep(self.STAGE_DELAY)
-        
-        logger.info("阶段5: 后置核查")
-        verification_result = ClaimVerificationStage().execute(ctx)
-        verification_issues = ctx.verification_issues
-        logger.info(f"后置核查完成, 问题数={verification_result.get('issues_count', 0)}")
-        
-        time.sleep(self.STAGE_DELAY)
-        
-        if skip_field_revision:
-            logger.info("skip_field_revision=True, 跳过阶段6: 字段级修订")
-            emr_final = ctx.emr_draft
-        else:
-            logger.info("阶段6: 字段级修订与落盘")
-            FieldRevisionStage().execute(ctx)
-            emr_final = ctx.emr_draft
-        
-        emr_final = self.emr_persistence.normalize_format(emr_final)
-        if save_evidence and visit_id:
-            self.emr_persistence.save_evidence_spans_from_emr(emr_final, visit_id)
-            self.emr_persistence.save_emr_record(emr_final, visit_id)
-            logger.info(f"已保存最终病历记录及证据溯源到数据库: visit_id={visit_id}")
+        hallucination_result, verification_issues, emr_final = self._run_stages_4_to_6(
+            ctx,
+            skip_term_norm=skip_term_norm,
+            skip_hallucination_check=skip_hallucination_check,
+            skip_verification=skip_verification,
+            skip_field_revision=skip_field_revision,
+            save_evidence=save_evidence,
+            visit_id=visit_id
+        )
         
         total_time = time.time() - start_time
         logger.info(f"=== 多阶段LLM处理完成: {visit_id}, 总耗时: {total_time:.2f}秒 ===")
@@ -219,9 +247,147 @@ class PipelineOrchestrator:
             "cleaned_turns": all_cleaned_turns,
             "combined_text": combined_text,
             "emr_result": emr_final,
-            "emr_draft": emr_draft,
+            "emr_draft": ctx.emr_draft,
             "verification_issues": verification_issues,
             "hallucination_result": hallucination_result,
+            "processing_time": total_time
+        }
+    
+    def process_with_fork(
+        self,
+        visit_id: str,
+        save_evidence: bool = False
+    ) -> Dict[str, Any]:
+        """
+        多变量Pipeline：一次运行产出4份不同配置的EMR
+        
+        流程：
+        1. 阶段1-3（清洗→草稿→结构化）与 process_transcript() 相同
+        2. 阶段2后保存 emr_raw_draft
+        3. 阶段3后保存 ctx_before_fork（深拷贝）
+        4. 路径A：在 ctx 上运行阶段4-6（全程）→ emr_result
+        5. 路径B：在 ctx_before_fork 上运行阶段4-6（skip_term_norm=True）→ emr_no_term_norm
+        
+        Returns:
+            Dict: {
+                "emr_raw_draft": 阶段2后的草稿,
+                "emr_pre_revision": 阶段5前的EMR（修订前）,
+                "emr_result": 路径A完整运行结果,
+                "emr_no_term_norm": 路径B（skip_term_norm）结果,
+                "hallucination_result": 幻觉检查结果,
+                "verification_issues": 后置核查问题
+            }
+        """
+        logger.info(f"=== 开始多变量Pipeline(fork模式): {visit_id} ===")
+        start_time = time.time()
+        
+        turns = self.db.query(TranscriptTurn).filter(
+            TranscriptTurn.visit_id == visit_id
+        ).order_by(TranscriptTurn.turn_index).all()
+        
+        if not turns:
+            logger.warning("没有找到对话轮次")
+            return {"status": "failed", "error": "No transcript turns found"}
+        
+        ctx = PipelineContext(
+            db=self.db,
+            llm_service=self.llm_service,
+            prompt_manager=self.prompt_manager,
+            language=self.language,
+            debug_mode=self.debug_mode,
+            visit_id=visit_id,
+            turns=turns,
+            save_evidence=save_evidence,
+            skip_cleaning=False,
+            skip_hallucination_check=False
+        )
+        
+        logger.info("阶段1: 转写清洗与角色纠错")
+        TurnCleaningStage().execute(ctx)
+        combined_text = ctx.combined_text
+        logger.info(f"清洗完成, combined_text长度={len(combined_text)}")
+        
+        time.sleep(self.STAGE_DELAY)
+        
+        logger.info("阶段2: 直接草稿生成")
+        soap_result = DirectSOAPGenerationStage().execute(ctx)
+        logger.info(f"直接草稿生成完成, 状态={soap_result.get('status')}")
+        
+        emr_raw_draft = copy.deepcopy(ctx.emr_draft) if ctx.emr_draft else None
+        logger.info(f"保存emr_raw_draft: {type(emr_raw_draft).__name__}")
+        
+        draft_text = ctx.draft_text
+        
+        if settings.DRAFT_GENERATION_MODE == "free_text" and draft_text:
+            logger.info("阶段3: 草稿结构化")
+            SoapStructuringStage().execute(ctx)
+            logger.info("草稿结构化完成")
+        
+        emr_draft_before_fork = copy.deepcopy(ctx.emr_draft) if ctx.emr_draft else {}
+        combined_text_before_fork = ctx.combined_text
+        draft_text_before_fork = ctx.draft_text
+        logger.info(f"保存fork前数据: emr_draft keys={list(emr_draft_before_fork.keys())[:3] if emr_draft_before_fork else 'None'}")
+        
+        logger.info("路径A: 完整运行阶段4-6")
+        hallucination_result, verification_issues, emr_pre_revision_raw = self._run_stages_4_to_6(
+            ctx,
+            skip_term_norm=False,
+            skip_hallucination_check=False,
+            skip_verification=False,
+            skip_field_revision=False,
+            save_evidence=save_evidence,
+            visit_id=visit_id
+        )
+        
+        emr_pre_revision = copy.deepcopy(ctx.emr_draft) if ctx.emr_draft else None
+        logger.info(f"保存emr_pre_revision（修订前）: {type(emr_pre_revision).__name__}")
+        
+        logger.info("阶段6: 字段级修订与落盘（路径A）")
+        FieldRevisionStage().execute(ctx)
+        emr_result = ctx.emr_draft
+        emr_result = self.emr_persistence.normalize_format(emr_result)
+        logger.info(f"路径A完成: emr_result keys={list(emr_result.keys())[:3] if emr_result else 'None'}")
+        
+        logger.info("路径B: 创建新ctx并运行阶段4-6（skip_term_norm=True）")
+        ctx_fork = PipelineContext(
+            db=self.db,
+            llm_service=self.llm_service,
+            prompt_manager=self.prompt_manager,
+            language=self.language,
+            debug_mode=self.debug_mode,
+            visit_id=visit_id,
+            turns=turns,
+            save_evidence=False,
+            skip_cleaning=True,
+            skip_hallucination_check=False
+        )
+        ctx_fork.emr_draft = emr_draft_before_fork
+        ctx_fork.combined_text = combined_text_before_fork
+        ctx_fork.draft_text = draft_text_before_fork
+        
+        hallucination_result_b, verification_issues_b, emr_no_term_norm = self._run_stages_4_to_6(
+            ctx_fork,
+            skip_term_norm=True,
+            skip_hallucination_check=False,
+            skip_verification=False,
+            skip_field_revision=False,
+            save_evidence=False,
+            visit_id=""
+        )
+        emr_no_term_norm = self.emr_persistence.normalize_format(emr_no_term_norm)
+        logger.info(f"路径B完成: emr_no_term_norm keys={list(emr_no_term_norm.keys())[:3] if emr_no_term_norm else 'None'}")
+        
+        total_time = time.time() - start_time
+        logger.info(f"=== 多变量Pipeline完成: {visit_id}, 总耗时: {total_time:.2f}秒 ===")
+        
+        return {
+            "status": "completed",
+            "emr_raw_draft": emr_raw_draft,
+            "emr_pre_revision": emr_pre_revision,
+            "emr_result": emr_result,
+            "emr_no_term_norm": emr_no_term_norm,
+            "hallucination_result": hallucination_result,
+            "verification_issues": verification_issues,
             "processing_time": total_time
         }
     

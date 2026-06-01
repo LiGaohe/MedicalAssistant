@@ -9,13 +9,12 @@
 /_bmad
 /backend/services/correction/__pycache__
 /backend/services/llm/__pycache__
-/docs
 /src/asr/__pycache__
 /tests/test_correction/__pycache__
 /backend/__pycache__
 /tests/__pycache__
 .env
-.env
+docs/
 **/__pycache__/**
 /backend/api/__pycache__
 /backend/services/__pycache__

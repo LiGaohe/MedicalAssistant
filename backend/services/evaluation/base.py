@@ -74,24 +74,48 @@ class BaseEvaluator(ABC):
     def _format_emr_content(self, emr_content: Dict[str, Any]) -> str:
         sections = []
         
-        if "subjective" in emr_content:
-            text = emr_content["subjective"].get("text", "")
-            if text:
-                sections.append(f"【主观资料(S)】\n{text}")
+        section_configs = {
+            "subjective": {
+                "label": "【主观资料(S)】",
+                "subfields": ["chief_complaint", "history_present_illness", "denied_symptoms", "past_history"]
+            },
+            "objective": {
+                "label": "【客观资料(O)】",
+                "subfields": ["physical_examination", "auxiliary_examination"]
+            },
+            "assessment": {
+                "label": "【评估(A)】",
+                "subfields": ["diagnosis"]
+            },
+            "plan": {
+                "label": "【计划(P)】",
+                "subfields": ["treatment", "advice"]
+            }
+        }
+        
+        for section_key, config in section_configs.items():
+            if section_key not in emr_content:
+                continue
+                
+            sec = emr_content[section_key]
+            if not isinstance(sec, dict):
+                continue
             
-        if "objective" in emr_content:
-            text = emr_content["objective"].get("text", "")
-            if text:
-                sections.append(f"【客观资料(O)】\n{text}")
+            text = sec.get("text", "")
             
-        if "assessment" in emr_content:
-            text = emr_content["assessment"].get("text", "")
-            if text:
-                sections.append(f"【评估(A)】\n{text}")
-            
-        if "plan" in emr_content:
-            text = emr_content["plan"].get("text", "")
-            if text:
-                sections.append(f"【计划(P)】\n{text}")
-            
+            if not text:
+                lines = [config["label"]]
+                has_content = False
+                for subfield in config["subfields"]:
+                    if subfield in sec and isinstance(sec[subfield], dict):
+                        val = sec[subfield].get("value", "")
+                        if val and isinstance(val, str) and val.strip():
+                            lines.append(f"  [{subfield}]: {val.strip()}")
+                            has_content = True
+                if has_content:
+                    sections.append("\n".join(lines))
+            else:
+                if text.strip():
+                    sections.append(f"{config['label']}\n{text.strip()}")
+        
         return "\n\n".join(sections)

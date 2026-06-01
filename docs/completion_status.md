@@ -1,5 +1,317 @@
 # 完成状态记录
 
+## 2026-06-01 run_multi_variant 去重逻辑添加
+
+### 问题
+
+`run_full_benchmark.py` 的 `run_multi_variant` 方法没有去重逻辑，每次运行都会重新评估所有样本，导致重复评估。
+
+### 修改内容
+
+**文件**：[run_full_benchmark.py](file:///d:/practice/MedicalAssisstant/scripts/run_full_benchmark.py)
+
+1. **添加去重检查**（第881-920行）：
+   - 在处理每个样本前，检查所有8个配置是否已存在
+   - 如果全部存在且不是 `--re-evaluate` 模式，跳过整个样本
+   - 如果部分存在，只评估缺失的配置
+
+2. **添加已存在配置处理**（第960-986行）：
+   - 将已存在的配置结果添加到 `sample_results`
+   - 在评估循环中跳过已存在的配置
+
+### 去重机制对比
+
+| 运行模式 | 去重机制 | 重复评估风险 |
+|---|---|---|
+| `run_batch` | ✅ 有 | 低（需配合 `--resume`） |
+| `run_all_configs` | ✅ 有 | 低（内部调用 `run_batch`） |
+| `run_ablations` | ✅ 有 | 低（内部调用 `run_batch`） |
+| `run_multi_variant` | ✅ 有（本次添加） | 低 |
+
+### 使用方式
+
+```bash
+# 正常运行，默认跳过已存在的样本
+python scripts/run_full_benchmark.py --config multi
+
+# 强制重新评估所有样本（包括LLM评估）
+python scripts/run_full_benchmark.py --config multi --re-evaluate
+```
+
+### 去重机制说明
+
+- **默认行为**：跳过已完成的样本（`status="completed"`）
+- **`--re-evaluate`**：强制重新评估，不跳过已存在的样本
+
+## 2026-06-01 Token 统计功能添加
+
+### 背景
+
+用户询问 `extract_benchmark_results.py` 脚本没有输出 token 消耗，发现数据库中没有存储 token 信息。
+
+### 分析结果
+
+| 层级 | 是否有 Token 信息 | 说明 |
+|---|---|---|
+| LLM API 响应 | ✅ 有 | `LLMResponse.usage` 包含 token 信息 |
+| Benchmark 记录 | ❌ 没有 | 只记录字符数 |
+| 数据库模型 | ❌ 没有 | `BenchmarkLLMCall` 表无 token 字段 |
+
+### 修改内容
+
+1. **数据库模型**（[benchmark.py](file:///d:/practice/MedicalAssisstant/backend/models/benchmark.py)）：
+   - `BenchmarkLLMCall` 表添加 `prompt_tokens`、`completion_tokens`、`total_tokens` 字段
+
+2. **评估记录类**（[benchmark_evaluator.py:22-32](file:///d:/practice/MedicalAssisstant/backend/services/evaluation/benchmark_evaluator.py#L22-L32)）：
+   - `LLMCallRecord` 添加 token 字段
+   - `_call_llm_json` 方法从 `response.usage` 提取 token 信息
+
+3. **结果类**（[benchmark_evaluator.py:280-288](file:///d:/practice/MedicalAssisstant/backend/services/evaluation/benchmark_evaluator.py#L280-L288)）：
+   - `BenchmarkEvaluationResult` 添加 `get_total_tokens()` 和 `get_avg_tokens()` 方法
+
+4. **提取脚本**（[extract_benchmark_results.py:204-240](file:///d:/practice/MedicalAssisstant/scripts/extract_benchmark_results.py#L204-L240)）：
+   - `compute_config_summary` 添加 token 统计（总 token、平均 token/调用、平均 token/样本）
+   - `format_paper_table` 表格添加 Token 消耗列
+
+5. **数据库迁移脚本**（[add_token_fields.py](file:///d:/practice/MedicalAssisstant/scripts/add_token_fields.py)）：
+   - 为现有数据库添加新字段
+
+### 注意事项
+
+- **之前的数据无法获取 token 信息**：因为数据库中没有存储，之前的运行记录只有字符数
+- 新运行的实验会自动记录 token 信息
+
+## 2026-06-01 EMR格式化问题修复及问题样本重新运行
+
+### 问题定位
+
+通过分析完整管线基准测试结果，发现3个样本（`10048311`、`10055575`、`10144880`）的EMR内容为空，导致支持率和召回率为0，拉低了整体指标。
+
+### 根本原因
+
+评估阶段的 `_format_emr_content` 方法（位于 [base.py:82-97](file:///d:/practice/MedicalAssisstant/backend/services/evaluation/base.py#L82-L97)）仅读取SOAP各section的 `text` 字段，而草稿结构化阶段生成的JSON中，实际内容存储在子字段（如 `chief_complaint.value`、`diagnosis.value` 等）中，导致评估文本为空。
+
+### 修复内容
+
+1. **修改 `_format_emr_content` 方法**（[base.py:75-97](file:///d:/practice/MedicalAssisstant/backend/services/evaluation/base.py#L75-L97)）：
+   - 当 `text` 字段为空时，从子字段提取内容
+   - 支持主观资料（chief_complaint, history_present_illness, denied_symptoms, past_history）
+   - 支持客观资料（physical_examination, auxiliary_examination）
+   - 支持评估（diagnosis）
+   - 支持计划（treatment, advice）
+
+2. **添加异常检测和日志记录**（[run_batch_experiments.py:619-691](file:///d:/practice/MedicalAssisstant/scripts/run_batch_experiments.py#L619-L691)）：
+   - 当EMR格式化后为空时，记录异常日志到 `data/logs/evaluation_exceptions.log`
+   - 停止该样本的评估流程，返回错误信息
+   - 包含样本ID、异常类型、EMR结构预览等详细信息
+
+### 重新运行结果
+
+| 样本ID | 修复前 support_rate | 修复后 support_rate | 修复前 recall_rate | 修复后 recall_rate |
+|:---|:---|:---|:---|:---|
+| 10048311 | 0.0 | 1.0 | 0.0 | 0.7632 |
+| 10055575 | 0.0 | 0.95 | 0.0 | 0.8571 |
+| 10144880 | 0.0 | 1.0 | 0.0 | 0.8611 |
+
+### 输出文件
+
+| 文件 | 内容 |
+|:---|:---|
+| [results_full_20260601_184251.jsonl](file:///d:/practice/MedicalAssisstant/data/experiments/results/results_full_20260601_184251.jsonl) | 3个问题样本重新运行后的完整结果 |
+| [evaluation_exceptions.log](file:///d:/practice/MedicalAssisstant/data/logs/evaluation_exceptions.log) | 评估异常日志（未来异常会记录到此文件） |
+
+### 修复验证
+
+修复后，3个样本的EMR内容正常，LLM评估成功执行，支持率和召回率恢复正常水平。修复方案有效解决了EMR格式化问题。
+
+---
+
+## 2026-06-01 完整管线基准测试运行完成
+
+### 任务概述
+
+运行 `scripts/run_full_benchmark.py` 脚本，使用完整管线配置处理10个样本，补充量化实验结果的病历生成质量各个字段。
+
+### 运行结果
+
+| 指标 | 数值 |
+|:---|:---|
+| 总样本数 | 10 |
+| 成功样本 | 10 |
+| 失败样本 | 0 |
+| 平均耗时 | 267.53秒/样本 |
+| 耗时标准差 | 144.82秒 |
+| 最小耗时 | 138.88秒 |
+| 最大耗时 | 643.95秒 |
+| 平均LLM调用次数 | 6次/样本 |
+| 平均字符数 | 22290.6字符 |
+
+### 病历生成质量指标
+
+| 指标 | 数值 | 说明 |
+|:---|:---|:---|
+| 平均支持率 | 0.69185 | 病历内容被对话支持的比例 |
+| 支持率标准差 | 0.4777 | 支持率的离散程度 |
+| 平均幻觉率 | 0.30815 | 病历中无证据支持的内容比例 |
+| 平均召回率 | 0.55303 | 对话关键事实被病历覆盖的比例 |
+| 召回率标准差 | 0.3904 | 召回率的离散程度 |
+| 平均遗漏率 | 0.0 | 关键事实遗漏比例 |
+| 结构完整性 | 1.0 | SOAP四个部分全部存在 |
+| 字段缺失率 | 0.0 | 必填字段缺失比例 |
+| 诊断匹配率 | 0.9 (90%) | 诊断与真实诊断匹配的比例 |
+| 平均核查问题 | 3.5个 | 后置核查发现的问题总数 |
+| 平均遗漏项 | 2.1个 | Checklist遗漏项数量 |
+| 平均确定性错误 | 0.7个 | 诊断确定性拔高错误数量 |
+
+### 输出文件
+
+| 文件 | 内容 |
+|:---|:---|
+| [results_full_20260601_155618.jsonl](file:///d:/practice/MedicalAssisstant/data/experiments/results/results_full_20260601_155618.jsonl) | 10个样本的详细结果，包含EMR、幻觉检查、核查问题、质量指标、LLM评估 |
+| [summary_full_20260601_155618.json](file:///d:/practice/MedicalAssisstant/data/experiments/results/summary_full_20260601_155618.json) | 完整管线配置的汇总统计 |
+| [benchmark_summary.json](file:///d:/practice/MedicalAssisstant/data/experiments/benchmark_summary.json) | 更新后的总汇总，包含end_to_end和full两种配置 |
+
+### 每个样本包含的质量字段
+
+- `hallucination`：幻觉检查结果（severity, support_rate, total_facts, unsupported_count）
+- `verification_issues`：后置核查问题（unsupported_claims, not_addressed_claims, missing_items, hard_rule_violations, certainty_errors）
+- `quality_metrics`：病历质量指标（structure_completeness, field_missing_rate, diagnosis_match）
+- `llm_evaluation`：LLM评估结果（consistency, completeness, quality, safety）
+
+---
+
+## 2026-06-01 诊断一致性与字段缺失率计算逻辑修复
+
+### 问题修复
+
+1. **诊断一致性计算**：
+   - 原问题：端到端基线的 `assessment` 只有 `text` 字段，无结构化 `diagnosis` 字段，导致诊断一致性为 null
+   - 解决方案：复用 `consistency_result` 中的 assessment 部分事实支持情况判断诊断一致性
+   - 新逻辑：当 `section="assessment"` 的所有事实 `is_supported=true` 时，诊断一致性为 true
+
+2. **遗漏率计算**：
+   - 原问题：CompletenessEvaluator 返回的 `summary` 中无 `omission_rate` 字段
+   - 解决方案：从 `none_coverage_count / total_facts` 计算遗漏率
+
+3. **字段缺失率计算**：
+   - 原问题：端到端基线 emr 只有 `text` 字段，检查结构化字段导致字段缺失率为 100%
+   - 解决方案：当 section 只有 `text` 字段时，检查 `text` 是否为空来判断字段缺失
+
+### 修改文件
+
+| 文件 | 变更 |
+|:---|:---|
+| [scripts/run_full_benchmark.py](file:///d:/practice/MedicalAssisstant/scripts/run_full_benchmark.py) | 添加 `_compute_diagnosis_match_from_consistency()` 方法，修改 `_compute_quality_metrics()` 处理 text-only 格式 |
+| [backend/services/evaluation/benchmark_evaluator.py](file:///d:/practice/MedicalAssisstant/backend/services/evaluation/benchmark_evaluator.py) | 修改 `get_omission_rate()` 从 `none_coverage_count` 计算 |
+
+---
+
+## 2026-06-01 Benchmark 数据库提取脚本实现完成
+
+### 功能概述
+
+实现了 `scripts/extract_benchmark_results.py`，从 Benchmark 数据库提取量化指标并计算实验结果，支持多种输出格式。
+
+### 新建文件
+
+| 文件 | 功能 |
+|:---|:---|
+| [scripts/extract_benchmark_results.py](file:///d:/practice/MedicalAssisstant/scripts/extract_benchmark_results.py) | 从数据库提取量化指标，输出 JSON/表格格式 |
+
+### 核心特性
+
+1. **多格式输出**：
+   - `--format json`：JSON 格式（默认）
+   - `--format table`：单行表格格式
+   - `--format paper`：论文表格格式（病历质量表 + LLM 效率表 + 消融表）
+
+2. **灵活查询**：
+   - `--config <name>`：指定配置名称
+   - `--details`：输出样本级详情
+   - `--include-ablation`：包含消融实验结果
+
+3. **输出选项**：
+   - `--output <path>`：保存到文件
+
+### 用法
+
+```bash
+# 输出所有配置的汇总（JSON格式）
+python scripts/extract_benchmark_results.py
+
+# 输出论文表格格式（包含消融实验）
+python scripts/extract_benchmark_results.py --format paper --include-ablation
+
+# 输出指定配置的样本详情
+python scripts/extract_benchmark_results.py --config full --details
+
+# 保存到文件
+python scripts/extract_benchmark_results.py --output data/experiments/benchmark_summary.json
+```
+
+### 提取指标
+
+| 指标 | 数据来源 |
+|:---|:---|
+| 事实支持率 | `benchmark_evaluations.support_rate` |
+| 幻觉率 | `benchmark_evaluations.hallucination_rate` |
+| 关键召回率 | `benchmark_evaluations.recall_rate` |
+| 遗漏率 | `benchmark_evaluations.omission_rate` |
+| 结构完整率 | `benchmark_evaluations.structure_completeness` |
+| 字段缺失率 | `benchmark_evaluations.field_missing_rate` |
+| 诊断一致性 | `benchmark_evaluations.diagnosis_match` |
+| LLM调用次数 | `benchmark_runs.llm_call_count` |
+| 字符消耗 | `benchmark_runs.char_count` |
+| 平均延迟 | `benchmark_runs.elapsed_seconds` |
+
+---
+
+## 2026-06-01 全量化指标一键评估脚本实现完成
+
+### 功能概述
+
+实现了 `scripts/run_full_benchmark.py`，单次运行产出所有量化指标，Pipeline 结果和评估结果持久化到独立数据库 `data/database/benchmark.db`。
+
+### 新建文件
+
+| 文件 | 功能 |
+|:---|:---|
+| [backend/models/benchmark.py](file:///d:/practice/MedicalAssisstant/backend/models/benchmark.py) | Benchmark 数据库模型（5张表：BenchmarkRun, BenchmarkStage, BenchmarkEvaluation, BenchmarkLLMCall, BenchmarkSummary） |
+| [backend/benchmark_db.py](file:///d:/practice/MedicalAssisstant/backend/benchmark_db.py) | Benchmark 数据库初始化模块（独立于 medical.db） |
+| [backend/services/evaluation/benchmark_evaluator.py](file:///d:/practice/MedicalAssisstant/backend/services/evaluation/benchmark_evaluator.py) | 评估编排器（四层评估 + LLM 调用统计） |
+| [scripts/run_full_benchmark.py](file:///d:/practice/MedicalAssisstant/scripts/run_full_benchmark.py) | 主脚本（一键运行 Pipeline + 四层评估） |
+
+### 修改文件
+
+| 文件 | 变更 |
+|:---|:---|
+| [scripts/run_batch_experiments.py](file:///d:/practice/MedicalAssisstant/scripts/run_batch_experiments.py#L619-L636) | `_run_llm_evaluation()` 方法补充 `ConsistencyEvaluator` 调用，产出事实支持率/幻觉率 |
+| [backend/models/__init__.py](file:///d:/practice/MedicalAssisstant/backend/models/__init__.py) | 导出 Benchmark 模型 |
+
+### 核心特性
+
+1. **四层评估全覆盖**：一致性 → 完整性 → 质量 → 安全，产出所有论文字段
+2. **LLM 调用统计**：每次调用记录 prompt_length、response_length
+3. **独立数据库**：`benchmark.db` 与 `medical.db` 完全隔离
+4. **跳过逻辑**：已完成的 sample_id + config_key 组合自动跳过 Pipeline
+5. **重评估**：`--re-evaluate` 标志支持重新运行 LLM 评估
+6. **错误处理**：完整异常捕获，错误详情写入日志和数据库
+
+### 用法
+
+```bash
+# 运行完整管线
+python scripts/run_full_benchmark.py --config full --samples data/experiments/test_samples.json
+
+# 运行所有配置
+python scripts/run_full_benchmark.py --config all --limit 10
+
+# 重新评估
+python scripts/run_full_benchmark.py --config full --re-evaluate
+```
+
+---
+
 ## 2026-05-31 消融实验关键召回率评估完成
 
 ### 评估概述
