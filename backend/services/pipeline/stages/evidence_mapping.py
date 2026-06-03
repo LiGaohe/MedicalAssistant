@@ -60,9 +60,11 @@ class EvidenceMappingStage(PipelineStage):
             try:
                 response = ctx.llm_service.generate(prompt, thinking_enabled=False)
                 logger.debug("证据溯源构建阶段: thinking模式已禁用")
+                ctx.llm_stats.record_from_response("evidence_mapping", prompt, response)
                 response_text = response.text
             except Exception as e:
                 logger.error(f"证据溯源构建LLM调用失败: {e}")
+                ctx.llm_stats.record_call("evidence_mapping", len(prompt), 0, success=False, error_message=str(e))
                 self._add_empty_evidence_traces(emr_draft)
                 return {"status": "llm_error"}
 
@@ -114,7 +116,9 @@ class EvidenceMappingStage(PipelineStage):
             return None
 
     def _apply_evidence_mapping(self, emr_draft: Dict[str, Any], mapping: Dict[str, Any], turns: List) -> None:
+        logger.info(f"_apply_evidence_mapping: turns列表长度={len(turns)}, turn_index列表={[t.turn_index for t in turns[:10]]}...")
         turn_map = {turn.turn_index: turn for turn in turns}
+        logger.info(f"_apply_evidence_mapping: turn_map keys={list(turn_map.keys())[:20]}...")
         
         for section_name in ["subjective", "objective", "assessment", "plan"]:
             section = emr_draft.get(section_name, {})
@@ -122,11 +126,13 @@ class EvidenceMappingStage(PipelineStage):
                 continue
             
             source_indices = mapping.get(section_name, {}).get("source_turn_indices", [])
+            logger.info(f"_apply_evidence_mapping: section={section_name}, source_indices={source_indices[:10]}...")
             evidence_traces = []
             
             if source_indices and isinstance(source_indices, list):
                 for idx in source_indices:
                     turn = turn_map.get(idx)
+                    logger.debug(f"_apply_evidence_mapping: 查找idx={idx}, 结果={turn is not None}")
                     if turn:
                         turn_text = turn.corrected_text or turn.text
                         evidence_traces.append({
@@ -146,15 +152,23 @@ class EvidenceMappingStage(PipelineStage):
             
             if "text" in section and section["text"]:
                 section["evidence_traces"] = evidence_traces
+                logger.info(f"为section {section_name} 添加 {len(evidence_traces)} 条证据溯源到section级别")
         
-        total_traces = sum(
-            len(field_data.get("evidence_traces", []))
-            for section in emr_draft.values()
-            if isinstance(section, dict)
-            for field_name, field_data in section.items()
-            if isinstance(field_data, dict) and field_name not in ("text", "evidence_traces", "assessment_items", "plan_items")
-        )
-        logger.info(f"证据溯源已应用: 共 {total_traces} 条trace分配到各字段")
+        # 计算总trace数，包括字段级别和section级别
+        total_traces = 0
+        for section_name, section in emr_draft.items():
+            if not isinstance(section, dict):
+                continue
+            # 字段级别的trace
+            for field_name, field_data in section.items():
+                if field_name in ("text", "evidence_traces", "assessment_items", "plan_items"):
+                    continue
+                if isinstance(field_data, dict):
+                    total_traces += len(field_data.get("evidence_traces", []))
+            # section级别的trace
+            total_traces += len(section.get("evidence_traces", []))
+        
+        logger.info(f"证据溯源已应用: 共 {total_traces} 条trace分配到各字段和section")
 
     def _add_empty_evidence_traces(self, emr_draft: Dict[str, Any]) -> None:
         for section_name in ["subjective", "objective", "assessment", "plan"]:

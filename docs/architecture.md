@@ -1688,6 +1688,160 @@ funasr_engine  medasr_engine │
              base.py (抽象层)
 ```
 
+## 量化评估模块架构
+
+### 模块概述
+
+量化评估模块用于对EMR生成管线进行多配置对比评估，支持中间结果持久化与跨运行复用。
+
+### 数据模型
+
+**BenchmarkRun（实验运行记录）**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `sample_id` | String | 样本ID |
+| `config_key` | String | 配置键（end_to_end/full/standard等） |
+| `visit_id` | String | 就诊ID |
+| `status` | String | 运行状态（running/completed/failed） |
+| `emr_raw_draft` | JSON | 阶段2后的原始草稿（中间结果） |
+| `emr_pre_revision` | JSON | 阶段5前的修订前EMR（中间结果） |
+| `emr_result` | JSON | 最终EMR结果 |
+| `hallucination_result` | JSON | 幻觉检查结果 |
+| `verification_issues` | JSON | 后置核查问题 |
+| `key_facts` | JSON | 关键事实提取结果（中间结果） |
+| `elapsed_seconds` | Float | 运行耗时 |
+| `llm_call_count` | Integer | LLM调用次数 |
+| `error_message` | Text | 错误信息 |
+
+**中间结果持久化机制**：
+
+```
+中间结果保存时机：
+├── emr_raw_draft → process_with_fork完成后立即保存
+├── emr_pre_revision → process_with_fork完成后立即保存
+├── emr_result → process_with_fork完成后立即保存
+├── hallucination_result → process_with_fork完成后立即保存
+├── verification_issues → process_with_fork完成后立即保存
+└── key_facts → key_facts提取完成后立即保存
+```
+
+### 中间结果复用流程
+
+```mermaid
+graph TB
+    A[样本处理开始] --> B{检查数据库}
+    B -->|已有中间结果| C[读取中间结果]
+    B -->|无中间结果| D[运行process_with_fork]
+    D --> E[保存中间结果到数据库]
+    E --> F{检查状态}
+    F -->|失败| G[保存已有结果并停止]
+    F -->|成功| H[继续评估]
+    C --> H
+    H --> I{检查key_facts}
+    I -->|已有| J[复用key_facts]
+    I -->|无| K[提取key_facts]
+    K --> L[保存key_facts到数据库]
+    J --> M[运行8个配置评估]
+    L --> M
+    
+    style A fill:#e1f5ff
+    style G fill:#ffebee
+    style M fill:#e8f5e9
+```
+
+### 空内容检查逻辑
+
+空内容EMR不保存到数据库，避免无效数据污染：
+
+```python
+def _is_emr_empty(emr: Optional[Dict]) -> bool:
+    # 检查所有SOAP section是否有非空内容
+    for section in ["subjective", "objective", "assessment", "plan"]:
+        sec = emr.get(section, {})
+        if isinstance(sec, dict) and len(sec) > 0:
+            # 检查text字段或value字段是否有内容
+            if "text" in sec and str(sec.get("text", "")).strip():
+                return False
+            for field, val in sec.items():
+                if isinstance(val, dict) and str(val.get("value", "")).strip():
+                    return False
+    return True  # 所有section都为空，不保存
+```
+
+**保留 `_is_emr_empty()` 的原因**：
+
+虽然管线现在正确处理空内容（失败时返回 `failed` 状态），但 `_is_emr_empty()` 方法仍需保留：
+
+1. **复用旧数据时检查**：数据库中可能存在旧数据（修复前保存的空内容）
+2. **防止无效数据污染**：确保只复用有效的中间结果
+
+### 失败状态传播机制
+
+管线失败时正确传播状态，停止后续阶段：
+
+```mermaid
+graph TB
+    A[阶段2: 草稿生成] --> B{检查状态}
+    B -->|failed| C[返回 failed, 停止管线]
+    B -->|completed| D[阶段3: 草稿结构化]
+    D --> E{检查状态}
+    E -->|failed| C
+    E -->|completed| F[阶段4-6: 幻觉检查/核查/修订]
+    F --> G{检查状态}
+    G -->|failed| C
+    G -->|completed| H[返回 completed]
+    
+    style C fill:#ffebee
+    style H fill:#e8f5e9
+```
+
+**量化评估脚本处理**：
+
+```python
+if fork_status != "completed":
+    logger.error(f"process_with_fork失败: {fork_result.get('error')}")
+    print(f"FAIL (fork failed, 不保存到数据库)", flush=True)
+    benchmark_db.close()
+    db.close()
+    raise RuntimeError(f"process_with_fork failed for sample {sample_id}")
+```
+
+**失败处理规则**：
+
+- 管线失败 → 返回 `{"status": "failed"}` → 停止管线
+- 量化评估脚本 → 抛出 `RuntimeError` → 停止该样本评估
+- 失败样本不保存到数据库
+
+### 文件依赖关系
+
+```
+backend/models/benchmark.py
+├── BenchmarkRun（实验运行记录，含中间结果字段）
+├── BenchmarkStage（阶段记录）
+├── BenchmarkEvaluation（评估记录）
+├── BenchmarkLLMCall（LLM调用记录）
+└── BenchmarkSummary（汇总记录）
+
+scripts/run_full_benchmark.py
+├── _is_emr_empty() → 空内容检查
+├── _check_intermediate_results() → 从数据库读取中间结果
+├── _save_benchmark_run() → 保存中间结果到数据库
+├── _build_jsonl_entry() → 构建JSONL输出
+└── run_multi_variant() → 多配置评估主流程
+    ├── 检查数据库中是否有中间结果
+    ├── 复用已有中间结果，跳过process_with_fork
+    ├── 运行process_with_fork后立即保存中间结果
+    ├── 失败时也保存已有的中间结果
+    └── key_facts提取后保存到数据库
+```
+
+### 复用效果
+
+- **减少LLM调用**：已有中间结果的样本直接复用，不重新调用LLM
+- **提高容错性**：阶段失败时，已生成的中间结果仍可被其他配置使用
+- **支持恢复**：重新运行实验时，可从数据库读取已有结果，跳过已完成的阶段
+
 ## 使用方式
 
 ### 基础用法

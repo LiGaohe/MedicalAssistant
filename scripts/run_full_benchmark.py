@@ -243,6 +243,25 @@ class FullBenchmarkRunner:
             "diagnosis_match": diagnosis_match,
         }
 
+    def _is_emr_empty(self, emr: Optional[Dict]) -> bool:
+        if not emr or not isinstance(emr, dict):
+            return True
+        
+        for section in SOAP_SECTIONS:
+            sec = emr.get(section, {})
+            if isinstance(sec, dict) and len(sec) > 0:
+                if "text" in sec and str(sec.get("text", "")).strip():
+                    return False
+                for field, val in sec.items():
+                    if field == "text":
+                        continue
+                    if isinstance(val, dict):
+                        if str(val.get("value", "")).strip():
+                            return False
+                    elif isinstance(val, str) and val.strip():
+                        return False
+        return True
+
     def _check_existing_run(self, benchmark_db, sample_id: str, config_key: str) -> Optional[BenchmarkRun]:
         existing = benchmark_db.query(BenchmarkRun).filter(
             BenchmarkRun.sample_id == sample_id,
@@ -251,6 +270,130 @@ class FullBenchmarkRunner:
         ).order_by(BenchmarkRun.created_at.desc()).first()
         return existing
 
+    def _check_intermediate_results(self, benchmark_db, sample_id: str) -> Optional[Dict[str, Any]]:
+        existing = benchmark_db.query(BenchmarkRun).filter(
+            BenchmarkRun.sample_id == sample_id,
+            BenchmarkRun.config_key == "full"
+        ).order_by(BenchmarkRun.created_at.desc()).first()
+        
+        if not existing:
+            return None
+        
+        if existing.status == "failed":
+            logger.info(f"[multi_variant] 发现失败状态的中间结果 - sample_id={sample_id}, error={existing.error_message[:100] if existing.error_message else None}")
+            return None
+        
+        if not existing.emr_result or self._is_emr_empty(existing.emr_result):
+            logger.info(f"[multi_variant] 中间结果中emr_result为空 - sample_id={sample_id}")
+            return None
+        
+        results = {}
+        if existing.emr_raw_draft and not self._is_emr_empty(existing.emr_raw_draft):
+            results["emr_raw_draft"] = existing.emr_raw_draft
+        if existing.emr_pre_revision and not self._is_emr_empty(existing.emr_pre_revision):
+            results["emr_pre_revision"] = existing.emr_pre_revision
+        if existing.emr_result and not self._is_emr_empty(existing.emr_result):
+            results["emr_result"] = existing.emr_result
+        if existing.hallucination_result:
+            results["hallucination_result"] = existing.hallucination_result
+        if existing.verification_issues:
+            results["verification_issues"] = existing.verification_issues
+        if existing.key_facts:
+            results["key_facts"] = existing.key_facts
+        
+        return results if results else None
+
+    def _compute_llm_stats_for_config(
+        self,
+        config_key: str,
+        llm_stats: Dict[str, Any]
+    ) -> Tuple[int, int, int, float]:
+        """
+        根据配置和LLM统计stage_breakdown计算配置对应的LLM调用次数、字符数和实际延迟
+        
+        配置对应的阶段范围：
+        - end_to_end: 阶段1-2 (turn_cleaning, draft_generation)
+        - no_verification: 阶段1-5 (不含verification，但实际emr_pre_revision包含verification)
+        - no_field_revision: 阶段1-5 (不含field_revision)
+        - full: 阶段1-6完整
+        - standard: 阶段1-6完整
+        - no_hallucination: 阶段1-6完整 (配置含义是跳过hallucination_check，但emr_result包含)
+        - no_term_norm: 路径B (阶段1-6，skip_term_norm)
+        - simplified: 独立管线，需要单独计算
+        
+        Args:
+            config_key: 配置键名
+            llm_stats: process_with_fork返回的LLM统计
+            
+        Returns:
+            Tuple[int, int, int, float]: (llm_call_count, char_count, token_count, actual_latency)
+        """
+        if not llm_stats:
+            return 0, 0, 0, 0.0
+        
+        stage_breakdown = llm_stats.get("stage_breakdown", {})
+        
+        CONFIG_STAGE_GROUPS = {
+            "end_to_end": [
+                "draft_generation_free_text",
+                "draft_generation_json"
+            ],
+            "no_verification": [
+                "turn_cleaning",
+                "draft_generation_free_text",
+                "draft_generation_json",
+                "soap_structuring",
+                "soap_generation_so",
+                "soap_generation_ap",
+                "soap_generation_assessment",
+                "soap_generation_plan",
+                "hallucination_check"
+            ],
+            "no_field_revision": [
+                "turn_cleaning",
+                "draft_generation_free_text",
+                "draft_generation_json",
+                "soap_structuring",
+                "soap_generation_so",
+                "soap_generation_ap",
+                "soap_generation_assessment",
+                "soap_generation_plan",
+                "hallucination_check",
+                "verification",
+                "claim_verification",
+                "checklist_verification",
+                "certainty_verification"
+            ],
+            "full": None,
+            "standard": None,
+            "no_hallucination": None,
+            "no_term_norm": None,
+            "simplified": None
+        }
+        
+        stage_group = CONFIG_STAGE_GROUPS.get(config_key)
+        
+        if stage_group is None:
+            return (
+                llm_stats.get("total_calls", 0),
+                llm_stats.get("total_char_count", 0),
+                llm_stats.get("total_tokens", 0),
+                llm_stats.get("total_actual_latency", 0.0)
+            )
+        
+        llm_call_count = 0
+        char_count = 0
+        token_count = 0
+        actual_latency = 0.0
+        for stage in stage_group:
+            stage_stats = stage_breakdown.get(stage, {})
+            llm_call_count += stage_stats.get("call_count", 0)
+            char_count += stage_stats.get("total_chars", 0)
+            token_count += stage_stats.get("total_tokens", 0)
+            actual_latency += stage_stats.get("total_latency", 0.0)
+        
+        return llm_call_count, char_count, token_count, actual_latency
+
     def _save_benchmark_run(
         self,
         benchmark_db,
@@ -258,12 +401,16 @@ class FullBenchmarkRunner:
         config_key: str,
         visit_id: str,
         status: str,
-        emr_result: Optional[Dict],
-        hallucination_result: Optional[Dict],
-        verification_issues: Optional[Dict],
-        elapsed_seconds: float,
-        llm_call_count: int,
-        char_count: int,
+        emr_raw_draft: Optional[Dict] = None,
+        emr_pre_revision: Optional[Dict] = None,
+        emr_result: Optional[Dict] = None,
+        hallucination_result: Optional[Dict] = None,
+        verification_issues: Optional[Dict] = None,
+        key_facts: Optional[Dict] = None,
+        elapsed_seconds: float = 0,
+        llm_call_count: int = 0,
+        char_count: int = 0,
+        token_count: int = 0,
         error_message: Optional[str] = None
     ) -> BenchmarkRun:
         run = BenchmarkRun(
@@ -271,12 +418,16 @@ class FullBenchmarkRunner:
             config_key=config_key,
             visit_id=visit_id,
             status=status,
-            emr_result=emr_result,
+            emr_raw_draft=emr_raw_draft if emr_raw_draft and not self._is_emr_empty(emr_raw_draft) else None,
+            emr_pre_revision=emr_pre_revision if emr_pre_revision and not self._is_emr_empty(emr_pre_revision) else None,
+            emr_result=emr_result if emr_result and not self._is_emr_empty(emr_result) else None,
             hallucination_result=hallucination_result,
             verification_issues=verification_issues,
+            key_facts=key_facts,
             elapsed_seconds=elapsed_seconds,
             llm_call_count=llm_call_count,
             char_count=char_count,
+            token_count=token_count,
             error_message=error_message
         )
         benchmark_db.add(run)
@@ -357,6 +508,9 @@ class FullBenchmarkRunner:
                 evaluator=call_record.evaluator,
                 prompt_length=call_record.prompt_length,
                 response_length=call_record.response_length,
+                prompt_tokens=call_record.prompt_tokens,
+                completion_tokens=call_record.completion_tokens,
+                total_tokens=call_record.total_tokens,
                 success=call_record.success,
                 error_message=call_record.error_message
             )
@@ -370,7 +524,7 @@ class FullBenchmarkRunner:
         sample: Dict[str, Any],
         config_key: str,
         config_info: Dict[str, Any]
-    ) -> Tuple[Optional[Dict], Optional[Dict], Optional[Dict], float, int, int, Optional[str]]:
+    ) -> Tuple[Optional[Dict], Optional[Dict], Optional[Dict], float, int, int, int, Optional[str]]:
         sample_id = sample.get("sample_id", "")
         logger.info(f"[Pipeline] 开始运行 - sample_id={sample_id}, config={config_key}")
 
@@ -397,18 +551,21 @@ class FullBenchmarkRunner:
             emr = result.get("emr_result")
             hallucination = result.get("hallucination_result")
             verification = result.get("verification_issues")
+            llm_stats = result.get("llm_stats", {})
 
-            llm_call_count = 0
-            char_count = 0
+            llm_call_count, char_count, token_count, actual_latency = self._compute_llm_stats_for_config(
+                config_key, llm_stats
+            )
 
-            logger.info(f"[Pipeline] 完成 - sample_id={sample_id}, status={status}, elapsed={elapsed:.1f}s")
+            logger.info(f"[Pipeline] 完成 - sample_id={sample_id}, status={status}, elapsed={elapsed:.1f}s, "
+                        f"llm_calls={llm_call_count}, tokens={token_count}")
 
-            return emr, hallucination, verification, elapsed, llm_call_count, char_count, None
+            return emr, hallucination, verification, elapsed, llm_call_count, char_count, token_count, None
 
         except Exception as e:
             error_msg = f"{str(e)}\n{traceback.format_exc()}"
             logger.error(f"[Pipeline] 失败 - sample_id={sample_id}, error={error_msg}")
-            return None, None, None, 0, 0, 0, error_msg
+            return None, None, None, 0, 0, 0, 0, error_msg
 
         finally:
             db.close()
@@ -461,14 +618,17 @@ class FullBenchmarkRunner:
         visit_id: str,
         status: str,
         elapsed_seconds: float,
-        emr_result: Optional[Dict],
-        hallucination_result: Optional[Dict],
-        verification_issues: Optional[Dict],
-        quality_metrics: Optional[Dict],
-        eval_result: Optional[Any],
-        llm_call_count: int,
-        char_count: int,
-        error_message: Optional[str]
+        emr_raw_draft: Optional[Dict] = None,
+        emr_pre_revision: Optional[Dict] = None,
+        emr_result: Optional[Dict] = None,
+        hallucination_result: Optional[Dict] = None,
+        verification_issues: Optional[Dict] = None,
+        quality_metrics: Optional[Dict] = None,
+        eval_result: Optional[Any] = None,
+        llm_call_count: int = 0,
+        char_count: int = 0,
+        error_message: Optional[str] = None,
+        include_intermediate: bool = False
     ) -> Dict[str, Any]:
         entry = {
             "sample_id": sample.get("sample_id", ""),
@@ -484,6 +644,10 @@ class FullBenchmarkRunner:
             "char_count": char_count,
             "error_message": error_message,
         }
+        
+        if include_intermediate:
+            entry["emr_raw_draft"] = emr_raw_draft
+            entry["emr_pre_revision"] = emr_pre_revision
 
         if hallucination_result:
             summary = hallucination_result.get("summary", {})
@@ -574,10 +738,11 @@ class FullBenchmarkRunner:
         eval_result = None
         llm_call_count = 0
         char_count = 0
+        token_count = 0
         pipeline_error = None
         eval_error = None
 
-        emr_result, hallucination_result, verification_issues, elapsed_seconds, llm_call_count, char_count, pipeline_error = \
+        emr_result, hallucination_result, verification_issues, elapsed_seconds, llm_call_count, char_count, token_count, pipeline_error = \
             self._run_pipeline(sample, config_key, config_info)
 
         if emr_result:
@@ -590,6 +755,9 @@ class FullBenchmarkRunner:
             if eval_result:
                 llm_call_count += eval_result.get_total_llm_calls()
                 char_count += eval_result.get_total_char_count()
+                eval_tokens = eval_result.get_total_tokens()
+                if eval_tokens:
+                    token_count += eval_tokens
         else:
             status = "failed"
             visit_id = f"exp_{sample_id}_{uuid.uuid4().hex[:8]}"
@@ -606,6 +774,7 @@ class FullBenchmarkRunner:
             elapsed_seconds=elapsed_seconds,
             llm_call_count=llm_call_count,
             char_count=char_count,
+            token_count=token_count,
             error_message=pipeline_error or eval_error
         )
 
@@ -919,39 +1088,133 @@ class FullBenchmarkRunner:
                 logger.info(f"[multi_variant] 部分配置已存在，只评估缺失的 {len(missing_configs)} 个配置 - sample_id={sample_id}")
                 print(f"  已存在: {list(existing_configs.keys())}, 需评估: {missing_configs}", flush=True)
             
+            intermediate_results = self._check_intermediate_results(benchmark_db, sample_id)
+            
+            if intermediate_results and not self.re_evaluate:
+                logger.info(f"[multi_variant] 发现已有中间结果，尝试复用 - sample_id={sample_id}")
+                print(f"  复用中间结果: {list(intermediate_results.keys())}", flush=True)
+                
+                emr_raw_draft = intermediate_results.get("emr_raw_draft")
+                emr_pre_revision = intermediate_results.get("emr_pre_revision")
+                emr_result = intermediate_results.get("emr_result")
+                hallucination_result = intermediate_results.get("hallucination_result")
+                verification_issues = intermediate_results.get("verification_issues")
+                key_facts_cached = intermediate_results.get("key_facts")
+                
+                visit_id_cached = None
+                cached_run = benchmark_db.query(BenchmarkRun).filter(
+                    BenchmarkRun.sample_id == sample_id,
+                    BenchmarkRun.config_key == "full"
+                ).order_by(BenchmarkRun.created_at.desc()).first()
+                if cached_run:
+                    visit_id_cached = cached_run.visit_id
+                
+                fork_elapsed = cached_run.elapsed_seconds if cached_run else 0
+                fork_elapsed_actual = fork_elapsed
+            else:
+                intermediate_results = None
+            
             db = self._build_main_db_session()
             try:
-                visit_id, turn_count = self._create_visit_and_turns(db, sample)
-                llm_service = LLMService(db)
-                orchestrator = PipelineOrchestrator(db=db, llm_service=llm_service, language="zh")
-                
-                t_start = time.time()
-                fork_result = orchestrator.process_with_fork(visit_id=visit_id, save_evidence=False)
-                fork_elapsed = time.time() - t_start
-                
-                if fork_result.get("status") != "completed":
-                    logger.error(f"[multi_variant] process_with_fork失败: {fork_result.get('error')}")
-                    print(f"FAIL (fork failed)", flush=True)
-                    continue
-                
-                emr_raw_draft = fork_result.get("emr_raw_draft")
-                emr_pre_revision = fork_result.get("emr_pre_revision")
-                emr_result = fork_result.get("emr_result")
-                emr_no_term_norm = fork_result.get("emr_no_term_norm")
-                hallucination_result = fork_result.get("hallucination_result")
-                verification_issues = fork_result.get("verification_issues")
-                
-                logger.info(f"[multi_variant] process_with_fork完成, elapsed={fork_elapsed:.1f}s")
+                if intermediate_results:
+                    visit_id = visit_id_cached or f"exp_{sample_id}_{uuid.uuid4().hex[:8]}"
+                    llm_service = LLMService(db)
+                    orchestrator = None
+                    emr_no_term_norm = None
+                    llm_stats = {}
+                else:
+                    visit_id, turn_count = self._create_visit_and_turns(db, sample)
+                    llm_service = LLMService(db)
+                    orchestrator = PipelineOrchestrator(db=db, llm_service=llm_service, language="zh")
+                    
+                    t_start = time.time()
+                    fork_result = orchestrator.process_with_fork(visit_id=visit_id, save_evidence=False)
+                    fork_elapsed = time.time() - t_start
+                    
+                    fork_status = fork_result.get("status")
+                    
+                    emr_raw_draft = fork_result.get("emr_raw_draft")
+                    emr_pre_revision = fork_result.get("emr_pre_revision")
+                    emr_result = fork_result.get("emr_result")
+                    emr_no_term_norm = fork_result.get("emr_no_term_norm")
+                    hallucination_result = fork_result.get("hallucination_result")
+                    verification_issues = fork_result.get("verification_issues")
+                    llm_stats = fork_result.get("llm_stats", {})
+                    
+                    llm_call_count = llm_stats.get("total_calls", 0)
+                    char_count = llm_stats.get("total_char_count", 0)
+                    token_count = llm_stats.get("total_tokens", 0)
+                    actual_latency = llm_stats.get("total_actual_latency", 0.0)
+                    
+                    fork_elapsed_actual = actual_latency if actual_latency > 0 else fork_elapsed
+                    
+                    logger.info(f"[multi_variant] process_with_fork完成, status={fork_status}, elapsed={fork_elapsed:.1f}s, actual_latency={actual_latency:.2f}s, llm_calls={llm_call_count}")
+                    
+                    if fork_status != "completed":
+                        logger.error(f"[multi_variant] process_with_fork失败: {fork_result.get('error')}")
+                        print(f"FAIL (fork failed, 保存中间结果到数据库)", flush=True)
+                        
+                        self._save_benchmark_run(
+                            benchmark_db,
+                            sample_id=sample_id,
+                            config_key="full",
+                            visit_id=visit_id,
+                            status="failed",
+                            emr_raw_draft=emr_raw_draft,
+                            emr_pre_revision=emr_pre_revision,
+                            emr_result=emr_result,
+                            hallucination_result=hallucination_result,
+                            verification_issues=verification_issues,
+                            elapsed_seconds=fork_elapsed_actual,
+                            error_message=fork_result.get('error')
+                        )
+                        logger.info(f"[multi_variant] 已保存失败状态和中间结果到数据库 - sample_id={sample_id}")
+                        
+                        benchmark_db.close()
+                        db.close()
+                        raise RuntimeError(f"process_with_fork failed for sample {sample_id}: {fork_result.get('error')}")
+                    
+                    self._save_benchmark_run(
+                        benchmark_db,
+                        sample_id=sample_id,
+                        config_key="full",
+                        visit_id=visit_id,
+                        status=fork_status,
+                        emr_raw_draft=emr_raw_draft,
+                        emr_pre_revision=emr_pre_revision,
+                        emr_result=emr_result,
+                        hallucination_result=hallucination_result,
+                        verification_issues=verification_issues,
+                        elapsed_seconds=fork_elapsed_actual,
+                        llm_call_count=llm_call_count,
+                        char_count=char_count,
+                        token_count=token_count,
+                        error_message=None
+                    )
+                    logger.info(f"[multi_variant] 已保存中间结果到数据库 - sample_id={sample_id}, llm_calls={llm_call_count}")
                 
                 evaluator = BenchmarkEvaluator(llm_service)
-                key_facts = None
+                key_facts = key_facts_cached if intermediate_results else None
                 
-                completeness_eval = LoggedCompletenessEvaluator(llm_service, [])
-                try:
-                    key_facts = completeness_eval.extract_key_facts(dialogue_text)
-                    logger.info(f"[multi_variant] key_facts提取完成")
-                except Exception as e:
-                    logger.error(f"[multi_variant] key_facts提取失败: {e}")
+                if not key_facts:
+                    completeness_eval = LoggedCompletenessEvaluator(llm_service, [])
+                    try:
+                        key_facts = completeness_eval.extract_key_facts(dialogue_text)
+                        logger.info(f"[multi_variant] key_facts提取完成")
+                        
+                        if intermediate_results:
+                            cached_run = benchmark_db.query(BenchmarkRun).filter(
+                                BenchmarkRun.sample_id == sample_id,
+                                BenchmarkRun.config_key == "full"
+                            ).order_by(BenchmarkRun.created_at.desc()).first()
+                            if cached_run:
+                                cached_run.key_facts = key_facts
+                                benchmark_db.commit()
+                                logger.info(f"[multi_variant] 已更新key_facts到数据库 - sample_id={sample_id}")
+                    except Exception as e:
+                        logger.error(f"[multi_variant] key_facts提取失败: {e}")
+                        print(f"FAIL (key_facts提取失败)", flush=True)
+                        raise RuntimeError(f"key_facts extraction failed for sample {sample_id}: {e}")
                 
                 sample_results = {}
                 
@@ -987,6 +1250,24 @@ class FullBenchmarkRunner:
                     output_type = mapping.get("type")
                     
                     if emr_key is None:
+                        if orchestrator is None:
+                            existing_turns = db.query(TranscriptTurn).filter(
+                                TranscriptTurn.visit_id == visit_id
+                            ).count()
+                            if existing_turns == 0:
+                                logger.info(f"[multi_variant] visit_id={visit_id}没有turns记录，重新创建")
+                                for i, turn in enumerate(sample.get("turns", [])):
+                                    db.add(TranscriptTurn(
+                                        visit_id=visit_id,
+                                        turn_index=i,
+                                        speaker=turn.get("speaker", "unknown"),
+                                        text=turn.get("text", ""),
+                                        confidence=1.0,
+                                        start_ms=i * 3000,
+                                        end_ms=(i + 1) * 3000
+                                    ))
+                                db.commit()
+                            orchestrator = PipelineOrchestrator(db=db, llm_service=llm_service, language="zh")
                         t_simplified_start = time.time()
                         simplified_result = orchestrator.process_transcript(
                             visit_id=visit_id,
@@ -1030,20 +1311,32 @@ class FullBenchmarkRunner:
                     
                     config_info = EXPERIMENT_CONFIGS.get(config_key, ABLATION_CONFIGS.get(config_key, {"name": config_key}))
                     
+                    config_llm_calls, config_char_count, config_token_count, config_actual_latency = self._compute_llm_stats_for_config(
+                        config_key, llm_stats
+                    )
+                    
+                    if config_key == "simplified" and simplified_result:
+                        simplified_llm_stats = simplified_result.get("llm_stats", {})
+                        config_llm_calls = simplified_llm_stats.get("total_calls", 0)
+                        config_char_count = simplified_llm_stats.get("total_char_count", 0)
+                        config_actual_latency = simplified_llm_stats.get("total_actual_latency", 0.0)
+                    
+                    config_elapsed = config_actual_latency if config_actual_latency > 0 else (fork_elapsed_actual if emr_key else simplified_elapsed)
+                    
                     entry = self._build_jsonl_entry(
                         sample=sample,
                         config_key=config_key,
                         config_name=config_info.get("name", config_key),
                         visit_id=visit_id,
                         status="completed",
-                        elapsed_seconds=fork_elapsed if emr_key else simplified_elapsed,
+                        elapsed_seconds=config_elapsed,
                         emr_result=emr_to_eval,
                         hallucination_result=hallucination_result if config_key == "full" else None,
                         verification_issues=verification_issues if config_key in ["full", "no_verification", "no_field_revision"] else None,
                         quality_metrics=quality_metrics,
                         eval_result=eval_result,
-                        llm_call_count=0,
-                        char_count=0,
+                        llm_call_count=config_llm_calls,
+                        char_count=config_char_count,
                         error_message=None
                     )
                     
@@ -1059,6 +1352,31 @@ class FullBenchmarkRunner:
                         ablation_output = self.output_dir / f"results_full_ablation_{timestamp}.jsonl"
                         with open(ablation_output, 'a', encoding='utf-8') as f:
                             f.write(json.dumps(ablation_entry, ensure_ascii=False) + "\n")
+                    
+                    run_record = self._save_benchmark_run(
+                        benchmark_db,
+                        sample_id=sample_id,
+                        config_key=config_key,
+                        visit_id=visit_id,
+                        status="completed",
+                        emr_result=emr_to_eval,
+                        hallucination_result=hallucination_result if config_key == "full" else None,
+                        verification_issues=verification_issues if config_key in ["full", "no_verification", "no_field_revision"] else None,
+                        elapsed_seconds=config_elapsed,
+                        llm_call_count=config_llm_calls,
+                        char_count=config_char_count,
+                        token_count=config_token_count,
+                        error_message=None
+                    )
+                    
+                    if eval_result:
+                        self._save_benchmark_evaluation(
+                            benchmark_db,
+                            run_record,
+                            eval_result,
+                            quality_metrics,
+                            error_message=None
+                        )
                     
                     print(f"  {config_key}: OK", flush=True)
                 
@@ -1085,197 +1403,6 @@ class FullBenchmarkRunner:
             
             config_info = EXPERIMENT_CONFIGS.get(config_key, ABLATION_CONFIGS.get(config_key, {"name": config_key}))
             summary = self._compute_summary(config_results, config_key, config_info.get("name", config_key), 0)
-            
-            summary_file = self.output_dir / f"summary_{config_key}_{timestamp}.json"
-            with open(summary_file, 'w', encoding='utf-8') as f:
-                json.dump(summary, f, ensure_ascii=False, indent=2)
-            
-            self._save_benchmark_summary(benchmark_db, summary)
-            
-            if config_key == "full":
-                ablation_summary = summary.copy()
-                ablation_summary["config_type"] = "ablation"
-                ablation_summary_file = self.output_dir / f"summary_full_ablation_{timestamp}.json"
-                with open(ablation_summary_file, 'w', encoding='utf-8') as f:
-                    json.dump(ablation_summary, f, ensure_ascii=False, indent=2)
-        
-        print(f"\n{'='*60}")
-        print(f"  完成: {len(all_results)} 样本")
-        print(f"{'='*60}\n")
-        
-        return all_results
-
-
-def main():
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        samples_to_run = self.samples[:limit] if limit > 0 else self.samples
-        
-        logger.info(f"开始多变量Pipeline评估 - samples={len(samples_to_run)}, limit={limit}")
-        print(f"\n{'='*60}")
-        print(f"  多变量Pipeline评估 (multi)")
-        print(f"  样本数: {len(samples_to_run)}")
-        print(f"{'='*60}\n")
-        
-        benchmark_db = get_benchmark_session()
-        all_results = {}
-        
-        config_output_mapping = {
-            "end_to_end": {"type": "experiment", "emr_key": "emr_raw_draft"},
-            "no_verification": {"type": "ablation", "emr_key": "emr_pre_revision"},
-            "no_field_revision": {"type": "ablation", "emr_key": "emr_pre_revision"},
-            "full": {"type": "both", "emr_key": "emr_result"},
-            "standard": {"type": "experiment", "emr_key": "emr_result"},
-            "no_hallucination": {"type": "ablation", "emr_key": "emr_result"},
-            "no_term_norm": {"type": "ablation", "emr_key": "emr_no_term_norm"},
-            "simplified": {"type": "experiment", "emr_key": None}
-        }
-        
-        for sample in samples_to_run:
-            sample_id = sample.get("sample_id", "")
-            dialogue_text = sample.get("dialogue_text", "")
-            
-            print(f"处理样本: {sample_id}...", flush=True)
-            logger.info(f"[multi_variant] 处理样本: {sample_id}")
-            
-            db = self._build_main_db_session()
-            try:
-                visit_id, turn_count = self._create_visit_and_turns(db, sample)
-                llm_service = LLMService(db)
-                orchestrator = PipelineOrchestrator(db=db, llm_service=llm_service, language="zh")
-                
-                t_start = time.time()
-                fork_result = orchestrator.process_with_fork(visit_id=visit_id, save_evidence=False)
-                fork_elapsed = time.time() - t_start
-                
-                if fork_result.get("status") != "completed":
-                    logger.error(f"[multi_variant] process_with_fork失败: {fork_result.get('error')}")
-                    print(f"FAIL (fork failed)", flush=True)
-                    continue
-                
-                emr_raw_draft = fork_result.get("emr_raw_draft")
-                emr_pre_revision = fork_result.get("emr_pre_revision")
-                emr_result = fork_result.get("emr_result")
-                emr_no_term_norm = fork_result.get("emr_no_term_norm")
-                hallucination_result = fork_result.get("hallucination_result")
-                verification_issues = fork_result.get("verification_issues")
-                
-                logger.info(f"[multi_variant] process_with_fork完成, elapsed={fork_elapsed:.1f}s")
-                
-                evaluator = BenchmarkEvaluator(llm_service)
-                key_facts = None
-                
-                completeness_eval = LoggedCompletenessEvaluator(llm_service, [])
-                try:
-                    key_facts = completeness_eval.extract_key_facts(dialogue_text)
-                    logger.info(f"[multi_variant] key_facts提取完成")
-                except Exception as e:
-                    logger.error(f"[multi_variant] key_facts提取失败: {e}")
-                
-                sample_results = {}
-                
-                for config_key, mapping in config_output_mapping.items():
-                    emr_key = mapping.get("emr_key")
-                    output_type = mapping.get("type")
-                    
-                    if emr_key is None:
-                        t_simplified_start = time.time()
-                        simplified_result = orchestrator.process_transcript(
-                            visit_id=visit_id,
-                            save_evidence=False,
-                            skip_cleaning=True,
-                            skip_hallucination_check=True,
-                            stop_after_draft=False,
-                            skip_verification=True,
-                            skip_term_norm=False,
-                            skip_field_revision=True
-                        )
-                        simplified_elapsed = time.time() - t_simplified_start
-                        emr_to_eval = simplified_result.get("emr_result")
-                        logger.info(f"[multi_variant] simplified Pipeline完成, elapsed={simplified_elapsed:.1f}s")
-                    else:
-                        emr_map = {
-                            "emr_raw_draft": emr_raw_draft,
-                            "emr_pre_revision": emr_pre_revision,
-                            "emr_result": emr_result,
-                            "emr_no_term_norm": emr_no_term_norm
-                        }
-                        emr_to_eval = emr_map.get(emr_key)
-                    
-                    if not emr_to_eval:
-                        logger.warning(f"[multi_variant] {config_key}: EMR为空，跳过评估")
-                        continue
-                    
-                    quality_metrics = self._compute_quality_metrics(emr_to_eval, sample.get("diagnosis", ""))
-                    
-                    try:
-                        eval_result = evaluator.evaluate_all(
-                            dialogue_text,
-                            emr_to_eval,
-                            sample_id=sample_id,
-                            key_facts=key_facts
-                        )
-                        logger.info(f"[multi_variant] {config_key}评估完成: support_rate={eval_result.get_support_rate()}, recall_rate={eval_result.get_recall_rate()}")
-                    except Exception as e:
-                        logger.error(f"[multi_variant] {config_key}评估失败: {e}")
-                        eval_result = None
-                    
-                    entry = self._build_jsonl_entry(
-                        sample=sample,
-                        config_key=config_key,
-                        config_name=config_info.get("name", config_key),
-                        visit_id=visit_id,
-                        status="completed",
-                        elapsed_seconds=fork_elapsed if emr_key else simplified_elapsed,
-                        emr_result=emr_to_eval,
-                        hallucination_result=hallucination_result if config_key == "full" else None,
-                        verification_issues=verification_issues if config_key in ["full", "no_verification", "no_field_revision"] else None,
-                        quality_metrics=quality_metrics,
-                        eval_result=eval_result,
-                        llm_call_count=0,
-                        char_count=0,
-                        error_message=None
-                    )
-                    
-                    output_file = self.output_dir / f"results_{config_key}_{timestamp}.jsonl"
-                    with open(output_file, 'a', encoding='utf-8') as f:
-                        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-                    
-                    sample_results[config_key] = entry
-                    
-                    if output_type == "both":
-                        ablation_entry = entry.copy()
-                        ablation_entry["config_type"] = "ablation"
-                        ablation_output = self.output_dir / f"results_full_ablation_{timestamp}.jsonl"
-                        with open(ablation_output, 'a', encoding='utf-8') as f:
-                            f.write(json.dumps(ablation_entry, ensure_ascii=False) + "\n")
-                    
-                    print(f"  {config_key}: OK", flush=True)
-                
-                all_results[sample_id] = sample_results
-                time.sleep(self.request_interval)
-                
-            except Exception as e:
-                error_msg = f"{str(e)}\n{traceback.format_exc()}"
-                logger.error(f"[multi_variant] 样本处理异常: {sample_id}, error={error_msg}")
-                print(f"FAIL ({error_msg})", flush=True)
-            finally:
-                db.close()
-        
-        close_benchmark_session(benchmark_db)
-        
-        for config_key in ["end_to_end", "no_verification", "no_field_revision", "full", "standard", "no_hallucination", "no_term_norm", "simplified"]:
-            config_results = []
-            for sample_id, sample_data in all_results.items():
-                if config_key in sample_data:
-                    config_results.append(sample_data[config_key])
-            
-            if not config_results:
-                continue
-            
-            config_name = config_info.get("name", config_key)
-            
-            total_elapsed = sum(r.get("elapsed_seconds", 0) for r in config_results)
-            summary = self._compute_summary(config_results, config_key, config_name, total_elapsed)
             
             summary_file = self.output_dir / f"summary_{config_key}_{timestamp}.json"
             with open(summary_file, 'w', encoding='utf-8') as f:

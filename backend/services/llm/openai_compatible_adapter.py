@@ -74,6 +74,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
         logger.debug(f"LLM API请求 - payload: {json.dumps(payload, ensure_ascii=False)[:500]}")
         
         last_error = None
+        total_actual_latency = 0.0
         
         for attempt in range(self.max_retries):
             try:
@@ -82,6 +83,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
                     wait_time = self.request_interval - elapsed
                     time.sleep(wait_time)
                 
+                call_start = time.time()
                 timeout = request.timeout if request.timeout else (300.0 if use_thinking else 120.0)
                 logger.debug(f"LLM API请求超时设置: {timeout}秒 (请求级={request.timeout is not None})")
                 with httpx.Client(timeout=timeout) as client:
@@ -91,6 +93,9 @@ class OpenAICompatibleAdapter(LLMAdapter):
                         json=payload
                     )
                     response.raise_for_status()
+                    call_elapsed = time.time() - call_start
+                    total_actual_latency += call_elapsed
+                    
                     try:
                         data = response.json()
                     except (UnicodeDecodeError, json.JSONDecodeError) as e:
@@ -108,6 +113,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
                             raise RuntimeError(f"API响应解码失败(utf-8/gbk/gb18030/latin-1): {e}")
                     
                     logger.debug(f"LLM API原始响应: {json.dumps(data, ensure_ascii=False)[:2000]}")
+                    logger.debug(f"LLM API实际调用耗时: {call_elapsed:.2f}s, 累计: {total_actual_latency:.2f}s")
                     
                     self._last_request_time = time.time()
                     
@@ -168,7 +174,8 @@ class OpenAICompatibleAdapter(LLMAdapter):
                         usage=data.get("usage", {}),
                         finish_reason=finish_reason,
                         raw_response=data,
-                        thinking_content=thinking_content
+                        thinking_content=thinking_content,
+                        actual_latency=total_actual_latency
                     )
                     
             except httpx.HTTPStatusError as e:

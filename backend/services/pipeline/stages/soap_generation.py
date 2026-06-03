@@ -95,9 +95,11 @@ class SOAPGenerationStage(PipelineStage):
             try:
                 response = ctx.llm_service.generate(prompt, thinking_enabled=False)
                 logger.debug("SO生成阶段: thinking模式已禁用")
+                ctx.llm_stats.record_from_response("soap_generation_so", prompt, response)
                 response_text = response.text
             except Exception as e:
                 logger.error(f"SO生成LLM调用失败: {e}")
+                ctx.llm_stats.record_call("soap_generation_so", len(prompt), 0, success=False, error_message=str(e))
                 return {"subjective": {}, "objective": {}, "used_fact_ids": []}
 
         try:
@@ -156,9 +158,11 @@ class SOAPGenerationStage(PipelineStage):
 
                 try:
                     response = ctx.llm_service.generate(prompt)
+                    ctx.llm_stats.record_from_response("soap_generation_ap", prompt, response)
                     response_text = response.text
                 except Exception as e:
                     logger.error(f"AP合并生成LLM调用失败: {e}")
+                    ctx.llm_stats.record_call("soap_generation_ap", len(prompt), 0, success=False, error_message=str(e))
                     return {"assessment": {}, "plan": {}, "assessment_items": [], "plan_items": {}}
 
             try:
@@ -224,9 +228,11 @@ class SOAPGenerationStage(PipelineStage):
                 try:
                     response = ctx.llm_service.generate(assessment_prompt)
                     logger.debug("Assessment生成阶段: thinking模式已启用（诊断推断）")
+                    ctx.llm_stats.record_from_response("soap_generation_assessment", assessment_prompt, response)
                     assessment_response_text = response.text
                 except Exception as e:
                     logger.error(f"Assessment生成LLM调用失败: {e}")
+                    ctx.llm_stats.record_call("soap_generation_assessment", len(assessment_prompt), 0, success=False, error_message=str(e))
                     return {"assessment": {}, "plan": {}, "assessment_items": [], "plan_items": {}}
 
             assessment_result = parse_json_response(assessment_response_text, "Assessment生成")
@@ -270,9 +276,11 @@ class SOAPGenerationStage(PipelineStage):
                 try:
                     response = ctx.llm_service.generate(plan_prompt)
                     logger.debug("Plan生成阶段: thinking模式已启用（诊断推断）")
+                    ctx.llm_stats.record_from_response("soap_generation_plan", plan_prompt, response)
                     plan_response_text = response.text
                 except Exception as e:
                     logger.error(f"Plan生成LLM调用失败: {e}")
+                    ctx.llm_stats.record_call("soap_generation_plan", len(plan_prompt), 0, success=False, error_message=str(e))
                     return {"assessment": assessment, "plan": {}, "assessment_items": assessment_items, "plan_items": {}}
 
             plan_result = parse_json_response(plan_response_text, "Plan生成")

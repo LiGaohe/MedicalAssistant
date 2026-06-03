@@ -23,6 +23,10 @@ class FieldRevisionStage(PipelineStage):
 
         draft_emr = ctx.emr_draft
         issues = ctx.verification_issues or {}
+        
+        if not draft_emr:
+            logger.error("draft_emr为空，无法进行字段修订")
+            return {"status": "skipped_empty_draft", "issues_count": 0, "revised": False}
 
         # 统计各类问题数量
         unsupported_count = len(issues.get("unsupported_claims", []))
@@ -74,6 +78,7 @@ class FieldRevisionStage(PipelineStage):
         )
 
         return {
+            "status": "success",
             "issues_count": total_issues_count,
             "revised": revised,
         }
@@ -117,9 +122,11 @@ class FieldRevisionStage(PipelineStage):
             try:
                 response = ctx.llm_service.generate(prompt)
                 logger.debug("字段级修订阶段: thinking模式已启用（默认）")
+                ctx.llm_stats.record_from_response("field_revision", prompt, response)
                 response_text = response.text
             except Exception as e:
                 logger.error(f"字段级修订LLM调用失败: {e}")
+                ctx.llm_stats.record_call("field_revision", len(prompt), 0, success=False, error_message=str(e))
                 return None
 
         parsed = parse_json_response(response_text, "字段级修订")

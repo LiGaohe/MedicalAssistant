@@ -80,9 +80,11 @@ class HallucinationCheckStage(PipelineStage):
 
             try:
                 response = ctx.llm_service.generate(prompt)
+                ctx.llm_stats.record_from_response("hallucination_check", prompt, response)
                 response_text = response.text
             except Exception as e:
                 logger.error(f"幻觉检查LLM调用失败: {e}")
+                ctx.llm_stats.record_call("hallucination_check", len(prompt), 0, success=False, error_message=str(e))
                 ctx.hallucination_result = self._empty_result()
                 return {"status": "llm_error"}
 

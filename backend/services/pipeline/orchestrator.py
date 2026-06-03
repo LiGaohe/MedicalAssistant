@@ -87,7 +87,7 @@ class PipelineOrchestrator:
         skip_field_revision: bool = False,
         save_evidence: bool = False,
         visit_id: str = ""
-    ) -> Tuple[Optional[Dict], Optional[Dict], Dict[str, Any]]:
+    ) -> Tuple[str, Optional[Dict], Optional[Dict], Dict[str, Any]]:
         """
         执行阶段4-6：术语规范化、幻觉检查、后置核查、字段修订
         
@@ -101,10 +101,15 @@ class PipelineOrchestrator:
             visit_id: 访问ID
             
         Returns:
-            Tuple: (hallucination_result, verification_issues, emr_final)
+            Tuple: (status, hallucination_result, verification_issues, emr_final)
+            status: "completed" 或 "failed"
         """
         hallucination_result = None
         verification_issues = None
+        failed_stage = None
+        
+        FAILED_STATUSES = ['llm_error', 'parse_error', 'llm_unavailable', 'debug_cancelled',
+                          'skipped', 'skipped_empty_draft', 'skipped_empty_transcript', 'skipped_empty_content']
         
         if skip_term_norm:
             logger.info("skip_term_norm=True, 跳过术语规范化")
@@ -118,20 +123,37 @@ class PipelineOrchestrator:
         else:
             logger.info("阶段4: 幻觉检查")
             hallucination_result = HallucinationCheckStage().execute(ctx)
+            hallucination_status = hallucination_result.get('status')
             logger.info(f"幻觉检查完成: 严重程度={hallucination_result.get('severity', 'unknown')}, "
-                        f"支持率={hallucination_result.get('summary', {}).get('support_rate', 0)}")
+                        f"支持率={hallucination_result.get('summary', {}).get('support_rate', 0)}, "
+                        f"状态={hallucination_status}")
+            
+            if hallucination_status in FAILED_STATUSES:
+                logger.error(f"幻觉检查失败(status={hallucination_status}), 停止管线, 不再调用大模型")
+                failed_stage = "hallucination_check"
+                emr_final = ctx.emr_draft
+                emr_final = self.emr_persistence.normalize_format(emr_final)
+                return "failed", hallucination_result, verification_issues, emr_final
         
         if skip_verification:
             logger.info("skip_verification=True, 跳过阶段5+6: 后置核查与字段修订")
             emr_final = emr_draft
-            return hallucination_result, verification_issues, emr_final
+            return "completed", hallucination_result, verification_issues, emr_final
         
         time.sleep(self.STAGE_DELAY)
         
         logger.info("阶段5: 后置核查")
         verification_result = ClaimVerificationStage().execute(ctx)
+        verification_status = verification_result.get('status')
         verification_issues = ctx.verification_issues
-        logger.info(f"后置核查完成, 问题数={verification_result.get('issues_count', 0)}")
+        logger.info(f"后置核查完成, 问题数={verification_result.get('issues_count', 0)}, 状态={verification_status}")
+        
+        if verification_status in FAILED_STATUSES:
+            logger.error(f"后置核查失败(status={verification_status}), 停止管线, 不再调用大模型")
+            failed_stage = "verification"
+            emr_final = ctx.emr_draft
+            emr_final = self.emr_persistence.normalize_format(emr_final)
+            return "failed", hallucination_result, verification_issues, emr_final
         
         time.sleep(self.STAGE_DELAY)
         
@@ -140,8 +162,17 @@ class PipelineOrchestrator:
             emr_final = ctx.emr_draft
         else:
             logger.info("阶段6: 字段级修订与落盘")
-            FieldRevisionStage().execute(ctx)
+            revision_result = FieldRevisionStage().execute(ctx)
+            revision_status = revision_result.get('status')
             emr_final = ctx.emr_draft
+            logger.info(f"字段级修订完成, 问题数={revision_result.get('issues_count', 0)}, "
+                       f"修订={'是' if revision_result.get('revised') else '否'}, 状态={revision_status}")
+            
+            if revision_status in FAILED_STATUSES:
+                logger.error(f"字段修订失败(status={revision_status}), 停止管线, 不再调用大模型")
+                failed_stage = "field_revision"
+                emr_final = self.emr_persistence.normalize_format(emr_final)
+                return "failed", hallucination_result, verification_issues, emr_final
         
         emr_final = self.emr_persistence.normalize_format(emr_final)
         if save_evidence and visit_id:
@@ -149,7 +180,7 @@ class PipelineOrchestrator:
             self.emr_persistence.save_emr_record(emr_final, visit_id)
             logger.info(f"已保存最终病历记录及证据溯源到数据库: visit_id={visit_id}")
         
-        return hallucination_result, verification_issues, emr_final
+        return "completed", hallucination_result, verification_issues, emr_final
     
     def process_transcript(
         self,
@@ -204,9 +235,39 @@ class PipelineOrchestrator:
         
         logger.info("阶段2: 直接草稿生成")
         soap_result = DirectSOAPGenerationStage().execute(ctx)
-        logger.info(f"直接草稿生成完成, 状态={soap_result.get('status')}")
+        soap_status = soap_result.get('status')
+        logger.info(f"直接草稿生成完成, 状态={soap_status}")
+        
+        FAILED_STATUSES = ['llm_error', 'parse_error', 'llm_unavailable', 'debug_cancelled', 
+                          'skipped', 'skipped_empty_draft', 'skipped_empty_transcript', 'skipped_empty_content']
+        if soap_status in FAILED_STATUSES:
+            total_time = time.time() - start_time
+            logger.error(f"草稿生成失败(status={soap_status}), 停止管线, 不再调用大模型")
+            return {
+                "status": "failed",
+                "error": f"Draft generation failed with status: {soap_status}",
+                "role_mapping": all_role_mappings,
+                "cleaned_turns": all_cleaned_turns,
+                "combined_text": combined_text,
+                "emr_result": ctx.emr_draft,
+                "emr_draft": ctx.emr_draft,
+                "verification_issues": None,
+                "hallucination_result": None,
+                "processing_time": total_time
+            }
         
         draft_text = ctx.draft_text
+        
+        # 草稿生成后立即保存到数据库，防止刷新丢失
+        if save_evidence and visit_id and ctx.emr_draft:
+            normalized_draft = self.emr_persistence.normalize_format(ctx.emr_draft)
+            self.emr_persistence.save_emr_record(
+                normalized_draft, 
+                visit_id, 
+                record_type="llm_draft",
+                draft_text=draft_text
+            )
+            logger.info(f"已保存病历草稿到数据库: visit_id={visit_id}, record_type=llm_draft")
         
         if stop_after_draft:
             total_time = time.time() - start_time
@@ -225,10 +286,27 @@ class PipelineOrchestrator:
         
         if settings.DRAFT_GENERATION_MODE == "free_text" and draft_text:
             logger.info("阶段3: 草稿结构化")
-            SoapStructuringStage().execute(ctx)
-            logger.info("草稿结构化完成")
+            struct_result = SoapStructuringStage().execute(ctx)
+            struct_status = struct_result.get('status')
+            logger.info(f"草稿结构化完成, 状态={struct_status}")
+            
+            if struct_status in FAILED_STATUSES:
+                total_time = time.time() - start_time
+                logger.error(f"草稿结构化失败(status={struct_status}), 停止管线, 不再调用大模型")
+                return {
+                    "status": "failed",
+                    "error": f"Draft structuring failed with status: {struct_status}",
+                    "role_mapping": all_role_mappings,
+                    "cleaned_turns": all_cleaned_turns,
+                    "combined_text": combined_text,
+                    "emr_result": ctx.emr_draft,
+                    "emr_draft": ctx.emr_draft,
+                    "verification_issues": None,
+                    "hallucination_result": None,
+                    "processing_time": total_time
+                }
         
-        hallucination_result, verification_issues, emr_final = self._run_stages_4_to_6(
+        fork_status, hallucination_result, verification_issues, emr_final = self._run_stages_4_to_6(
             ctx,
             skip_term_norm=skip_term_norm,
             skip_hallucination_check=skip_hallucination_check,
@@ -238,8 +316,29 @@ class PipelineOrchestrator:
             visit_id=visit_id
         )
         
+        if fork_status == "failed":
+            total_time = time.time() - start_time
+            logger.error(f"阶段4-6失败, 停止管线")
+            return {
+                "status": "failed",
+                "error": "Stages 4-6 failed",
+                "role_mapping": all_role_mappings,
+                "cleaned_turns": all_cleaned_turns,
+                "combined_text": combined_text,
+                "emr_result": emr_final,
+                "emr_draft": ctx.emr_draft,
+                "verification_issues": verification_issues,
+                "hallucination_result": hallucination_result,
+                "processing_time": total_time
+            }
+        
         total_time = time.time() - start_time
         logger.info(f"=== 多阶段LLM处理完成: {visit_id}, 总耗时: {total_time:.2f}秒 ===")
+        
+        llm_stats_summary = ctx.llm_stats.get_summary()
+        logger.info(f"LLM调用统计: calls={llm_stats_summary.get('total_calls')}, "
+                    f"chars={llm_stats_summary.get('total_char_count')}, "
+                    f"tokens={llm_stats_summary.get('total_tokens')}")
         
         return {
             "status": "completed",
@@ -250,7 +349,8 @@ class PipelineOrchestrator:
             "emr_draft": ctx.emr_draft,
             "verification_issues": verification_issues,
             "hallucination_result": hallucination_result,
-            "processing_time": total_time
+            "processing_time": total_time,
+            "llm_stats": llm_stats_summary
         }
     
     def process_with_fork(
@@ -311,7 +411,25 @@ class PipelineOrchestrator:
         
         logger.info("阶段2: 直接草稿生成")
         soap_result = DirectSOAPGenerationStage().execute(ctx)
-        logger.info(f"直接草稿生成完成, 状态={soap_result.get('status')}")
+        soap_status = soap_result.get('status')
+        logger.info(f"直接草稿生成完成, 状态={soap_status}")
+        
+        FAILED_STATUSES = ['llm_error', 'parse_error', 'llm_unavailable', 'debug_cancelled',
+                          'skipped', 'skipped_empty_draft', 'skipped_empty_transcript', 'skipped_empty_content']
+        if soap_status in FAILED_STATUSES:
+            total_time = time.time() - start_time
+            logger.error(f"草稿生成失败(status={soap_status}), 停止管线, 不再调用大模型")
+            return {
+                "status": "failed",
+                "error": f"Draft generation failed with status: {soap_status}",
+                "emr_raw_draft": None,
+                "emr_pre_revision": None,
+                "emr_result": None,
+                "emr_no_term_norm": None,
+                "hallucination_result": None,
+                "verification_issues": None,
+                "processing_time": total_time
+            }
         
         emr_raw_draft = copy.deepcopy(ctx.emr_draft) if ctx.emr_draft else None
         logger.info(f"保存emr_raw_draft: {type(emr_raw_draft).__name__}")
@@ -320,8 +438,24 @@ class PipelineOrchestrator:
         
         if settings.DRAFT_GENERATION_MODE == "free_text" and draft_text:
             logger.info("阶段3: 草稿结构化")
-            SoapStructuringStage().execute(ctx)
-            logger.info("草稿结构化完成")
+            struct_result = SoapStructuringStage().execute(ctx)
+            struct_status = struct_result.get('status')
+            logger.info(f"草稿结构化完成, 状态={struct_status}")
+            
+            if struct_status in FAILED_STATUSES:
+                total_time = time.time() - start_time
+                logger.error(f"草稿结构化失败(status={struct_status}), 停止管线, 不再调用大模型")
+                return {
+                    "status": "failed",
+                    "error": f"Draft structuring failed with status: {struct_status}",
+                    "emr_raw_draft": emr_raw_draft,
+                    "emr_pre_revision": None,
+                    "emr_result": None,
+                    "emr_no_term_norm": None,
+                    "hallucination_result": None,
+                    "verification_issues": None,
+                    "processing_time": total_time
+                }
         
         emr_draft_before_fork = copy.deepcopy(ctx.emr_draft) if ctx.emr_draft else {}
         combined_text_before_fork = ctx.combined_text
@@ -329,7 +463,7 @@ class PipelineOrchestrator:
         logger.info(f"保存fork前数据: emr_draft keys={list(emr_draft_before_fork.keys())[:3] if emr_draft_before_fork else 'None'}")
         
         logger.info("路径A: 完整运行阶段4-6")
-        hallucination_result, verification_issues, emr_pre_revision_raw = self._run_stages_4_to_6(
+        fork_status_a, hallucination_result, verification_issues, emr_pre_revision_raw = self._run_stages_4_to_6(
             ctx,
             skip_term_norm=False,
             skip_hallucination_check=False,
@@ -338,6 +472,23 @@ class PipelineOrchestrator:
             save_evidence=save_evidence,
             visit_id=visit_id
         )
+        
+        if fork_status_a == "failed":
+            total_time = time.time() - start_time
+            logger.error(f"路径A阶段4-6失败, 停止管线, 不执行路径B")
+            emr_pre_revision = copy.deepcopy(ctx.emr_draft) if ctx.emr_draft else None
+            emr_result = self.emr_persistence.normalize_format(emr_pre_revision_raw)
+            return {
+                "status": "failed",
+                "error": "Path A stages 4-6 failed",
+                "emr_raw_draft": emr_raw_draft,
+                "emr_pre_revision": emr_pre_revision,
+                "emr_result": emr_result,
+                "emr_no_term_norm": None,
+                "hallucination_result": hallucination_result,
+                "verification_issues": verification_issues,
+                "processing_time": total_time
+            }
         
         emr_pre_revision = copy.deepcopy(ctx.emr_draft) if ctx.emr_draft else None
         logger.info(f"保存emr_pre_revision（修订前）: {type(emr_pre_revision).__name__}")
@@ -365,7 +516,7 @@ class PipelineOrchestrator:
         ctx_fork.combined_text = combined_text_before_fork
         ctx_fork.draft_text = draft_text_before_fork
         
-        hallucination_result_b, verification_issues_b, emr_no_term_norm = self._run_stages_4_to_6(
+        fork_status_b, hallucination_result_b, verification_issues_b, emr_no_term_norm = self._run_stages_4_to_6(
             ctx_fork,
             skip_term_norm=True,
             skip_hallucination_check=False,
@@ -374,11 +525,25 @@ class PipelineOrchestrator:
             save_evidence=False,
             visit_id=""
         )
-        emr_no_term_norm = self.emr_persistence.normalize_format(emr_no_term_norm)
+        
+        if fork_status_b == "failed":
+            logger.warning(f"路径B阶段4-6失败, 但路径A已完成, 继续返回路径A结果")
+            emr_no_term_norm = None
+        
+        emr_no_term_norm = self.emr_persistence.normalize_format(emr_no_term_norm) if emr_no_term_norm else None
         logger.info(f"路径B完成: emr_no_term_norm keys={list(emr_no_term_norm.keys())[:3] if emr_no_term_norm else 'None'}")
         
         total_time = time.time() - start_time
         logger.info(f"=== 多变量Pipeline完成: {visit_id}, 总耗时: {total_time:.2f}秒 ===")
+        
+        llm_stats_summary = ctx.llm_stats.get_summary()
+        if ctx_fork.llm_stats.get_total_calls() > 0:
+            ctx.llm_stats.merge(ctx_fork.llm_stats)
+            llm_stats_summary = ctx.llm_stats.get_summary()
+        
+        logger.info(f"LLM调用统计: calls={llm_stats_summary.get('total_calls')}, "
+                    f"chars={llm_stats_summary.get('total_char_count')}, "
+                    f"tokens={llm_stats_summary.get('total_tokens')}")
         
         return {
             "status": "completed",
@@ -388,7 +553,8 @@ class PipelineOrchestrator:
             "emr_no_term_norm": emr_no_term_norm,
             "hallucination_result": hallucination_result,
             "verification_issues": verification_issues,
-            "processing_time": total_time
+            "processing_time": total_time,
+            "llm_stats": llm_stats_summary
         }
     
     def process_with_callback(
@@ -467,26 +633,53 @@ class PipelineOrchestrator:
         yield emit_progress(2, "直接草稿生成", "running", "正在基于清洗文本直接生成SOAP草稿...")
         
         soap_result = DirectSOAPGenerationStage().execute(ctx)
+        soap_status = soap_result.get('status')
+        
+        FAILED_STATUSES = ['llm_error', 'parse_error', 'llm_unavailable', 'debug_cancelled',
+                          'skipped', 'skipped_empty_draft', 'skipped_empty_transcript', 'skipped_empty_content']
+        if soap_status in FAILED_STATUSES:
+            yield emit_progress(2, "直接草稿生成", "failed", 
+                               f"草稿生成失败(status={soap_status}), 停止管线")
+            logger.error(f"草稿生成失败(status={soap_status}), 停止管线, 不再调用大模型")
+            return
         
         yield emit_progress(2, "直接草稿生成", "completed", 
-                           f"草稿生成完成，状态={soap_result.get('status')}")
+                           f"草稿生成完成，状态={soap_status}")
         
         draft_text = ctx.draft_text
         
         if settings.DRAFT_GENERATION_MODE == "free_text" and draft_text:
+            # 草稿生成后立即保存到数据库，防止刷新丢失
+            if save_evidence and visit_id:
+                # 自由文本模式下，如果emr_draft为空，创建空结构用于保存draft_text
+                if not ctx.emr_draft:
+                    ctx.emr_draft = DirectSOAPGenerationStage._empty_draft()
+                    logger.info("自由文本模式下emr_draft为空，创建空结构用于保存draft_text")
+                
+                normalized_draft = self.emr_persistence.normalize_format(ctx.emr_draft)
+                self.emr_persistence.save_emr_record(
+                    normalized_draft, 
+                    visit_id, 
+                    record_type="llm_draft",
+                    draft_text=ctx.draft_text
+                )
+                logger.info(f"已保存病历草稿到数据库: visit_id={visit_id}, record_type=llm_draft, draft_text长度={len(ctx.draft_text)}")
+            
             draft_text_event = emit_progress(2, "直接草稿生成", "completed", "草稿已就绪")
             draft_text_event["is_draft_text_ready"] = True
             draft_text_event["draft_text"] = ctx.draft_text
             logger.info(f"yield draft_text_ready事件: draft_text长度={len(ctx.draft_text)}")
             yield draft_text_event
             
+            # 自由文本模式下，也发送draft_ready事件，将草稿文本包装成EMR结构供前端显示
+            draft_event = emit_progress(2, "直接草稿生成", "completed", "草稿已就绪")
+            draft_event["is_draft_ready"] = True
+            draft_event["emr_draft"] = ctx.emr_draft
+            logger.info(f"yield draft_ready事件: emr_draft类型={type(ctx.emr_draft).__name__}")
+            yield draft_event
+            
             if ctx.skip_structuring:
                 logger.info("LLM返回JSON已解析为标准格式，跳过结构化阶段")
-                draft_event = emit_progress(2, "直接草稿生成", "completed", "结构化病历已就绪")
-                draft_event["is_draft_ready"] = True
-                draft_event["emr_draft"] = ctx.emr_draft
-                logger.info(f"yield draft_ready事件: emr_draft已就绪")
-                yield draft_event
                 
                 if stop_after_draft:
                     logger.info(f"stop_after_draft=True, 草稿阶段完成后停止, visit_id={visit_id}")
@@ -509,9 +702,29 @@ class PipelineOrchestrator:
                     return
                 
                 yield emit_progress(3, "草稿结构化", "running", "正在将自由文本草稿结构化为SOAP JSON...")
-                SoapStructuringStage().execute(ctx)
+                struct_result = SoapStructuringStage().execute(ctx)
+                struct_status = struct_result.get('status')
+                
+                FAILED_STATUSES = ['llm_error', 'parse_error', 'llm_unavailable', 'debug_cancelled',
+                                  'skipped', 'skipped_empty_draft', 'skipped_empty_transcript', 'skipped_empty_content']
+                if struct_status in FAILED_STATUSES:
+                    yield emit_progress(3, "草稿结构化", "failed", 
+                                       f"草稿结构化失败(status={struct_status}), 停止管线")
+                    logger.error(f"草稿结构化失败(status={struct_status}), 停止管线, 不再调用大模型")
+                    return
+                
                 yield emit_progress(3, "草稿结构化", "completed", "草稿结构化完成")
         else:
+            # JSON模式下草稿生成后立即保存到数据库，防止刷新丢失
+            if save_evidence and visit_id and ctx.emr_draft:
+                normalized_draft = self.emr_persistence.normalize_format(ctx.emr_draft)
+                self.emr_persistence.save_emr_record(
+                    normalized_draft, 
+                    visit_id, 
+                    record_type="llm_draft"
+                )
+                logger.info(f"已保存病历草稿到数据库: visit_id={visit_id}, record_type=llm_draft")
+            
             if stop_after_draft:
                 logger.info(f"stop_after_draft=True, JSON草稿阶段完成后停止, visit_id={visit_id}")
                 draft_event = emit_progress(2, "直接草稿生成", "completed", "草稿已就绪")
@@ -533,6 +746,12 @@ class PipelineOrchestrator:
         yield emit_progress(3, "证据溯源构建", "running", "正在为病历内容标注来源对话轮次...")
         EvidenceMappingStage().execute(ctx)
         yield emit_progress(3, "证据溯源构建", "completed", "证据溯源构建完成")
+        
+        # 证据溯源构建完成后立即保存到数据库
+        if save_evidence and visit_id:
+            normalized_emr = self.emr_persistence.normalize_format(ctx.emr_draft)
+            self.emr_persistence.save_evidence_spans_from_emr(normalized_emr, visit_id)
+            logger.info(f"证据溯源已保存到数据库: visit_id={visit_id}")
         
         hallucination_result = None
         
@@ -995,6 +1214,10 @@ C. 硬规则核查 - 确定性规则检查（部位矛盾、否定冲突等）
                 ctx.combined_text = combined_text
                 EvidenceMappingStage().execute(ctx)
                 emr_draft_after = ctx.emr_draft
+                # 证据溯源构建完成后立即保存到数据库
+                normalized_emr = self.emr_persistence.normalize_format(emr_draft_after)
+                self.emr_persistence.save_evidence_spans_from_emr(normalized_emr, visit_id)
+                logger.info(f"证据溯源已保存到数据库: visit_id={visit_id}")
             elif stage == "hallucination_check":
                 combined_text = self._format_turns(turns)
                 ctx.combined_text = combined_text

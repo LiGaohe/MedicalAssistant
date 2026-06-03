@@ -25,8 +25,52 @@ class EMRPersistence:
         for section in ["subjective", "objective", "assessment", "plan"]:
             if section not in extraction_result:
                 continue
+            
+            section_data = extraction_result[section]
+            
+            # 处理section级别的evidence_traces
+            if isinstance(section_data, dict):
+                section_evidence_traces = section_data.get("evidence_traces", [])
+                section_text = section_data.get("text", "")
+                
+                if section_evidence_traces:
+                    logger.info(f"save_evidence_spans: 处理section级别evidence_traces, section={section}, traces数={len(section_evidence_traces)}")
+                    for trace in section_evidence_traces:
+                        turn_id = trace.get("turn_id")
+                        turn_index = trace.get("turn_index")
+
+                        if turn_id is None and turn_index is not None:
+                            turn = self.db.query(TranscriptTurn).filter(
+                                TranscriptTurn.visit_id == visit_id,
+                                TranscriptTurn.turn_index == turn_index
+                            ).first()
+                            if turn:
+                                turn_id = turn.turn_id
+                                logger.debug(f"通过turn_index找到turn_id: turn_index={turn_index}, turn_id={turn_id}")
+
+                        if turn_id is None:
+                            logger.warning(f"证据溯源跳过: 无法找到对应的turn_id, section={section}, content={trace.get('content', '')[:30]}...")
+                            continue
+
+                        evidence = EvidenceSpan(
+                            visit_id=visit_id,
+                            turn_id=turn_id,
+                            field_type=section,  # 使用section名称作为field_type
+                            field_value=section_text,
+                            content=trace.get("content", ""),
+                            turn_text=trace.get("turn_text", ""),
+                            start_char=trace.get("start_char"),
+                            end_char=trace.get("end_char"),
+                            confidence=trace.get("confidence", 0.8),
+                            score=trace.get("confidence", 0.8),
+                            reasoning=f"来源: {trace.get('speaker', 'unknown')}"
+                        )
+                        self.db.add(evidence)
+                        saved_count += 1
 
             for field_name, field_data in extraction_result[section].items():
+                if field_name in ("text", "evidence_traces"):
+                    continue
                 if not isinstance(field_data, dict):
                     continue
 
@@ -86,8 +130,22 @@ class EMRPersistence:
     def save_emr_record(
         self,
         emr_result: Dict[str, Any],
-        visit_id: str
+        visit_id: str,
+        record_type: str = "llm_generated",
+        draft_text: str = None
     ) -> Optional[EMRRecord]:
+        """
+        保存病历记录到数据库
+        
+        Args:
+            emr_result: EMR JSON数据
+            visit_id: 访问ID
+            record_type: 记录类型，默认为"llm_generated"，草稿可使用"llm_draft"
+            draft_text: 草稿文本（可选）
+            
+        Returns:
+            EMRRecord对象或None（保存失败时）
+        """
         try:
             visit = self.db.query(Visit).filter(Visit.visit_id == visit_id).first()
             language = visit.language if visit and visit.language else "zh"
@@ -104,16 +162,17 @@ class EMRPersistence:
             emr_record = EMRRecord(
                 visit_id=visit_id,
                 version=new_version,
-                record_type="llm_generated",
+                record_type=record_type,
                 emr_json=emr_result,
                 evidence_mapping=None,
-                validation_errors=validation_errors
+                validation_errors=validation_errors,
+                draft_text=draft_text
             )
 
             self.db.add(emr_record)
             self.db.commit()
 
-            logger.info(f"保存病历记录成功: visit_id={visit_id}, version={new_version}, 验证评分: {validation_result.score:.2%}")
+            logger.info(f"保存病历记录成功: visit_id={visit_id}, version={new_version}, record_type={record_type}, 验证评分: {validation_result.score:.2%}")
             return emr_record
 
         except Exception as e:
@@ -136,6 +195,42 @@ class EMRPersistence:
         objective_section = dict(result.get("objective", {}))
         assessment_section = dict(result.get("assessment", {}))
         plan_section = dict(result.get("plan", {}))
+        
+        # 保留section级别的evidence_traces
+        logger.info(f"normalize_format: 原始section evidence_traces数: "
+                    f"subjective={len(subject_section.get('evidence_traces', []))}, "
+                    f"objective={len(objective_section.get('evidence_traces', []))}, "
+                    f"assessment={len(assessment_section.get('evidence_traces', []))}, "
+                    f"plan={len(plan_section.get('evidence_traces', []))}")
+
+        # 如果section只有text字段，将text内容填充到必填字段（用于验证）
+        section_text_to_fields = {
+            "subjective": ["chief_complaint", "history_present_illness"],
+            "objective": ["physical_examination", "auxiliary_examination"],
+            "assessment": ["diagnosis"],
+            "plan": ["treatment"]
+        }
+        
+        for section_data, section_name in [
+            (subject_section, "subjective"),
+            (objective_section, "objective"),
+            (assessment_section, "assessment"),
+            (plan_section, "plan")
+        ]:
+            # 检查是否只有text字段
+            has_only_text = (
+                "text" in section_data and 
+                section_data.get("text") and
+                len([k for k in section_data.keys() if k not in ("text", "evidence_traces")]) == 0
+            )
+            
+            if has_only_text:
+                text_content = section_data.get("text", "")
+                # 将text内容填充到必填字段
+                for field_name in section_text_to_fields.get(section_name, []):
+                    if field_name not in section_data:
+                        section_data[field_name] = {"value": text_content, "evidence_traces": []}
+                logger.info(f"normalize_format: section={section_name} 只有text，已填充到必填字段")
 
         for section_data, section_name in [
             (subject_section, "subjective"),
@@ -236,6 +331,33 @@ class EMRPersistence:
 
         for section_name in ["subjective", "objective", "assessment", "plan"]:
             section = emr_result.get(section_name, {})
+            
+            # 处理section级别的evidence_traces
+            section_evidence_traces = section.get("evidence_traces", [])
+            section_text = section.get("text", "")
+            
+            if section_evidence_traces:
+                logger.info(f"处理section级别evidence_traces: section={section_name}, traces数={len(section_evidence_traces)}")
+                for trace in section_evidence_traces:
+                    if not isinstance(trace, dict):
+                        logger.warning(f"Skipping non-dict trace: {type(trace)} - {trace}")
+                        continue
+
+                    evidence = EvidenceSpan(
+                        visit_id=visit_id,
+                        turn_id=trace.get("turn_id"),
+                        field_type=section_name,  # 使用section名称作为field_type
+                        field_value=section_text,
+                        content=trace.get("content", ""),
+                        turn_text=trace.get("turn_text", ""),
+                        confidence=trace.get("confidence", 0.8),
+                        score=trace.get("confidence", 0.8),
+                        reasoning=f"来源: {trace.get('speaker', 'unknown')}"
+                    )
+                    self.db.add(evidence)
+                    saved_count += 1
+            
+            # 处理字段级别的evidence_traces
             for field_name, field_data in section.items():
                 if field_name in ("text", "evidence_traces"):
                     continue

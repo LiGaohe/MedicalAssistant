@@ -21,6 +21,16 @@ class ClaimVerificationStage(PipelineStage):
 
         draft_emr = ctx.emr_draft
         combined_text = ctx.combined_text
+        
+        if not draft_emr:
+            logger.error("draft_emr为空，无法进行后置核查")
+            ctx.verification_issues = {}
+            return {"status": "skipped_empty_draft", "issues_count": 0}
+        
+        if not combined_text:
+            logger.error("combined_text为空，无法进行后置核查")
+            ctx.verification_issues = {}
+            return {"status": "skipped_empty_transcript", "issues_count": 0}
 
         draft_emr_json = json.dumps(draft_emr, ensure_ascii=False, indent=2)
 
@@ -85,6 +95,7 @@ class ClaimVerificationStage(PipelineStage):
         )
 
         return {
+            "status": "success",
             "issues": issues,
             "issues_count": total_issues,
         }
@@ -127,9 +138,11 @@ class ClaimVerificationStage(PipelineStage):
             try:
                 response = ctx.llm_service.generate(prompt)
                 logger.debug("Claim核查阶段: thinking模式已启用（默认）")
+                ctx.llm_stats.record_from_response("claim_verification", prompt, response)
                 response_text = response.text
             except Exception as e:
                 logger.error(f"Claim核查LLM调用失败: {e}")
+                ctx.llm_stats.record_call("claim_verification", len(prompt), 0, success=False, error_message=str(e))
                 return [], []
 
         parsed = parse_json_response(response_text, "Claim核查")
@@ -183,9 +196,11 @@ class ClaimVerificationStage(PipelineStage):
             try:
                 response = ctx.llm_service.generate(prompt)
                 logger.debug("Checklist核查阶段: thinking模式已启用（默认）")
+                ctx.llm_stats.record_from_response("checklist_verification", prompt, response)
                 response_text = response.text
             except Exception as e:
                 logger.error(f"Checklist核查LLM调用失败: {e}")
+                ctx.llm_stats.record_call("checklist_verification", len(prompt), 0, success=False, error_message=str(e))
                 return []
 
         parsed = parse_json_response(response_text, "Checklist核查")
@@ -334,9 +349,11 @@ class ClaimVerificationStage(PipelineStage):
             try:
                 response = ctx.llm_service.generate(prompt)
                 logger.debug("确定性核查阶段: thinking模式已启用（默认）")
+                ctx.llm_stats.record_from_response("certainty_verification", prompt, response)
                 response_text = response.text
             except Exception as e:
                 logger.error(f"确定性核查LLM调用失败: {e}")
+                ctx.llm_stats.record_call("certainty_verification", len(prompt), 0, success=False, error_message=str(e))
                 return []
 
         parsed = parse_json_response(response_text, "确定性核查")

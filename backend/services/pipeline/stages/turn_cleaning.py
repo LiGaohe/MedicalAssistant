@@ -157,9 +157,11 @@ class TurnCleaningStage(PipelineStage):
             try:
                 response = ctx.llm_service.generate(prompt, timeout=300.0, thinking_enabled=False)
                 logger.debug("转写清洗阶段: thinking模式已禁用")
+                ctx.llm_stats.record_from_response("turn_cleaning", prompt, response)
                 response_text = response.text
             except Exception as e:
                 logger.error(f"LLM调用失败: {e}")
+                ctx.llm_stats.record_call("turn_cleaning", len(prompt), 0, success=False, error_message=str(e))
                 return speaker_handler.fallback_role_annotation(segment)
 
         cleaning_result = self._parse_cleaning_response(ctx, response_text, segment, speaker_handler)

@@ -26,6 +26,7 @@ class LLMResponse:
     finish_reason: str
     raw_response: Optional[Dict[str, Any]] = None
     thinking_content: Optional[str] = None
+    actual_latency: Optional[float] = None
     
 
 class LLMAdapter(ABC):

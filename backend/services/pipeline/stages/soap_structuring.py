@@ -56,9 +56,11 @@ class SoapStructuringStage(PipelineStage):
             try:
                 response = ctx.llm_service.generate(prompt, thinking_enabled=False)
                 logger.debug("草稿结构化阶段: thinking模式已禁用")
+                ctx.llm_stats.record_from_response("soap_structuring", prompt, response)
                 response_text = response.text
             except Exception as e:
                 logger.error(f"草稿结构化LLM调用失败: {e}")
+                ctx.llm_stats.record_call("soap_structuring", len(prompt), 0, success=False, error_message=str(e))
                 empty_draft = DirectSOAPGenerationStage._empty_draft()
                 ctx.emr_draft = empty_draft
                 return {"emr_draft": empty_draft, "status": "llm_error"}

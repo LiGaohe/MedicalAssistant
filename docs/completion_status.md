@@ -1,5 +1,708 @@
 # 完成状态记录
 
+## 2026-06-03 自由文本草稿保存与显示修复
+
+### 问题
+
+1. 自由文本模式下生成的病历草稿没有保存到数据库
+2. 前端没有显示自由文本草稿内容，历史记录也没有找到该记录
+
+### 原因分析
+
+1. **草稿保存问题**：
+   - 在自由文本模式下，`DirectSOAPGenerationStage`只设置了`ctx.draft_text`，没有设置`ctx.emr_draft`
+   - orchestrator.py第651行的保存条件为`if save_evidence and visit_id and ctx.emr_draft`
+   - 由于`ctx.emr_draft`为None，保存条件不满足，草稿没有保存到数据库
+
+2. **前端显示问题**：
+   - 后端在自由文本模式下只发送`draft_text_ready`事件，不发送`draft_ready`事件
+   - 前端收到`draft_text_ready`事件后，只显示提示消息"草稿已生成"，但不显示草稿内容
+   - 前端只有`handleDraftReady`函数能显示EMR内容，但该函数需要`draft_ready`事件
+
+### 修改内容
+
+**修改文件**：
+
+1. **backend/services/pipeline/orchestrator.py**：
+   - 第651-665行：修改保存逻辑，在自由文本模式下如果`ctx.emr_draft`为空，创建空EMR结构用于保存`draft_text`
+   - 第673-683行：修改事件发送逻辑，在自由文本模式下也发送`draft_ready`事件，将草稿文本包装成EMR结构供前端显示
+
+### 技术细节
+
+1. **草稿保存逻辑修改**：
+   ```python
+   if save_evidence and visit_id:
+       # 自由文本模式下，如果emr_draft为空，创建空结构用于保存draft_text
+       if not ctx.emr_draft:
+           from .stages.direct_soap_generation import DirectSOAPGenerationStage
+           ctx.emr_draft = DirectSOAPGenerationStage._empty_draft()
+           logger.info("自由文本模式下emr_draft为空，创建空结构用于保存draft_text")
+       
+       normalized_draft = self.emr_persistence.normalize_format(ctx.emr_draft)
+       self.emr_persistence.save_emr_record(
+           normalized_draft, 
+           visit_id, 
+           record_type="llm_draft",
+           draft_text=ctx.draft_text
+       )
+   ```
+
+2. **事件发送逻辑修改**：
+   ```python
+   # 自由文本模式下，也发送draft_ready事件，将草稿文本包装成EMR结构供前端显示
+   draft_event = emit_progress(2, "直接草稿生成", "completed", "草稿已就绪")
+   draft_event["is_draft_ready"] = True
+   draft_event["emr_draft"] = ctx.emr_draft
+   yield draft_event
+   ```
+
+### 测试验证
+
+需要验证：
+1. 自由文本模式下生成的草稿是否保存到数据库
+2. 前端是否能正确显示自由文本草稿内容
+3. 历史记录中是否能找到该草稿记录
+
+---
+
+## 2026-06-03 证据溯源立即保存与草稿验证修复
+
+### 问题
+
+1. 证据溯源构建完成后没有立即保存，前端显示没有证据溯源
+2. 草稿生成后的病历验证结果错误，显示"必填字段为空"
+
+### 原因分析
+
+1. **证据溯源保存问题**：
+   - `process_with_callback`中证据溯源构建完成后（第741行），没有立即保存证据到数据库
+   - 证据溯源数据只存在于内存中的`ctx.emr_draft`，等到流程最后才保存
+   - 如果流程中途中断，证据溯源数据会丢失
+
+2. **草稿验证问题**：
+   - LLM返回的JSON格式为`{"subjective": {"text": "..."}, ...}`，只有section级别的`text`字段
+   - 验证服务期望字段级别数据（如`chief_complaint`、`diagnosis`等）
+   - `normalize_format`函数没有从`text`字段提取内容填充到必填字段
+
+### 修改内容
+
+**修改文件**：
+
+1. **backend/services/pipeline/orchestrator.py**：
+   - `process_with_callback`方法：在证据溯源构建完成后（第741行），立即调用`save_evidence_spans_from_emr`保存证据到数据库
+   - `run_postprocess_stage`方法：在`evidence_mapping`阶段执行后，调用`save_evidence_spans_from_emr`保存证据到数据库（用于手动触发场景）
+
+2. **backend/services/pipeline/emr_persistence.py**：
+   - `normalize_format`方法：添加逻辑，当section只有`text`字段时，将`text`内容填充到必填字段（用于验证通过）
+
+### 测试验证
+
+重新运行测试：
+1. 证据溯源构建完成后立即保存，前端应显示证据溯源
+2. 草稿生成后验证结果正确，不再显示"必填字段为空"
+
+---
+
+## 2026-06-03 病历草稿持久化保存
+
+### 问题
+
+偶尔会出现生成了病历草稿但前端不显示的情况，并且刷新后生成的病历草稿在历史记录就找不到了。
+
+### 原因分析
+
+1. 草稿生成后没有立即保存到数据库，只有在整个流程完成后才保存
+2. 如果流程中断（前端刷新、连接断开、stop_after_draft=True），草稿就会丢失
+3. SSE流式处理中，draft_ready事件发送草稿给前端，但没有持久化保存
+
+### 修改内容
+
+**修改文件**：
+
+1. **backend/services/pipeline/emr_persistence.py**：
+   - `save_emr_record`方法：添加可选参数`record_type`和`draft_text`
+   - 允许指定记录类型（默认"llm_generated"，草稿使用"llm_draft"）
+   - 支持保存草稿文本内容
+
+2. **backend/services/pipeline/orchestrator.py**：
+   - `process_transcript`方法：草稿生成后立即保存草稿到数据库（record_type="llm_draft"）
+   - `process_with_callback`方法：自由文本模式和JSON模式下，草稿生成后立即保存草稿
+   - `process_with_fork`方法：草稿生成后立即保存草稿到数据库
+
+### 效果
+
+- 草稿生成后立即保存到数据库，防止刷新丢失
+- 前端刷新后可以从历史记录中找到草稿
+- 最终版本保存时会创建新版本（record_type="llm_generated"）
+
+---
+
+## 2026-06-03 证据溯源持久化修复
+
+### 问题
+
+证据溯源构建阶段成功分配25条trace到section级别，但查询返回0条证据。
+
+### 原因分析
+
+1. evidence_mapping阶段将trace分配到section级别的`evidence_traces`（如`section["evidence_traces"]`）
+2. emr_persistence.py中的`save_evidence_spans`和`save_evidence_spans_from_emr`函数只处理字段级别的trace
+3. 两个函数都跳过了`"evidence_traces"`字段，导致section级别的trace未被保存到数据库
+
+### 修改内容
+
+**修改文件**：
+
+1. **backend/services/pipeline/stages/evidence_mapping.py**：
+   - 添加调试日志输出turns列表长度、turn_index列表、turn_map keys、source_indices
+   - 修复total_traces计算逻辑，包含section级别的trace
+
+2. **backend/services/pipeline/emr_persistence.py**：
+   - `save_evidence_spans`函数：添加处理section级别evidence_traces的逻辑
+   - `save_evidence_spans_from_emr`函数：添加处理section级别evidence_traces的逻辑
+   - section级别的trace使用section名称作为field_type
+
+### 测试验证
+
+重新运行测试，确认证据溯源能正确保存到数据库。
+
+---
+
+## 2026-06-03 计时方式修复
+
+### 问题
+
+延迟数据异常高，原因是计时方式问题：
+- LLM API因限额（429错误）重试时，重试等待时间也被计入elapsed_seconds
+- 导致延迟数据包含重试等待时间，不能反映实际LLM调用耗时
+
+### 原因分析
+
+1. openai_compatible_adapter.py中重试逻辑使用指数退避策略，等待时间被计入elapsed_seconds
+2. run_full_benchmark.py使用time.time()计算elapsed_seconds，包含所有等待时间
+
+### 修改内容
+
+**修改文件**：
+
+1. **backend/services/llm/base.py**：
+   - 在LLMResponse中添加actual_latency字段，记录实际LLM调用时间（不含重试等待）
+
+2. **backend/services/llm/openai_compatible_adapter.py**：
+   - 在generate方法中添加total_actual_latency累积变量
+   - 每次调用前记录call_start时间，调用后计算call_elapsed
+   - 累积所有调用的actual_latency（不含sleep等待）
+   - 在返回LLMResponse时包含actual_latency
+
+3. **backend/services/pipeline/llm_stats_collector.py**：
+   - 在LLMCallRecord中添加actual_latency字段
+   - 在record_call方法中添加actual_latency参数
+   - 在record_from_response方法中从response获取actual_latency
+   - 添加get_total_actual_latency方法
+   - 在get_stage_breakdown中添加total_latency统计
+   - 在get_summary中添加total_actual_latency字段
+
+4. **scripts/run_full_benchmark.py**：
+   - 修改_compute_llm_stats_for_config方法，返回三个值：(llm_call_count, char_count, actual_latency)
+   - 使用LLM统计中的total_actual_latency作为elapsed_seconds
+   - 删除错误的重复main()函数代码段
+
+### 统计数据结构更新
+
+```python
+{
+    "total_calls": int,
+    "total_char_count": int,
+    "total_tokens": int,
+    "prompt_tokens": int,
+    "completion_tokens": int,
+    "total_actual_latency": float,  # 新增：实际LLM调用时间（不含重试等待）
+    "stage_breakdown": {
+        "stage_name": {
+            "call_count": int,
+            "total_chars": int,
+            "total_tokens": int,
+            "total_latency": float  # 新增：阶段实际调用时间
+        }
+    }
+}
+```
+
+---
+
+## 2026-06-03 run_multi_variant LLM统计修复
+
+### 问题
+
+run_multi_variant方法中，只有`full`配置记录LLM调用次数，其他配置都被硬编码为0：
+```python
+llm_call_count=llm_call_count if config_key == "full" else 0,
+char_count=char_count if config_key == "full" else 0,
+```
+
+### 原因分析
+
+1. 不同配置使用不同阶段的EMR，应该根据阶段范围计算LLM统计
+2. process_transcript方法未返回LLM统计，导致simplified配置无法获取统计
+
+### 修改内容
+
+**修改文件**：
+
+1. **scripts/run_full_benchmark.py**：
+   - 新增`_compute_llm_stats_for_config`方法，根据配置对应的阶段范围计算LLM统计
+   - 定义配置阶段映射：
+     - end_to_end: 阶段1-2 (turn_cleaning, draft_generation)
+     - no_verification: 阶段1-5 (不含verification)
+     - no_field_revision: 阶段1-5 (不含field_revision)
+     - full/standard/no_hallucination/no_term_norm: 阶段1-6完整
+     - simplified: 独立管线
+   - 修改_build_jsonl_entry调用，使用计算后的LLM统计
+   - 修改_save_benchmark_run调用，使用计算后的LLM统计
+
+2. **backend/services/pipeline/orchestrator.py**：
+   - 修改process_transcript方法，返回LLM调用统计汇总
+   - 添加llm_stats字段到返回结果
+
+### 配置阶段映射逻辑
+
+```python
+CONFIG_STAGE_GROUPS = {
+    "end_to_end": ["turn_cleaning", "draft_generation_free_text", "draft_generation_json"],
+    "no_verification": [...阶段1-5的stage列表...],
+    "no_field_revision": [...阶段1-5的stage列表...],
+    "full": None,  # 使用完整统计
+    "standard": None,
+    "no_hallucination": None,
+    "no_term_norm": None,
+    "simplified": None  # 从独立管线结果获取
+}
+```
+
+---
+
+## 2026-06-02 LLM调用统计修复
+
+### 问题
+
+数据库内存在异常样本：
+
+1. 端到端管线延迟异常高（比其他管线还高）
+2. 总LLM调用次数为0
+3. 字符消耗、Token消耗未正确记录
+
+### 原因分析
+
+1. 各Pipeline Stage未记录LLM调用统计
+2. PipelineContext缺少统计收集字段
+3. run_multi_variant方法硬编码llm_call_count=0
+
+### 修改内容
+
+**新增文件**：
+
+1. **backend/services/pipeline/llm_stats_collector.py**：
+   - 创建LLMCallRecord数据类，记录每次LLM调用的详细信息
+   - 创建LLMStatsCollector收集器，统一管理LLM调用记录
+   - 实现record_from_response方法，从LLM响应中提取统计信息
+   - 实现get_summary方法，返回统计汇总
+
+**修改文件**：
+
+1. **backend/services/pipeline/base.py**：
+   - 添加llm_stats字段，初始化LLMStatsCollector实例
+
+2. **backend/services/pipeline/stages/direct_soap_generation.py**：
+   - 在自由文本草稿生成阶段添加LLM调用统计记录
+   - 处理成功/失败场景
+
+3. **backend/services/pipeline/stages/claim_verification.py**：
+   - 在Claim核查、Checklist核查和确定性核查阶段添加统计记录
+
+4. **backend/services/pipeline/stages/field_revision.py**：
+   - 在字段级修订阶段添加LLM调用统计记录
+
+5. **backend/services/pipeline/stages/evidence_mapping.py**：
+   - 在证据溯源构建阶段添加LLM调用统计记录
+
+6. **backend/services/pipeline/stages/soap_structuring.py**：
+   - 在草稿结构化阶段添加LLM调用统计记录
+
+7. **backend/services/pipeline/stages/hallucination_check.py**：
+   - 在幻觉检查阶段添加LLM调用统计记录
+
+8. **backend/services/pipeline/stages/verification.py**：
+   - 在核查修订阶段添加LLM调用统计记录
+
+9. **backend/services/pipeline/stages/turn_cleaning.py**：
+   - 在转写清洗阶段添加LLM调用统计记录
+
+10. **backend/services/pipeline/stages/fact_extraction.py**：
+    - 在事实抽取阶段添加LLM调用统计记录
+
+11. **backend/services/pipeline/stages/fact_consolidation.py**：
+    - 在事实收束阶段添加LLM调用统计记录
+
+12. **backend/services/pipeline/stages/soap_generation.py**：
+    - 在SO生成、AP合并生成、Assessment生成、Plan生成阶段添加LLM调用统计记录
+
+13. **backend/services/pipeline/orchestrator.py**：
+    - 修改process_with_fork方法，返回LLM调用统计汇总
+    - 合并路径A和路径B的LLM调用统计
+
+14. **scripts/run_full_benchmark.py**：
+    - 修改run_multi_variant方法，从fork_result中获取LLM调用统计
+    - 修改_build_jsonl_entry调用，传递正确的llm_call_count和char_count
+    - 修改_save_benchmark_run调用，传递正确的统计数据
+
+### 统计数据结构
+
+```python
+{
+    "total_calls": int,           # 总调用次数
+    "total_char_count": int,      # 总字符消耗
+    "total_tokens": int,          # 总Token消耗
+    "prompt_tokens": int,         # Prompt Token消耗
+    "completion_tokens": int,     # Completion Token消耗
+    "stage_breakdown": {          # 各阶段统计
+        "stage_name": {
+            "call_count": int,
+            "total_chars": int,
+            "total_tokens": int
+        }
+    }
+}
+```
+
+### 后续修复
+
+发现保存中间结果时未传递llm_call_count和char_count参数，已修复：
+- 修改_save_benchmark_run调用，添加llm_call_count和char_count参数
+
+发现key_facts提取失败时未停止处理，已修复：
+- 在key_facts提取失败时抛出RuntimeError，停止整个样本的处理
+- 避免在LLM调用失败（如429错误）后继续进行评估
+
+发现simplified模式"没有找到对话轮次"问题，已修复：
+- 当intermediate_results存在时，visit_id可能是一个新的visit_id（没有turns记录）
+- 在运行simplified模式前检查turns是否存在，如果不存在则重新创建或跳过
+
+---
+
+## 2026-06-02 失败时保存中间结果并支持断点续跑
+
+### 问题
+
+当实验脚本遇到429错误（token plan limit exhausted）导致管线失败时：
+
+1. 失败样本不保存任何数据到数据库
+2. 下次运行需要从头开始，浪费已完成的LLM调用
+3. 无法从失败点恢复，必须重新运行整个管线
+
+### 修改内容
+
+**修改文件**：
+
+1. **scripts/run_full_benchmark.py**：
+   - 修改 `run_multi_variant()` 方法：
+     - 在 `fork_status != "completed"` 时，先保存已有的中间结果到数据库（状态为 "failed"）
+     - 然后抛出 `RuntimeError`，停止当前样本的处理
+     - 下次运行时，`_check_intermediate_results()` 会检查状态，如果为 "failed" 则返回 None，重新运行 process_with_fork
+   
+   - 修改 `_check_intermediate_results()` 方法：
+     - 添加状态检查：如果 `existing.status == "failed"`，返回 None
+     - 添加完整性检查：如果 `emr_result` 为空，返回 None
+     - 只有当状态为 "completed" 且 `emr_result` 不为空时，才返回中间结果
+
+### 失败处理流程
+
+```
+第一次运行：
+process_with_fork失败 → 保存中间结果（status="failed"）→ 抛出RuntimeError → 停止该样本
+
+第二次运行：
+_check_intermediate_results() → 发现status="failed" → 返回None → 重新运行process_with_fork
+```
+
+### 注意事项
+
+如果失败原因是429错误（token plan limit exhausted），需要：
+
+1. 等待一段时间后再运行（等待API配额恢复）
+2. 或使用不同的API密钥
+3. 或调整实验参数（减少并发请求、增加请求间隔）
+
+代码层面无法解决API配额问题，需要用户手动处理。
+
+---
+
+## 2026-06-02 管线失败状态传播机制修复
+
+### 问题
+
+管线在阶段4-6失败时，未正确传播失败状态，导致：
+
+1. 空内容的EMR被标记为 `status: "completed"`
+2. 空内容被保存到数据库
+3. 后续评估使用空内容进行计算，产生无效结果
+
+### 修改内容
+
+**修改文件**：
+
+1. **backend/services/pipeline/orchestrator.py**：
+   - 修改 `_run_stages_4_to_6()` 方法：
+     - 返回类型从 `Tuple[Optional[Dict], Optional[Dict], Dict]` 改为 `Tuple[str, Optional[Dict], Optional[Dict], Dict]`
+     - 新增返回值 `status`：`"completed"` 或 `"failed"`
+     - 阶段4/5/6失败时返回 `"failed"` 状态
+   - 修改 `process_transcript()` 方法：
+     - 检查 `_run_stages_4_to_6()` 返回状态
+     - 失败时返回 `{"status": "failed", ...}`，停止后续评估
+   - 修改 `process_with_fork()` 方法：
+     - 路径A失败时返回 `{"status": "failed", ...}`，不执行路径B
+     - 路径B失败时警告，但路径A已完成，继续返回路径A结果
+
+2. **scripts/run_full_benchmark.py**：
+   - 修改 `run_multi_variant()` 方法：
+     - `fork_status != "completed"` 时抛出 `RuntimeError`，停止该样本评估
+     - 失败样本不保存到数据库
+     - 移除"失败但保存中间结果"的逻辑
+
+### 失败处理流程
+
+```
+管线失败处理：
+阶段2失败 → 返回 {"status": "failed"} → 停止管线 → 不保存到数据库
+阶段3失败 → 返回 {"status": "failed"} → 停止管线 → 不保存到数据库
+阶段4失败 → 返回 {"status": "failed"} → 停止管线 → 不保存到数据库
+阶段5失败 → 返回 {"status": "failed"} → 停止管线 → 不保存到数据库
+阶段6失败 → 返回 {"status": "failed"} → 停止管线 → 不保存到数据库
+
+量化评估脚本：
+fork失败 → 抛出 RuntimeError → 停止该样本评估 → 不保存到数据库
+```
+
+### 保留 `_is_emr_empty()` 的原因
+
+虽然管线现在正确处理空内容，但 `_is_emr_empty()` 方法仍需保留：
+
+1. **复用旧数据时检查**：数据库中可能存在旧数据（修复前保存的空内容）
+2. **防止无效数据污染**：确保只复用有效的中间结果
+
+---
+
+## 2026-06-02 量化评估中间结果持久化与复用机制
+
+### 问题
+
+量化评估模块的中间结果（emr_raw_draft、emr_pre_revision、key_facts）未持久化保存，导致：
+
+1. 阶段失败时，已生成的中间结果被丢弃，无法复用
+2. 重新运行实验时，需要重新生成所有中间结果，浪费LLM调用资源
+3. 无法从失败点恢复，必须从头运行整个管线
+
+### 修改内容
+
+**修改文件**：
+
+1. **backend/models/benchmark.py**：
+   - 在`BenchmarkRun`模型添加字段：
+     - `emr_raw_draft`：阶段2后的原始草稿
+     - `emr_pre_revision`：阶段5前的修订前EMR
+     - `key_facts`：关键事实提取结果
+   - 用于持久化保存中间结果，支持跨运行复用
+
+2. **scripts/run_full_benchmark.py**：
+   - 添加`_is_emr_empty()`方法：检查EMR内容是否为空（空内容不保存）
+   - 添加`_check_intermediate_results()`方法：从数据库读取已有中间结果
+   - 修改`_save_benchmark_run()`方法：支持保存中间结果字段
+   - 修改`_build_jsonl_entry()`方法：支持输出中间结果（可选）
+   - 修改`run_multi_variant()`方法：
+     - 在处理样本前检查数据库中是否有中间结果
+     - 如果有中间结果，直接复用，跳过process_with_fork
+     - 如果没有，运行process_with_fork后立即保存中间结果
+     - 失败时也保存已有的中间结果，不丢弃
+     - key_facts提取后保存到数据库，支持跨配置复用
+
+### 中间结果复用流程
+
+```
+样本处理流程：
+1. 检查数据库 → 是否已有中间结果？
+   - 有 → 直接复用，跳过阶段1-6
+   - 无 → 运行process_with_fork，保存中间结果
+
+2. 检查数据库 → 是否已有key_facts？
+   - 有 → 直接复用
+   - 无 → 提取并保存
+
+3. 即使某阶段失败，已保存的中间结果仍可被其他配置复用
+```
+
+### 空内容检查逻辑
+
+空内容EMR不保存到数据库，避免无效数据污染：
+
+```python
+def _is_emr_empty(self, emr: Optional[Dict]) -> bool:
+    # 检查所有SOAP section是否有非空内容
+    # 空内容返回True，不保存
+    # 有内容返回False，保存
+```
+
+### 失败时保存机制
+
+即使process_with_fork失败，也会保存已生成的中间结果：
+
+```python
+self._save_benchmark_run(
+    benchmark_db,
+    sample_id=sample_id,
+    config_key="full",
+    status=fork_status,  # 可能是 "failed"
+    emr_raw_draft=emr_raw_draft,  # 已生成的草稿
+    emr_pre_revision=emr_pre_revision,  # 已生成的修订前EMR
+    error_message=fork_result.get("error")
+)
+```
+
+### 数据库字段新增
+
+| 字段 | 类型 | 说明 | 保存时机 |
+|------|------|------|---------|
+| `emr_raw_draft` | JSON | 阶段2后的原始草稿 | process_with_fork完成后 |
+| `emr_pre_revision` | JSON | 阶段5前的修订前EMR | process_with_fork完成后 |
+| `key_facts` | JSON | 关键事实提取结果 | key_facts提取完成后 |
+
+### 数据库迁移
+
+使用迁移脚本安全添加新字段，不删除现有数据：
+
+```bash
+python scripts/migrate_benchmark_db.py
+```
+
+迁移脚本功能：
+
+- 检查列是否已存在，避免重复添加
+- 使用 `ALTER TABLE` 添加新列，保留现有数据
+- 显示迁移前后数据记录数
+
+迁移结果（2026-06-02）：
+
+```
+已添加列 emr_raw_draft 到表 benchmark_runs
+已添加列 emr_pre_revision 到表 benchmark_runs
+已添加列 key_facts 到表 benchmark_runs
+迁移完成，添加了 3 个新列
+表 benchmark_runs 现有数据: 11 条记录
+```
+
+### 复用效果
+
+- **减少LLM调用**：已有中间结果的样本直接复用，不重新调用LLM
+- **提高容错性**：阶段失败时，已生成的中间结果仍可被其他配置使用
+- **支持恢复**：重新运行实验时，可从数据库读取已有结果，跳过已完成的阶段
+
+## 2026-06-02 管线异常情况检查逻辑完善
+
+### 问题
+
+管线在出现异常情况（空内容、空输入）时继续执行，浪费LLM调用资源，产出质量极低的EMR。
+
+### 修改内容
+
+**修改文件**：
+
+1. **orchestrator.py**：
+   - 扩展`FAILED_STATUSES`列表，添加`skipped`, `skipped_empty_draft`, `skipped_empty_transcript`, `skipped_empty_content`状态
+   - 在草稿生成、草稿结构化、幻觉检查、后置核查、字段修订阶段添加失败检查逻辑
+   - 失败时立即停止管线，返回`status="failed"`，不再调用大模型
+
+2. **claim_verification.py**：
+   - 添加空输入检查：检查`draft_emr`和`combined_text`是否为空
+   - 添加`status`字段返回：成功时返回`status="success"`，空输入时返回`status="skipped_empty_draft"`或`status="skipped_empty_transcript"`
+
+3. **field_revision.py**：
+   - 添加空输入检查：检查`draft_emr`是否为空
+   - 添加`status`字段返回：成功时返回`status="success"`，空输入时返回`status="skipped_empty_draft"`
+
+### 失败状态定义
+
+```python
+FAILED_STATUSES = ['llm_error', 'parse_error', 'llm_unavailable', 'debug_cancelled',
+                  'skipped', 'skipped_empty_draft', 'skipped_empty_transcript', 'skipped_empty_content']
+```
+
+### 异常情况处理流程
+
+| 阶段 | 异常情况 | 失败状态 | 处理方式 |
+|------|---------|---------|---------|
+| **草稿生成** | combined_text为空 | `skipped` | 立即停止管线 |
+| **草稿结构化** | draft_text为空 | `skipped` | 立即停止管线 |
+| **幻觉检查** | draft_emr为空 | `skipped_empty_draft` | 立即停止管线 |
+| **幻觉检查** | combined_text为空 | `skipped_empty_transcript` | 立即停止管线 |
+| **幻觉检查** | emr_content为空 | `skipped_empty_content` | 立即停止管线 |
+| **后置核查** | draft_emr为空 | `skipped_empty_draft` | 立即停止管线 |
+| **后置核查** | combined_text为空 | `skipped_empty_transcript` | 立即停止管线 |
+| **字段修订** | draft_emr为空 | `skipped_empty_draft` | 立即停止管线 |
+
+### 日志输出示例
+
+失败时会记录错误日志：
+
+```
+草稿生成失败(status=skipped), 停止管线, 不再调用大模型
+幻觉检查失败(status=skipped_empty_draft), 停止管线, 不再调用大模型
+后置核查失败(status=skipped_empty_transcript), 停止管线, 不再调用大模型
+字段修订失败(status=skipped_empty_draft), 停止管线, 不再调用大模型
+```
+
+## 2026-06-02 管线失败检查逻辑添加
+
+### 问题
+
+管线在草稿生成失败后继续执行后续阶段，产出质量极低的EMR（空草稿 + schema补充的占位值），浪费LLM调用资源。
+
+### 修改内容
+
+**文件**：[orchestrator.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/orchestrator.py)
+
+1. **process_transcript 方法**（第207-226行）：
+   - 添加草稿生成失败检查：检查 `soap_status` 是否为失败状态（`llm_error`, `parse_error`, `llm_unavailable`, `debug_cancelled`）
+   - 失败时立即停止管线，返回 `status="failed"`，不再调用大模型
+   - 添加草稿结构化失败检查：检查 `struct_status` 是否为失败状态
+
+2. **process_with_fork 方法**（第349-391行）：
+   - 添加草稿生成失败检查：失败时立即停止管线，返回 `status="failed"`
+   - 添加草稿结构化失败检查：失败时立即停止管线
+
+3. **process_with_callback 方法**（第538-595行）：
+   - 添加草稿生成失败检查：失败时 yield `status="failed"` 进度事件，停止管线
+   - 添加草稿结构化失败检查：失败时 yield `status="failed"` 进度事件，停止管线
+
+### 失败状态定义
+
+```python
+FAILED_STATUSES = ['llm_error', 'parse_error', 'llm_unavailable', 'debug_cancelled']
+```
+
+### 失败处理流程
+
+| 阶段 | 失败状态 | 处理方式 |
+|------|---------|---------|
+| **草稿生成** | `llm_error`, `parse_error`, `llm_unavailable`, `debug_cancelled` | 立即停止管线，返回 `status="failed"` |
+| **草稿结构化** | `llm_error`, `parse_error`, `llm_unavailable`, `debug_cancelled` | 立即停止管线，返回 `status="failed"` |
+
+### 日志输出
+
+失败时会记录错误日志：
+
+```
+草稿生成失败(status=llm_error), 停止管线, 不再调用大模型
+草稿结构化失败(status=parse_error), 停止管线, 不再调用大模型
+```
+
 ## 2026-06-01 run_multi_variant 去重逻辑添加
 
 ### 问题

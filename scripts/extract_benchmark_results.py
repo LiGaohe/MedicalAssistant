@@ -221,6 +221,14 @@ class BenchmarkResultExtractor:
             if has_token_data:
                 sample_tokens[run.id] = run_total_tokens
 
+        # 如果 BenchmarkLLMCall 没有 token 数据，使用 BenchmarkRun.token_count 作为备选
+        run_token_counts = []
+        for run in success_runs:
+            if run.id not in sample_tokens and run.token_count and run.token_count > 0:
+                total_tokens_list.append(run.token_count)
+                run_token_counts.append(run.token_count)
+                sample_tokens[run.id] = run.token_count
+
         if total_tokens_list:
             metrics["total_tokens"] = sum(total_tokens_list)
             metrics["avg_tokens_per_call"] = statistics.mean(total_tokens_list)

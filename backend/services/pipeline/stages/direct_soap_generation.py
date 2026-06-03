@@ -64,9 +64,11 @@ class DirectSOAPGenerationStage(PipelineStage):
             try:
                 response = ctx.llm_service.generate(prompt, thinking_enabled=False)
                 logger.debug("自由文本草稿生成阶段: thinking模式已禁用")
+                ctx.llm_stats.record_from_response("draft_generation_free_text", prompt, response)
                 response_text = response.text
             except Exception as e:
                 logger.error(f"自由文本草稿生成LLM调用失败: {e}")
+                ctx.llm_stats.record_call("draft_generation_free_text", len(prompt), 0, success=False, error_message=str(e))
                 ctx.draft_text = ""
                 ctx.emr_draft = self._empty_draft()
                 return {"draft_text": "", "emr_draft": self._empty_draft(), "status": "llm_error"}
@@ -158,9 +160,11 @@ class DirectSOAPGenerationStage(PipelineStage):
             try:
                 response = ctx.llm_service.generate(prompt, thinking_enabled=False)
                 logger.debug("直接草稿生成阶段: thinking模式已禁用")
+                ctx.llm_stats.record_from_response("draft_generation_json", prompt, response)
                 response_text = response.text
             except Exception as e:
                 logger.error(f"直接草稿生成LLM调用失败: {e}")
+                ctx.llm_stats.record_call("draft_generation_json", len(prompt), 0, success=False, error_message=str(e))
                 empty_draft = self._empty_draft()
                 ctx.emr_draft = empty_draft
                 return {"emr_draft": empty_draft, "status": "llm_error"}

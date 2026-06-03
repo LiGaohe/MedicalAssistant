@@ -72,9 +72,11 @@ class FactExtractionStage(PipelineStage):
             try:
                 response = ctx.llm_service.generate(prompt, thinking_enabled=False)
                 logger.debug("事实抽取阶段: thinking模式已禁用")
+                ctx.llm_stats.record_from_response("fact_extraction", prompt, response)
                 response_text = response.text
             except Exception as e:
                 logger.error(f"事实抽取LLM调用失败: {e}")
+                ctx.llm_stats.record_call("fact_extraction", len(prompt), 0, success=False, error_message=str(e))
                 return {"facts": [], "fact_count": 0}
 
         try:

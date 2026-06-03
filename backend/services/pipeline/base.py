@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
 from sqlalchemy.orm import Session
+from .llm_stats_collector import LLMStatsCollector
 
 
 @dataclass
@@ -29,6 +30,7 @@ class PipelineContext:
     skip_hallucination_check: bool = False
     skip_structuring: bool = False
     stop_after_draft: bool = True
+    llm_stats: LLMStatsCollector = field(default_factory=LLMStatsCollector)
 
 
 class PipelineStage(ABC):

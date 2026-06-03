@@ -58,9 +58,11 @@ class VerificationStage(PipelineStage):
             try:
                 response = ctx.llm_service.generate(prompt)
                 logger.debug("核查修订阶段: thinking模式已启用（问题判断）")
+                ctx.llm_stats.record_from_response("verification", prompt, response)
                 response_text = response.text
             except Exception as e:
                 logger.error(f"核查修订LLM调用失败: {e}")
+                ctx.llm_stats.record_call("verification", len(prompt), 0, success=False, error_message=str(e))
                 result = {"issues": {}, "soap_final": draft_emr}
                 ctx.verification_result = result
                 return result

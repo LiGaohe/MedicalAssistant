@@ -51,9 +51,11 @@ class FactConsolidationStage(PipelineStage):
             try:
                 response = ctx.llm_service.generate(prompt, timeout=300.0, thinking_enabled=False)
                 logger.debug("事实收束阶段: thinking模式已禁用")
+                ctx.llm_stats.record_from_response("fact_consolidation", prompt, response)
                 response_text = response.text
             except Exception as e:
                 logger.error(f"事实收束LLM调用失败: {e}")
+                ctx.llm_stats.record_call("fact_consolidation", len(prompt), 0, success=False, error_message=str(e))
                 result = {"merged_count": 0, "conflict_count": 0, "resolved_count": 0, "final_fact_count": len(fact_records)}
                 ctx.consolidation_result = result
                 return result
