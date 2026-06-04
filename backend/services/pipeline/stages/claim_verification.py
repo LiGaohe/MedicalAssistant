@@ -4,13 +4,17 @@ import time
 from typing import Dict, Any, List
 
 from ..base import PipelineContext, PipelineStage
-from ..utils import parse_json_response
+from ..utils import parse_json_response, extract_section_fields, collect_turn_indices, build_section_transcript
 from ..debug_interactor import DebugInteractor
 from ....utils.logger import logger
 
 
 class ClaimVerificationStage(PipelineStage):
-    """后置核查阶段：对SOAP草稿进行Claim核查、Checklist核查和硬规则核查。"""
+    """后置核查阶段：对SOAP草稿进行Claim核查、Checklist核查和硬规则核查。
+    
+    如果幻觉检查阶段已识别 unsupported_facts，则将其转换为 unsupported_claims，
+    避免重复检查 A 和 P 部分的事实。
+    """
 
     def stage_name(self) -> str:
         return "后置核查"
@@ -39,11 +43,46 @@ class ClaimVerificationStage(PipelineStage):
         missing_items: List[Dict] = []
         hard_rule_violations: List[Dict] = []
 
+        # ---- 从幻觉检查结果中提取预识别的 unsupported_facts ----
+        preidentified_unsupported: List[Dict] = []
+        hallucination_result = ctx.hallucination_result
+        if hallucination_result and hallucination_result.get("unsupported_facts"):
+            all_unsupported_facts = hallucination_result.get("unsupported_facts", [])
+            # 只提取 A 和 P 部分的 unsupported_facts（Claim核查只检查这两个部分）
+            ap_sections = ["assessment", "plan"]
+            preidentified_unsupported = [
+                fact for fact in all_unsupported_facts
+                if fact.get("section") in ap_sections
+            ]
+            if preidentified_unsupported:
+                logger.info(
+                    f"从幻觉检查结果中提取 {len(preidentified_unsupported)} 条 "
+                    f"A/P部分的预识别unsupported事实，将跳过重复检查"
+                )
+                # 转换为 unsupported_claims 格式
+                for fact in preidentified_unsupported:
+                    unsupported_claims.append({
+                        "claim_text": fact.get("fact", ""),
+                        "soap_section": "A" if fact.get("section") == "assessment" else "P",
+                        "soap_field": fact.get("section", ""),
+                        "verdict": "unsupported",
+                        "evidence_text": "",
+                        "reasoning": fact.get("reasoning", "幻觉检查阶段已识别为无依据"),
+                        "source": "hallucination_check",  # 标记来源
+                    })
+
         # ---- 步骤A: Claim核查 ----
         logger.info("后置核查 - 步骤A: Claim核查")
-        unsupported_claims, not_addressed_claims = self._step_claim_verification(
-            ctx, combined_text, draft_emr_json
+        # 裁剪转写：只发送 A/P 相关对话轮次
+        ap_transcript = self._crop_transcript_for_sections(
+            ctx, draft_emr, ["assessment", "plan"], "Claim核查"
         )
+        new_unsupported, new_not_addressed = self._step_claim_verification(
+            ctx, ap_transcript, draft_emr_json, preidentified_unsupported
+        )
+        # 合并结果（排除预识别的）
+        unsupported_claims.extend(new_unsupported)
+        not_addressed_claims = new_not_addressed
 
         # ---- 步骤B: Checklist核查 ----
         logger.info("后置核查 - 步骤B: Checklist核查")
@@ -60,8 +99,12 @@ class ClaimVerificationStage(PipelineStage):
 
         # ---- 步骤D: 确定性核查 ----
         logger.info("后置核查 - 步骤D: 确定性核查")
+        # 裁剪转写：只发送 A 相关对话轮次
+        certainty_transcript = self._crop_transcript_for_sections(
+            ctx, draft_emr, ["assessment"], "确定性核查"
+        )
         certainty_errors = self._step_certainty_verification(
-            ctx, combined_text, draft_emr_json
+            ctx, certainty_transcript, draft_emr_json
         )
         logger.info(
             f"确定性核查完成: 发现 {len(certainty_errors)} 条确定性错误"
@@ -106,13 +149,38 @@ class ClaimVerificationStage(PipelineStage):
         ctx: PipelineContext,
         transcript: str,
         draft_emr_json: str,
+        preidentified_unsupported: List[Dict] = None,
     ) -> tuple:
-        """调用LLM进行逐claim核查，返回 (unsupported_claims, not_addressed_claims)"""
+        """调用LLM进行逐claim核查，返回 (unsupported_claims, not_addressed_claims)
+        
+        Args:
+            ctx: Pipeline上下文
+            transcript: 对话文本
+            draft_emr_json: SOAP草稿JSON
+            preidentified_unsupported: 预识别的unsupported事实列表（来自幻觉检查）
+        
+        Returns:
+            (unsupported_claims, not_addressed_claims): 新发现的unsupported和not_addressed声明
+        """
+        preidentified_unsupported = preidentified_unsupported or []
+        
+        # 构建预识别事实的文本列表（用于提示词）
+        preidentified_texts = [
+            fact.get("fact", "") for fact in preidentified_unsupported if fact.get("fact")
+        ]
+        
+        # 格式化预识别事实：如果有则列出，否则显示"无"
+        if preidentified_texts:
+            preidentified_str = "\n".join([f"- {text}" for text in preidentified_texts])
+        else:
+            preidentified_str = "无"
+        
         try:
             prompt = ctx.prompt_manager.render(
                 "claim_verification",
                 transcript=transcript,
                 draft_emr=draft_emr_json,
+                preidentified_unsupported=preidentified_str,
             )
             logger.debug(f"Claim核查提示词长度: {len(prompt)} 字符")
         except Exception as e:
@@ -136,8 +204,8 @@ class ClaimVerificationStage(PipelineStage):
                 return [], []
 
             try:
-                response = ctx.llm_service.generate(prompt)
-                logger.debug("Claim核查阶段: thinking模式已启用（默认）")
+                response = ctx.llm_service.generate_stream_to_response(prompt)
+                logger.debug("Claim核查阶段: thinking模式已启用（默认），使用流式处理")
                 ctx.llm_stats.record_from_response("claim_verification", prompt, response)
                 response_text = response.text
             except Exception as e:
@@ -194,8 +262,8 @@ class ClaimVerificationStage(PipelineStage):
                 return []
 
             try:
-                response = ctx.llm_service.generate(prompt)
-                logger.debug("Checklist核查阶段: thinking模式已启用（默认）")
+                response = ctx.llm_service.generate_stream_to_response(prompt)
+                logger.debug("Checklist核查阶段: thinking模式已启用（默认），使用流式处理")
                 ctx.llm_stats.record_from_response("checklist_verification", prompt, response)
                 response_text = response.text
             except Exception as e:
@@ -347,8 +415,8 @@ class ClaimVerificationStage(PipelineStage):
                 return []
 
             try:
-                response = ctx.llm_service.generate(prompt)
-                logger.debug("确定性核查阶段: thinking模式已启用（默认）")
+                response = ctx.llm_service.generate_stream_to_response(prompt)
+                logger.debug("确定性核查阶段: thinking模式已启用（默认），使用流式处理")
                 ctx.llm_stats.record_from_response("certainty_verification", prompt, response)
                 response_text = response.text
             except Exception as e:
@@ -368,3 +436,56 @@ class ClaimVerificationStage(PipelineStage):
             f"发现{len(errors)}个错误"
         )
         return errors
+
+    # ---- 裁剪工具方法 ----
+    @staticmethod
+    def _crop_transcript_for_sections(
+        ctx: "PipelineContext",
+        draft_emr: dict,
+        section_names: list,
+        step_label: str,
+    ) -> str:
+        """对指定SOAP章节的字段提取source_turn_indices并裁剪转写。
+
+        如果有字段value非空但无source_turn_indices（可疑字段），回退到完整转写。
+
+        Args:
+            ctx: Pipeline上下文
+            draft_emr: SOAP草稿
+            section_names: 需要裁剪的章节名列表，如 ["assessment", "plan"]
+            step_label: 步骤名称（用于日志）
+
+        Returns:
+            裁剪后或完整的转写文本
+        """
+        all_fields = []
+        for section_name in section_names:
+            section = draft_emr.get(section_name, {})
+            if not isinstance(section, dict):
+                continue
+            normal, suspect, _ = extract_section_fields(section, section_name)
+            all_fields.extend(normal)
+            # 任何章节有可疑字段 → 回退完整转写
+            if suspect:
+                logger.info(
+                    f"{step_label}: 章节 {section_name} 存在可疑字段"
+                    f"（value非空但无source_turn_indices），回退到完整转写"
+                )
+                return ctx.combined_text
+
+        if not all_fields:
+            logger.info(f"{step_label}: 指定章节无可裁剪字段，使用完整转写")
+            return ctx.combined_text
+
+        relevant_indices = collect_turn_indices(all_fields)
+        if not relevant_indices:
+            logger.info(f"{step_label}: 无可收集的turn indices，使用完整转写")
+            return ctx.combined_text
+
+        cropped = build_section_transcript(ctx.turns, relevant_indices, buffer=1)
+        logger.info(
+            f"{step_label}: 使用裁剪转写，"
+            f"涉及 {len(relevant_indices)} 个对话轮次, "
+            f"转写长度 {len(cropped)} 字符 (完整转写 {len(ctx.combined_text)} 字符)"
+        )
+        return cropped

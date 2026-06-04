@@ -1,15 +1,22 @@
-from typing import Dict, Any
+from typing import Dict, Any, Generator
 import httpx
 import json
 import time
-from .base import LLMAdapter, LLMRequest, LLMResponse
+from .base import LLMAdapter, LLMRequest, LLMResponse, LLMStreamChunk
 from ...utils.logger import logger
 
 
 class OpenAICompatibleAdapter(LLMAdapter):
+    # 使用 chat_template_kwargs.enable_thinking 启用思考模式的模型前缀列表
+    AGNES_MODEL_PREFIXES = ("agnes",)
+
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.api_key = config.get("api_key")
+        self._is_agnes = any(
+            config.get("model_name", "").startswith(prefix)
+            for prefix in self.AGNES_MODEL_PREFIXES
+        )
         
         api_endpoint = config.get("api_endpoint", "https://api.openai.com/v1")
         
@@ -24,7 +31,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
         self.api_endpoint = api_endpoint
         self.provider_name = config.get("provider_name", "openai")
         self.max_retries = config.get("max_retries", 5)
-        self.retry_delay = config.get("retry_delay", 3.0)
+        self.retry_delay = config.get("retry_delay", 5.0)
         self.request_interval = config.get("request_interval", 2.0)
         self._last_request_time = 0
         
@@ -59,13 +66,19 @@ class OpenAICompatibleAdapter(LLMAdapter):
         
         use_thinking = request.thinking_enabled
         if use_thinking:
-            effort = request.thinking_effort if request.thinking_enabled else self.thinking_effort
-            payload["thinking"] = {
-                "type": "enabled",
-                "reasoning_effort": effort
-            }
-            payload["max_tokens"] = request.max_tokens * 5
-            logger.debug(f"思考模式启用，max_tokens从{request.max_tokens}调整为{payload['max_tokens']}以补偿reasoning_tokens")
+            if self._is_agnes:
+                # Agnes模型使用 chat_template_kwargs.enable_thinking 启用思考
+                payload["chat_template_kwargs"] = {"enable_thinking": True}
+                payload["max_tokens"] = request.max_tokens * 5
+                logger.debug(f"Agnes思考模式启用(chat_template_kwargs)，max_tokens从{request.max_tokens}调整为{payload['max_tokens']}")
+            else:
+                effort = request.thinking_effort if request.thinking_enabled else self.thinking_effort
+                payload["thinking"] = {
+                    "type": "enabled",
+                    "reasoning_effort": effort
+                }
+                payload["max_tokens"] = request.max_tokens * 5
+                logger.debug(f"思考模式启用，max_tokens从{request.max_tokens}调整为{payload['max_tokens']}以补偿reasoning_tokens")
         
         logger.info(f"LLM API请求 - 模型: {self.model_name}, 提供商: {self.provider_name}")
         logger.debug(f"LLM API请求 - endpoint: {self.api_endpoint}")
@@ -218,3 +231,179 @@ class OpenAICompatibleAdapter(LLMAdapter):
                 return response.status_code == 200
         except:
             return False
+    
+    def generate_stream(self, request: LLMRequest) -> Generator[LLMStreamChunk, None, None]:
+        """流式生成响应，避免一次性发送大量token导致限流和超时"""
+        headers = {
+            "Content-Type": "application/json"
+        }
+        
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        
+        messages = []
+        if request.json_mode or self.json_mode:
+            messages.append({"role": "system", "content": "请以JSON格式输出结果。"})
+        messages.append({"role": "user", "content": request.prompt})
+        
+        payload = {
+            "model": self.model_name,
+            "messages": messages,
+            "max_tokens": request.max_tokens,
+            "temperature": request.temperature,
+            "top_p": request.top_p,
+            "stream": True,
+            "stream_options": {"include_usage": True}
+        }
+        
+        if request.stop_sequences:
+            payload["stop"] = request.stop_sequences
+        
+        if request.json_mode or self.json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        
+        use_thinking = request.thinking_enabled
+        if use_thinking:
+            if self._is_agnes:
+                # Agnes模型使用 chat_template_kwargs.enable_thinking 启用思考
+                payload["chat_template_kwargs"] = {"enable_thinking": True}
+                payload["max_tokens"] = request.max_tokens * 5
+                logger.debug(f"Agnes思考模式启用(chat_template_kwargs)，max_tokens从{request.max_tokens}调整为{payload['max_tokens']}")
+            else:
+                effort = request.thinking_effort if request.thinking_enabled else self.thinking_effort
+                payload["thinking"] = {
+                    "type": "enabled",
+                    "reasoning_effort": effort
+                }
+                payload["max_tokens"] = request.max_tokens * 5
+                logger.debug(f"思考模式启用，max_tokens从{request.max_tokens}调整为{payload['max_tokens']}")
+        
+        logger.info(f"LLM API流式请求 - 模型: {self.model_name}, 提供商: {self.provider_name}")
+        logger.debug(f"LLM API流式请求 - endpoint: {self.api_endpoint}")
+        logger.debug(f"LLM API流式请求 - max_tokens: {payload.get('max_tokens', request.max_tokens)}, temperature: {request.temperature}")
+        
+        last_error = None
+        
+        for attempt in range(self.max_retries):
+            try:
+                elapsed = time.time() - self._last_request_time
+                if elapsed < self.request_interval:
+                    wait_time = self.request_interval - elapsed
+                    time.sleep(wait_time)
+                
+                timeout = request.timeout if request.timeout else (300.0 if use_thinking else 120.0)
+                logger.debug(f"LLM API流式请求超时设置: {timeout}秒")
+                
+                accumulated_text = ""
+                accumulated_thinking = ""
+                finish_reason = None
+                final_usage = None
+                
+                with httpx.Client(timeout=timeout) as client:
+                    with client.stream(
+                        "POST",
+                        self.api_endpoint,
+                        headers=headers,
+                        json=payload
+                    ) as response:
+                        response.raise_for_status()
+                        
+                        self._last_request_time = time.time()
+                        
+                        for line in response.iter_lines():
+                            if not line:
+                                continue
+                            
+                            if line.startswith("data: "):
+                                data_str = line[6:]
+                                
+                                if data_str == "[DONE]":
+                                    logger.debug(f"LLM API流式响应完成，总文本长度: {len(accumulated_text)} 字符")
+                                    yield LLMStreamChunk(
+                                        text=accumulated_text,
+                                        model=self.model_name,
+                                        provider=self.provider_name,
+                                        finish_reason=finish_reason,
+                                        thinking_content=accumulated_thinking,
+                                        is_final=True,
+                                        usage=final_usage
+                                    )
+                                    return
+                                
+                                try:
+                                    chunk_data = json.loads(data_str)
+                                except json.JSONDecodeError as e:
+                                    logger.warning(f"流式响应JSON解析失败: {e}, data_str: {data_str[:100]}")
+                                    continue
+                                
+                                choices = chunk_data.get("choices", [])
+                                if not choices:
+                                    continue
+                                
+                                delta = choices[0].get("delta", {})
+                                chunk_finish_reason = choices[0].get("finish_reason")
+                                
+                                content = delta.get("content", "")
+                                thinking_chunk = delta.get("reasoning_content") or delta.get("reasoning", "")
+                                
+                                if content:
+                                    accumulated_text += content
+                                    yield LLMStreamChunk(
+                                        text=content,
+                                        model=self.model_name,
+                                        provider=self.provider_name,
+                                        finish_reason=None,
+                                        thinking_content=None,
+                                        is_final=False
+                                    )
+                                
+                                if thinking_chunk:
+                                    accumulated_thinking += thinking_chunk
+                                    logger.debug(f"收到thinking chunk, 长度: {len(thinking_chunk)} 字符")
+                                
+                                if chunk_finish_reason:
+                                    finish_reason = chunk_finish_reason
+                                    logger.debug(f"流式响应finish_reason: {finish_reason}")
+                                
+                                usage_data = chunk_data.get("usage")
+                                if usage_data:
+                                    final_usage = usage_data
+                                    logger.debug(f"流式响应usage: {final_usage}")
+                        
+                        if finish_reason == "length":
+                            logger.warning(f"LLM流式输出被截断 (finish_reason=length), max_tokens可能不足")
+                        
+                        yield LLMStreamChunk(
+                            text=accumulated_text,
+                            model=self.model_name,
+                            provider=self.provider_name,
+                            finish_reason=finish_reason or "stop",
+                            thinking_content=accumulated_thinking,
+                            is_final=True,
+                            usage=final_usage
+                        )
+                        return
+                        
+            except httpx.HTTPStatusError as e:
+                error_detail = ""
+                try:
+                    error_body = e.response.text
+                    error_detail = f", 响应内容: {error_body[:500]}"
+                except:
+                    pass
+                logger.error(f"LLM API流式HTTP错误 (尝试 {attempt + 1}/{self.max_retries}): {str(e)}{error_detail}")
+                last_error = RuntimeError(f"{self.provider_name} API error: {str(e)}{error_detail}")
+            except httpx.HTTPError as e:
+                logger.error(f"LLM API流式HTTP错误 (尝试 {attempt + 1}/{self.max_retries}): {str(e)}")
+                last_error = RuntimeError(f"{self.provider_name} API error: {str(e)}")
+            except Exception as e:
+                logger.error(f"LLM API流式未知错误 (尝试 {attempt + 1}/{self.max_retries}): {str(e)}")
+                last_error = RuntimeError(f"{self.provider_name} API stream error: {str(e)}")
+            
+            if attempt < self.max_retries - 1:
+                wait_time = self.retry_delay * (attempt + 1)
+                logger.info(f"LLM API流式请求将在 {wait_time} 秒后重试...")
+                time.sleep(wait_time)
+        
+        logger.error(f"LLM API流式调用失败, 已达到最大重试次数 {self.max_retries}")
+        raise last_error

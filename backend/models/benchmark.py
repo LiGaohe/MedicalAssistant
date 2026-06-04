@@ -30,6 +30,7 @@ class BenchmarkRun(BenchmarkBase):
     llm_call_count = Column(Integer, nullable=False, default=0)
     char_count = Column(Integer, nullable=False, default=0)
     token_count = Column(Integer, nullable=False, default=0)
+    stage_breakdown = Column(JSON, nullable=True)  # 新增：保存每个阶段的LLM调用统计
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 

@@ -1,8 +1,8 @@
 """
 消融实验运行脚本
 
-三种消融配置（完整管线和-幻觉检查复用已有结果）:
-  no_term_norm / no_verification / no_field_revision
+两种消融配置（完整管线和-幻觉检查复用已有结果）:
+  no_term_norm / no_verification
 
 用法:
   python scripts/run_ablation_experiments.py --config no_term_norm --limit 10
@@ -61,22 +61,13 @@ ABLATION_CONFIGS = {
         "skip_field_revision": False
     },
     "no_verification": {
-        "name": "-后置核查",
+        "name": "-后置核查与字段修订",
         "skip_cleaning": False,
         "skip_hallucination_check": False,
         "stop_after_draft": False,
         "skip_verification": True,
         "skip_term_norm": False,
         "skip_field_revision": False
-    },
-    "no_field_revision": {
-        "name": "-字段修订",
-        "skip_cleaning": False,
-        "skip_hallucination_check": False,
-        "stop_after_draft": False,
-        "skip_verification": False,
-        "skip_term_norm": False,
-        "skip_field_revision": True
     }
 }
 
@@ -334,7 +325,7 @@ class AblationExperimentRunner:
 def main():
     parser = argparse.ArgumentParser(description="消融实验运行脚本")
     parser.add_argument("--config", default="no_term_norm",
-                        choices=["no_term_norm", "no_verification", "no_field_revision", "all"],
+                        choices=["no_term_norm", "no_verification", "all"],
                         help="消融配置 (default: no_term_norm)")
     parser.add_argument("--samples", default="data/experiments/test_samples.json",
                         help="测试样本文件路径")
@@ -355,7 +346,7 @@ def main():
         return
 
     if args.config == "all":
-        for ck in ["no_term_norm", "no_verification", "no_field_revision"]:
+        for ck in ["no_term_norm", "no_verification"]:
             runner.run_ablation(ck, limit=args.limit)
     else:
         runner.run_ablation(args.config, limit=args.limit)

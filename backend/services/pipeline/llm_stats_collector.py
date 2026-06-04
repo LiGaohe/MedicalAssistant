@@ -65,10 +65,11 @@ class LLMStatsCollector:
         self._calls.append(record)
         self._stage_counts[stage] = self._stage_counts.get(stage, 0) + 1
         
+        latency_str = f"{actual_latency:.2f}s" if actual_latency is not None else "N/A"
         logger.debug(
             f"[LLMStats] 记录调用: stage={stage}, "
             f"prompt_len={prompt_length}, response_len={response_length}, "
-            f"tokens={total_tokens}, latency={actual_latency:.2f}s, success={success}"
+            f"tokens={total_tokens}, latency={latency_str}, success={success}"
         )
         
         return record

@@ -10,8 +10,8 @@
 四种实验方案:
   A: 端到端基线    B: 简化管线    C: 标准管线    D: 完整管线
 
-五种消融配置:
-  full / no_term_norm / no_hallucination / no_verification / no_field_revision
+四种消融配置:
+  full / no_term_norm / no_hallucination / no_verification
 
 增量保存: 每完成一个样本立即写盘，不怕中途崩溃。
 Token 统计: 从 PipelineOrchestrator 日志提取每次 LLM 调用的 token 消耗。
@@ -100,8 +100,7 @@ ABLATION_CONFIGS = {
     "full":               {"name": "完整管线（六阶段）",   "skip_term_norm": False, "skip_hallucination": False, "skip_verification": False, "skip_field_revision": False},
     "no_term_norm":       {"name": "-术语规范化",         "skip_term_norm": True,  "skip_hallucination": False, "skip_verification": False, "skip_field_revision": False},
     "no_hallucination":   {"name": "-幻觉检查",           "skip_term_norm": False, "skip_hallucination": True,  "skip_verification": False, "skip_field_revision": False},
-    "no_verification":    {"name": "-后置核查",           "skip_term_norm": False, "skip_hallucination": False, "skip_verification": True,  "skip_field_revision": False},
-    "no_field_revision":  {"name": "-字段修订",           "skip_term_norm": False, "skip_hallucination": False, "skip_verification": False, "skip_field_revision": True}
+    "no_verification":    {"name": "-后置核查与字段修订",  "skip_term_norm": False, "skip_hallucination": False, "skip_verification": True,  "skip_field_revision": False}
 }
 
 

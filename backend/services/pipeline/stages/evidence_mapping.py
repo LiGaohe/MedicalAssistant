@@ -58,8 +58,8 @@ class EvidenceMappingStage(PipelineStage):
                 return {"status": "llm_unavailable"}
 
             try:
-                response = ctx.llm_service.generate(prompt, thinking_enabled=False)
-                logger.debug("证据溯源构建阶段: thinking模式已禁用")
+                response = ctx.llm_service.generate_stream_to_response(prompt, thinking_enabled=False)
+                logger.debug("证据溯源构建阶段: thinking模式已禁用，使用流式处理")
                 ctx.llm_stats.record_from_response("evidence_mapping", prompt, response)
                 response_text = response.text
             except Exception as e:

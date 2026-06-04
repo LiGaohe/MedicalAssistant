@@ -1,5 +1,806 @@
 # 完成状态记录
 
+## 2026-06-05 合并消融实验：删除 no_field_revision 配置
+
+### 背景
+
+消融实验中 `-后置核查`（no_verification）和 `-字段修订`（no_field_revision）的输出数据完全相同。原因：管线中核查和修订是"检查-修复"关系，跳过核查则无问题清单→修订无输入→病历不变；跳过修订则有问题清单但不执行→病历不变。两者单独消融都不产生新病历，质量评估结果必然相同，因此合并为一个配置。
+
+### 修改内容
+
+1. **`scripts/run_ablation_experiments.py`** — 删除 `no_field_revision` 配置，将 `no_verification` 的名称改为 `"-后置核查与字段修订"`，choices 和 all 循环中移除
+2. **`scripts/run_full_benchmark.py`** — 删除 `ABLATION_CONFIGS` 和 `CONFIG_STAGE_GROUPS` 中的 `no_field_revision`，更新 `config_output_mapping`、`verification_issues` 条件、注释文档
+3. **`scripts/extract_benchmark_results.py`** — 删除 `no_field_revision` 引用，更新消融名称映射和配置列表
+4. **`scripts/analyze_phase1_results.py`** — 删除 `no_field_revision` 配置项，更新 `no_verification` 显示名
+5. **`scripts/run_batch_experiments.py`** — 删除 `no_field_revision` 配置，更新 `no_verification` 名称
+6. **数据库 `benchmark.db`** — 删除 `no_field_revision` 的 3 条 runs、3 条 evaluations、15 条 llm_calls
+
+## 2026-06-04 simplified管线失败时LLM stats和状态处理修复
+
+### 背景
+
+`run_multi_variant` 中 `simplified` 管线在 LLM API 返回 SSL 错误时：
+1. `status` 硬编码为 `"completed"`，未检查实际管线返回的 `"failed"` 状态
+2. `simplified_result.get("llm_stats", {})` 在失败时为空字典，覆盖了 `_compute_llm_stats_for_config` 的正确计算结果（calls=0 而非实际值）
+
+### 修改内容
+
+1. **`scripts/run_full_benchmark.py`** — `simplified` 管线完成后：
+   - 新增 `simplified_status` 检查，若 `!= "completed"` 则：
+     - 以 `status="failed"` 保存失败记录到数据库（记录 error_message）
+     - 关闭数据库连接
+     - 抛出 `RuntimeError` 停止后续处理（遵循项目规则3）
+
+2. **`scripts/run_full_benchmark.py`** — LLM stats 覆盖逻辑：
+   - 仅当 `simplified_llm_stats.total_calls > 0` 时才覆盖为 simplified 的实际统计值
+   - 否则保留 `_compute_llm_stats_for_config` 的计算结果并输出 warning 日志
+
+## 2026-06-04 后置核查阶段裁剪优化
+
+### 背景
+
+后置核查阶段（Claim核查 + Checklist核查 + 确定性核查）每次都发送完整转写文本，tokens 消耗大。Claim核查（检查 A/P 声明是否有据）和确定性核查（检查诊断确定性）是**正向检索**，可以根据 source_turn_indices 裁剪转写，只发相关对话轮次。Checklist核查是**逆向检索**（检查遗漏），必须使用完整转写。
+
+### 修改内容
+
+1. **`backend/services/pipeline/utils.py`**：
+   - 新增 `extract_section_fields()` — 提取章节字段，区分有/无 source_turn_indices
+   - 新增 `collect_turn_indices()` — 收集 source_turn_indices 去重排序
+   - 新增 `build_section_transcript()` — 根据 turn_index 列表构建裁剪后对话文本
+
+2. **`backend/services/pipeline/stages/hallucination_check.py`**：
+   - 删除本地 `_extract_section_fields`、`_collect_turn_indices`、`_build_section_transcript` 方法
+   - 改为调用 utils 中的共享函数（向后兼容，行为不变）
+
+3. **`backend/services/pipeline/stages/claim_verification.py`**：
+   - 新增 `_crop_transcript_for_sections()` 工具方法
+   - 步骤A（Claim核查）：使用 A/P 字段的 source_turn_indices 裁剪转写
+   - 步骤D（确定性核查）：使用 A 字段的 source_turn_indices 裁剪转写
+   - 步骤B（Checklist核查）：保持使用完整转写
+   - 存在可疑字段（value 非空但无 source_turn_indices）时回退到完整转写
+
+### 效果
+
+- 减少 Claim核查和确定性核查的输入 token 消耗
+- 共享工具函数避免代码重复
+- Checklist核查不受影响
+
+## 2026-06-04 保存前数据校验与 None 值修复
+
+### 背景
+`_save_benchmark_run` 在保存到数据库前没有任何数据完整性校验，导致异常数据（如 `token_count=None`/`0`）被静默写入数据库，事后需要手动删除。
+
+### 变更内容
+1. **新增 `_validate_run_before_save` 方法**（`scripts/run_full_benchmark.py`）：
+   - 在数据库保存前校验字段完整性，发现问题直接抛出 `ValueError` 阻止保存
+   - `status=completed` 时检查：`emr_result` 非空、`llm_call_count > 0`、`token_count` 不为 None 且 >0、`char_count > 0`、`elapsed_seconds > 0`
+   - `status=failed` 时警告 `error_message` 为空的情况（不阻止保存）
+2. **修复 `None` 值漏过 `.get()` 默认值问题**：
+   - `_compute_llm_stats_for_config`：`.get(key, 0)` → `.get(key) or 0`（防止 key 存在但值为 None 时返回 None）
+   - `_save_benchmark_run` 调用处（multi_variant 路径）：同样修复
+
+### 影响
+- 异常数据无法再写入数据库
+- 调用方需确保传入的 LLM 统计数据正确，否则保存会失败并抛出明确错误
+
+## 2026-06-04 幻觉检查与后置核查结果传递优化
+
+### 背景
+
+幻觉检查阶段和后置核查阶段存在功能重叠：两者都检查草稿中的声明是否有对话依据。幻觉检查的 `unsupported_facts` 结果未被传递给后置核查，导致 A 和 P 部分的事实被重复检查。
+
+### 修改内容
+
+1. **`backend/services/pipeline/stages/claim_verification.py`**：
+   - 在 `execute` 方法开始时，从 `ctx.hallucination_result` 提取 A 和 P 部分的 `unsupported_facts`
+   - 将预识别的事实转换为 `unsupported_claims` 格式，标记来源为 `hallucination_check`
+   - 修改 `_step_claim_verification` 方法，接收 `preidentified_unsupported` 参数
+   - 将预识别事实格式化为列表传递给 LLM，避免重复检查
+
+2. **`backend/services/llm/prompts/quality_check.py`**：
+   - 修改 `claim_verification` 提示词，添加 `preidentified_unsupported` 参数
+   - 添加"预识别的无依据事实"部分，告知 LLM 这些事实已被标记为 unsupported
+   - 更新 `required_vars` 列表，包含新参数
+
+### 效果
+
+- 避免对 A 和 P 部分的无依据事实进行重复检查
+- 减少 LLM 调用次数和 token 消耗
+- 保持幻觉检查阶段独立存在（用于消融实验验证增量作用）
+- 后置核查结果包含来自幻觉检查的预识别事实（标记来源）
+
+## 2026-06-04 提示词模块拆分重构
+
+### 背景
+
+`backend/services/llm/prompts.py` 文件过长（2418行），包含所有提示词模板定义，维护困难。将其拆分为按阶段组织的文件夹结构。
+
+### 修改内容
+
+1. **删除** `backend/services/llm/prompts.py` 单文件
+2. **新建** `backend/services/llm/prompts/` 文件夹，包含以下子模块：
+
+| 文件 | 职责 | 包含模板 |
+|------|------|----------|
+| `template.py` | PromptTemplate基类 | - |
+| `preprocessing.py` | 对话预处理模板 | turn_cleaning, evidence_selection, item_extraction |
+| `soap_generation.py` | SOAP病历生成模板 | emr_generation, emr_generation_with_role, direct_soap_generation, free_soap_generation, soap_structuring, evidence_mapping |
+| `quality_check.py` | 质量核查模板 | claim_verification, checklist_verification, field_revision, certainty_verification |
+| `evaluation.py` | 评估模板 | consistency_check, consistency_check_section, internal_consistency_check, key_fact_extraction, completeness_check, document_quality_check, safety_risk_check |
+| `terminology.py` | 术语处理模板 | term_standardization, extract_medical_terms |
+| `deprecated.py` | 已废弃的六阶段流水线模板 | fact_extraction, fact_consolidation, soap_verification, emr_generation_so, emr_generation_assessment, emr_generation_plan, emr_generation_ap |
+| `manager.py` | PromptManager管理器 | 组合各子模块模板 |
+| `__init__.py` | 包入口 | 导出PromptTemplate和PromptManager |
+
+### 调用方影响
+
+所有调用方 `from ...prompts import PromptManager` 的 import 路径无需修改，`__init__.py` 保持了对外接口不变。
+
+## 2026-06-04 幻觉检查Token消耗优化
+
+### 背景
+
+幻觉检查阶段一次调用发送完整原始转写和完整病历内容，token消耗巨大（单次约15K token）。需要优化减少token消耗。
+
+### 修改内容
+
+1. **`backend/services/pipeline/stages/direct_soap_generation.py`**：
+   - 修改 `_build_evidence_traces` 方法，保留 `source_turn_indices` 字段（原来被丢弃）
+
+2. **`backend/services/llm/prompts.py`**：
+   - 新增 `consistency_check_section` 提示词模板（中英文各一份），用于单章节幻觉检查
+
+3. **`backend/services/pipeline/stages/hallucination_check.py`**（重写）：
+   - 将1次大调用拆分为4次小调用（S/O/A/P各1次）
+   - 每次只发送该章节的病历字段和对应的对话轮次（从source_turn_indices提取，加前后1轮缓冲）
+   - 只输出不支持的事实（大幅减少输出token）
+   - 对于value非空但source_turn_indices为空的可疑字段，回退到发送完整转写
+   - `_merge_section_results` 将4次结果合并为原格式，保持下游兼容
+
+### 预期效果
+
+- 场景A（所有字段有source_turn_indices）：总token减少约45%
+- 场景B（有可疑字段需回退）：总token减少约33%
+- 输出token始终大幅减少（约80%），因为只输出不支持的事实
+- LLM调用次数从1次变为4次，但总token消耗减少
+
+### 兼容性
+
+- `hallucination_result` 输出格式不变（facts/unsupported_facts/supported_facts/summary/severity）
+- `run_full_benchmark.py` 无需修改
+- `llm_stats` 中4次调用都记录为"hallucination_check" stage，自动合并
+
+### 后续修复
+
+1. 分段调用禁用thinking模式（max_tokens=4096），避免thinking模式下max_tokens乘以5后过大（81920）导致API服务器500错误。分段调用后每次输入更小，输出也更小，4096 token足够。
+
+2. 修复错误处理：章节LLM调用失败时立即停止管线，不再继续后续章节。`_check_section` 返回带 `status` 字段的错误结果，`execute` 检测到失败后立即返回，避免浪费tokens。
+
+3. 修复流式请求token_count始终为0：在流式请求payload中添加 `stream_options: {"include_usage": true}`，使API在流式响应最后一个chunk返回usage数据（prompt_tokens/completion_tokens/total_tokens）。
+
+## 2026-06-04 修复幻觉检查JSON解析失败问题
+
+### 背景
+
+在运行benchmark时，幻觉检查阶段出现JSON解析失败，导致管线停止。错误日志显示：
+- `幻觉检查JSON解析失败，使用空结果`
+- `幻觉检查失败(status=parse_error), 停止管线, 不再调用大模型`
+
+### 问题分析
+
+通过日志分析发现：
+1. 幻觉检查阶段使用了thinking模式（thinking_enabled=True）
+2. thinking模式占用了大量token预算，导致实际输出内容被截断
+3. JSON响应在中间被截断，导致解析失败
+4. 具体错误：`Expecting ',' delimiter: line 142 column 6 (char 3956)`
+5. JSON在第3599行被截断：`"reasoning": "患者陈述已住院观察，且医生在[#29]`
+
+**幻觉检查确实需要推理能力**：
+- 从病历中提取原子事实
+- 在原始对话中找到对应证据
+- 判断证据是否充分支持
+- 提供推理理由
+
+因此问题不是"不需要思考"，而是thinking模式的token预算分配导致输出不足。
+
+### 修改内容
+
+修改 `backend/services/pipeline/stages/hallucination_check.py`：
+1. **保持thinking模式**：因为幻觉检查需要推理能力
+2. **大幅增加max_tokens**：从默认值增加到65536，避免thinking占用导致输出截断
+3. **添加重试逻辑**：如果JSON被截断（finish_reason=length），则禁用thinking模式重试，优先保证输出完整性
+4. **增强错误日志**：输出响应内容前500字符，方便调试
+
+### 修改文件
+
+- **hallucination_check.py** - 第77-120行
+
+### 策略说明
+
+采用"thinking优先，fallback到无thinking"的策略：
+- 首次调用：启用thinking模式，max_tokens=65536（充分利用推理能力）
+- 重试调用：禁用thinking模式，max_tokens=32768（优先保证输出完整性）
+
+这样既保证了推理质量，又确保了输出完整性。
+
+## 2026-06-04 将Pipeline所有LLM调用改为流式处理
+
+### 背景
+
+为避免一次性发送大量token导致限流和超时，将所有Pipeline阶段的LLM调用改为流式处理。
+
+### 修改内容
+
+使用兼容方式（方式1），将所有 `ctx.llm_service.generate()` 替换为 `ctx.llm_service.generate_stream_to_response()`。
+
+#### 修改文件列表
+
+**活跃文件**（11个文件，17处修改）：
+
+1. **direct_soap_generation.py** - 2处修改
+   - 第65行：自由文本草稿生成
+   - 第161行：JSON模式直接草稿生成
+
+2. **turn_cleaning.py** - 1处修改
+   - 第160行：转写清洗与角色纠错
+
+3. **evidence_mapping.py** - 1处修改
+   - 第61行：证据溯源构建
+
+4. **hallucination_check.py** - 1处修改
+   - 第82行：幻觉检查
+
+5. **claim_verification.py** - 3处修改
+   - 第139行：Claim核查
+   - 第197行：Checklist核查
+   - 第350行：确定性核查
+
+6. **field_revision.py** - 1处修改
+   - 第123行：字段级修订
+
+7. **verification.py** - 1处修改
+   - 第59行：核查修订
+
+8. **soap_structuring.py** - 1处修改
+   - 第57行：草稿结构化
+
+**Deprecated文件**（不修改）：
+- fact_extraction.py - 已废弃
+- fact_consolidation.py - 已废弃
+- soap_generation.py - 已废弃
+
+### 修改示例
+
+```python
+# 修改前
+response = ctx.llm_service.generate(prompt, thinking_enabled=False)
+logger.debug("草稿生成阶段: thinking模式已禁用")
+
+# 修改后
+response = ctx.llm_service.generate_stream_to_response(prompt, thinking_enabled=False)
+logger.debug("草稿生成阶段: thinking模式已禁用，使用流式处理")
+```
+
+### 效果
+
+- ✅ **避免限流**：所有LLM调用改为流式传输
+- ✅ **防止超时**：逐步接收响应，避免长时间等待
+- ✅ **兼容性好**：返回类型与原有方法一致，无需修改后续处理逻辑
+- ✅ **日志清晰**：所有日志都标注"使用流式处理"
+
+### 测试验证
+
+运行 `run_full_benchmark.py` 脚本时，所有LLM调用将使用流式处理。
+
+## 2026-06-04 实现LLM流式处理功能
+
+### 背景
+
+项目一次性发送和接受大量token的提示词，容易触发限流和请求超时。
+
+### 实现内容
+
+为LLM服务添加流式处理功能，避免一次性发送大量token导致限流和超时。
+
+#### 1. 基础类扩展
+
+**文件**：`backend/services/llm/base.py`
+
+- 新增 `LLMStreamChunk` 数据类，表示流式响应的单个chunk
+- `LLMRequest` 新增 `stream` 参数，支持流式请求
+- `LLMAdapter` 新增抽象方法 `generate_stream()`，支持流式生成
+
+#### 2. OpenAI适配器实现
+
+**文件**：`backend/services/llm/openai_compatible_adapter.py`
+
+- 实现 `generate_stream()` 方法，支持OpenAI兼容API的流式响应
+- 使用 `httpx.Client.stream()` 进行流式HTTP请求
+- 解析SSE（Server-Sent Events）格式的响应数据
+- 支持thinking模式的流式处理
+- 保持原有的重试机制和错误处理
+
+#### 3. LLM服务扩展
+
+**文件**：`backend/services/llm/llm_service.py`
+
+- 新增 `generate_stream()` 方法，提供流式生成接口
+- 新增 `generate_stream_to_response()` 方法，流式处理但返回完整响应（兼容现有代码）
+- 支持chunk回调函数 `on_chunk`，实时处理每个chunk
+- 完整的日志记录和错误处理
+
+#### 4. 测试覆盖
+
+**文件**：`tests/test_llm_service.py`
+
+- 新增 `test_llm_stream_chunk_dataclass` 测试
+- 新增 `test_openai_compatible_adapter_generate_stream` 测试
+- 新增 `test_llm_service_generate_stream_to_response` 测试
+- 所有9个测试通过
+
+### 使用方式
+
+#### 方式1：直接流式处理
+
+```python
+for chunk in llm_service.generate_stream(prompt, config_name="agnes"):
+    if not chunk.is_final:
+        # 实时处理每个chunk
+        print(chunk.text, end='', flush=True)
+    else:
+        # 最终完整响应
+        print(f"\n完成: {chunk.finish_reason}")
+```
+
+#### 方式2：兼容现有代码
+
+```python
+# 内部使用流式处理，但返回完整响应对象
+response = llm_service.generate_stream_to_response(prompt)
+# 与原有 generate() 方法返回类型一致
+```
+
+### 优势
+
+- **避免限流**：流式传输减少单次请求的token压力
+- **防止超时**：逐步接收响应，避免长时间等待
+- **实时反馈**：可以实时显示生成进度
+- **兼容性好**：提供两种使用方式，方便逐步迁移
+
+## 2026-06-04 修复LLM统计收集器日志格式化异常
+
+### 问题
+
+当LLM调用失败且 `actual_latency` 为 `None` 时，日志记录尝试使用 `.2f` 格式化 `None`，导致 `TypeError: unsupported format string passed to NoneType.__format__`。
+
+### 错误位置
+
+`backend/services/pipeline/llm_stats_collector.py` 第69行
+
+### 修改内容
+
+在格式化 `actual_latency` 前检查是否为 `None`：
+
+```python
+# 修改前
+f"latency={actual_latency:.2f}s"
+
+# 修改后
+latency_str = f"{actual_latency:.2f}s" if actual_latency is not None else "N/A"
+f"latency={latency_str}"
+```
+
+## 2026-06-04 修正论文文档中LLM模型配置参数值错误
+
+### 问题
+
+论文文档中的参数值与数据库实际配置不一致：
+
+| 参数 | 文档原值 | 数据库实际值 |
+|:---|:---|:---|
+| max_tokens | 32768 | 8192 |
+| temperature | 0.1（评估）/ 0.7（生成） | 0.2 |
+| thinking_effort | high | low |
+
+### 数据库查询结果
+
+```sql
+sqlite3 data/database/medical.db "SELECT ... FROM llm_configs WHERE is_active=1;"
+agnes|openai_compatible|agnes-2.0-flash|8192|0.2|1|1|low
+```
+
+### 修改内容
+
+**修改文件**：`docs/提交/论文/实验设计与数据集.md`
+
+1. **修正 5.1 LLM 模型配置**（第 207-217 行）
+   - 温度改为 0.2（统一值，无评估/生成区分）
+   - max_tokens 改为 8192
+   - thinking_effort 改为 low
+
+2. **简化 5.2 超参数设置**（第 219-230 行）
+   - 移除 evaluation_temperature 和 generation_temperature（项目无此区分）
+   - 统一为 temperature=0.2
+   - thinking_effort 改为 low
+
+## 2026-06-04 修正论文文档中LLM模型配置与实际不一致
+
+### 问题
+
+论文文档 `docs/提交/论文/实验设计与数据集.md` 中模型配置描述与项目实际不一致：
+
+- 文档描述：使用 Qwen 系列模型（`Qwen/Qwen2.5-72B-Instruct` 或 `qwen-plus`）
+- 项目实际：使用 `agnes-2.0-flash` 模型，提供商为 `openai_compatible`
+
+### 发现方式
+
+通过查看 `data/logs/run_full_benchmark.log` 日志文件：
+```
+2026-06-04 09:07:03,929 [INFO] LLM API请求 - 模型: agnes-2.0-flash, 提供商: openai_compatible
+```
+
+### 修改内容
+
+**修改文件**：`docs/提交/论文/实验设计与数据集.md`
+
+1. **修正 5.1 LLM 模型配置**（第 207-217 行）
+   - 模型名称改为 `agnes-2.0-flash`
+   - 提供商改为 `OpenAI Compatible API`
+   - 移除 Qwen 相关描述
+
+2. **补充 5.2 超参数设置**（第 219-230 行）
+   - 新增 `thinking_enabled` 参数（启用思考模式）
+   - 新增 `thinking_effort` 参数（思考模式强度）
+
+## 2026-06-04 修正论文文档中数据预处理部分与项目不一致
+
+### 问题
+
+论文文档 `docs/提交/论文/实验设计与数据集.md` 中数据预处理部分描述的"训练集/验证集/测试集"划分与项目实际不一致：
+
+- 文档描述：训练集70%、验证集15%、测试集15%
+- 项目实际：使用 IMCS-MRG 测试集（811条），采用两阶段实验设计
+
+### 项目实际的数据处理方式
+
+根据 `scripts/prepare_test_data.py` 和 `scripts/prepare_phase2_samples.py`：
+
+1. **第一阶段（筛选阶段）**：从 811 条随机抽取 30 条，用于快速对比和消融实验
+2. **第二阶段（正式评测）**：使用剩余 781 条，用于最终评估
+
+这与 `docs/提交/论文/量化实验结果.md` 描述一致。
+
+### 修改内容
+
+**修改文件**：`docs/提交/论文/实验设计与数据集.md`
+
+1. **新增 4.1 两阶段实验设计**（第 111-120 行）
+   - 说明两阶段设计的原因（完整管线耗时较长）
+   - 描述筛选阶段、正式评测、消融实验的分工
+
+2. **重写 4.2 预处理流程**（第 122-168 行）
+   - 流程图改为两阶段设计
+   - 对话格式标准化步骤保留
+
+3. **新增 4.3 样本分配方案**（第 170-177 行）
+   - 明确各实验的样本来源和数量
+   - 说明样本重叠情况
+
+4. **新增 4.4 样本文件生成方式**（第 179-187 行）
+   - 给出 prepare_test_data.py 和 prepare_phase2_samples.py 的使用命令
+
+5. **修正编号**：原 4.3/4.4 改为 4.5/4.6
+
+## 2026-06-04 修正论文文档中实验C标准管线的参数配置错误
+
+### 问题
+
+论文文档 `docs/提交/论文/实验设计与数据集.md` 中实验 C（标准管线）的参数配置与项目代码不一致：
+
+- 文档写的是 `skip_hallucination_check=False`（不跳过幻觉检查）
+- 但特点描述说"全流程但不含幻觉检查阶段"，存在矛盾
+- 项目代码实际配置是 `skip_hallucination_check=True`（跳过幻觉检查）
+
+### 设计理由
+
+标准管线跳过幻觉检查是为了建立消融实验的中间对照点：
+
+1. **基线 B vs 实验 C**：两者都跳过幻觉检查，差异仅在于转写清洗 → 验证转写清洗的贡献
+2. **实验 C vs 实验 D**：两者都有转写清洗，差异仅在于幻觉检查 → 验证幻觉检查的增量效果
+
+### 修改内容
+
+**修改文件**：`docs/提交/论文/实验设计与数据集.md`
+
+1. **修正实验 C 参数配置**（第 258-270 行）
+   - 参数改为 `skip_hallucination_check=True`
+   - 标题改为"含转写清洗 + 术语规范化，跳过幻觉检查"
+   - 特点改为"包含转写清洗和术语规范化，跳过幻觉检查阶段"
+   - 补充设计理由说明
+
+2. **修正实验 C 选型理由**（第 297-301 行）
+   - 说明作为消融实验中间对照点的作用
+   - 明确与基线 B 和实验 D 的对比逻辑
+
+3. **简化实验 D 选型理由**（第 302-305 行）
+   - 移除与基线 B 的对比（逻辑不清晰）
+   - 保留与实验 C 的对比说明
+
+## 2026-06-04 修复standard配置stage_breakdown包含幻觉检查的问题
+
+### 问题
+
+检查数据库发现，standard配置的stage_breakdown包含了hallucination_check（幻觉检查），但根据定义，standard应该跳过幻觉检查。
+
+**根本原因**：
+- `multi_variant`方法直接使用full配置的stage_breakdown，没有根据CONFIG_STAGE_GROUPS过滤对应阶段
+- `_compute_llm_stats_for_config`方法中的CONFIG_STAGE_GROUPS是局部变量，无法在multi_variant方法中访问
+
+### 修改内容
+
+**修改文件**：`scripts/run_full_benchmark.py`
+
+1. **将CONFIG_STAGE_GROUPS提取为全局变量**（第95-145行）
+   - 定义每个配置包含的LLM调用阶段
+   - standard不包含hallucination_check
+   - full、no_hallucination、no_term_norm使用None（全部stage）
+
+2. **修改multi_variant方法**（第1555-1569行）
+   - 根据CONFIG_STAGE_GROUPS提取对应阶段的stage_breakdown
+   - 不再直接使用full的stage_breakdown
+
+3. **修改_compute_llm_stats_for_config方法**（第449-453行）
+   - 使用全局变量CONFIG_STAGE_GROUPS
+   - 删除方法内部的CONFIG_STAGE_GROUPS定义
+
+### 验证结果
+
+重新运行benchmark后，样本10042927的token统计正确：
+
+| 配置 | Token消耗 | LLM调用次数 | 包含阶段数 | 关键差异 |
+|------|-----------|-------------|------------|----------|
+| simplified | 4,569 | 2 | 2 | 仅草稿+结构化 |
+| standard | 65,689 | 18 | 7 | **不含幻觉检查** |
+| full | 73,292 | 20 | 8 | 包含幻觉检查 |
+
+**关键验证点**：
+- standard (65,689) > simplified (4,569) ✓
+- standard (65,689) < full (73,292) ✓
+- standard不含hallucination_check ✓
+- full包含hallucination_check ✓
+
+## 2026-06-04 修复stage_breakdown未保存导致token统计不准确
+
+### 问题
+
+用户发现样本10042927的简化管线和标准管线的生成token相同，但标准管线调用的阶段比简化管线多。
+
+**根本原因**：
+1. `stage_breakdown`（每个阶段的LLM调用统计）没有被保存到数据库
+2. 从cached_run恢复时，无法恢复stage_breakdown，导致所有配置都使用full管线的总token
+3. 无法区分不同配置包含的不同阶段的token消耗
+
+### 修改内容
+
+**修改文件1**：`backend/models/benchmark.py`（第28行）
+- 在`BenchmarkRun`模型中添加`stage_breakdown`字段（JSON类型）
+- 用于保存每个阶段的LLM调用统计（call_count, total_chars, total_tokens, total_latency）
+
+**修改文件2**：`scripts/run_full_benchmark.py`
+- `_save_benchmark_run`方法：添加`stage_breakdown`参数，保存到数据库
+- `_run_pipeline`方法：返回值新增`stage_breakdown`参数
+- `run_single_config`方法：接收并传入`stage_breakdown`
+- `run_multi_variant`方法：从`llm_stats`中提取`stage_breakdown`并传入
+- `CONFIG_STAGE_GROUPS`：定义simplified和standard的stage列表
+  - simplified: draft_generation → soap_structuring
+  - standard: turn_cleaning → draft_generation → soap_structuring → verification → field_revision
+
+**修改文件3**：`scripts/extract_benchmark_results.py`（第39-82行，第231-316行）
+- 添加`CONFIG_STAGE_GROUPS`定义（与run_full_benchmark.py一致）
+- 修改token统计逻辑：从`stage_breakdown`中提取对应阶段的token
+- 兼容旧数据：如果没有`stage_breakdown`，使用`token_count`字段
+
+**数据库迁移**：
+- 执行`ALTER TABLE benchmark_runs ADD COLUMN stage_breakdown JSON;`
+
+### 预期效果
+
+重新运行benchmark后，每个配置的token统计将准确反映其包含的阶段：
+- 简化管线：只统计draft_generation和soap_structuring的token
+- 标准管线：统计turn_cleaning、draft_generation、soap_structuring、verification、field_revision的token
+- 完整管线：统计全部阶段的token
+
+## 2026-06-04 修复benchmark token统计逻辑bug
+
+### 问题
+
+`scripts/extract_benchmark_results.py` 的token统计逻辑存在两个bug：
+
+**Bug 1**：只统计evaluation阶段的token，忽略generation阶段的token
+- `benchmark_runs.token_count` 记录generation阶段的token
+- `benchmark_llm_calls.total_tokens` 记录evaluation阶段的token
+- 原逻辑只统计后者，导致简化管线平均token（11204）比端到端（13104）少
+
+**Bug 2**：部分记录缺失generation token，影响平均值准确性
+- simplified有2条记录缺失gen token（只有eval token: 3690, 8876）
+- standard有3条记录缺失gen token（只有eval token: 15450, 16400, 8654）
+- standard缺失的eval token更大，导致平均值反而比simplified低
+
+### 修改内容
+
+**修改文件**：`scripts/extract_benchmark_results.py`（第199-268行）
+
+**修改逻辑**：
+
+1. 对于每个run，获取generation token（`run.token_count`）和evaluation token（`llm_calls.total_tokens`总和）
+2. 将两者相加作为该run的总token
+3. **只统计有generation token的完整记录**（`sample_tokens_complete`），排除缺失gen token的记录
+4. 记录完整样本数和部分样本数，便于分析数据完整性
+
+### 修复结果
+
+| 配置 | 平均 Token（修复后） | 完整样本 | 部分样本 | 平均 Token（修复前） |
+| :--- | ---: | ---: | ---: | ---: |
+| 端到端基线 | 14833 | 5 | 0 | 13104 |
+| 简化管线 | 98383 | 5 | 2 | 11204 |
+| 标准管线 | 98153 | 5 | 3 | 13152 |
+| 完整管线 | 91960 | 10 | 0 | 49355 |
+
+## 2026-06-04 修复normalize_format方法数据结构解析问题
+
+### 问题
+
+1. `normalize_format`方法只从顶层获取`assessment_items`和`plan_items`
+2. LLM返回的数据结构中，`assessment_items`在`assessment` section内部，`plan` section内部有`treatment`和`advice`字段
+3. 导致无法正确构建`assessment.diagnosis`和`plan`字段，最终被设置为`"unknown"`
+
+### 修改内容
+
+**修改文件**：`backend/services/pipeline/emr_persistence.py`（第241-343行）
+
+**修改逻辑**：
+
+1. **assessment_items解析**：
+   - 先尝试从顶层获取`assessment_items`
+   - 如果没有，从`assessment` section内部获取
+   - 从`assessment_items`构建`diagnosis`字段
+
+2. **plan字段解析**：
+   - 先尝试从顶层获取`plan_items`
+   - 如果没有，检查`plan` section内部是否已有`treatment`和`advice`字段
+   - 如果有字符串格式的`treatment`或`advice`，转换为标准`{value, evidence_traces}`格式
+   - 保留已有的标准格式字段
+
+3. **日志增强**：
+   - 添加详细日志记录数据来源和处理过程
+
+## 2026-06-03 修复中间EMR结果保存问题
+
+### 问题
+
+1. 评估循环中保存 `full` 配置时，没有传入 `emr_raw_draft` 和 `emr_pre_revision` 中间结果
+2. 导致数据库中 `full` 配置的最新记录缺失中间EMR，无法评估其他配置（`end_to_end`、`no_verification`等）
+
+### 修改内容
+
+**修改文件**：
+
+1. **`scripts/run_full_benchmark.py`**（第1559-1572行）：
+   - 在评估循环中保存 `full` 配置时，添加 `emr_raw_draft` 和 `emr_pre_revision` 参数
+   - 只有 `config_key == "full"` 时才传入中间结果
+
+2. **`scripts/check_missing_intermediate.py`**：
+   - 新增脚本：检查数据库中缺失中间EMR结果的样本
+   - 修复 `is_empty_emr` 函数：处理SQLite存储的字符串类型JSON
+
+### 使用方法
+
+检查缺失中间结果的样本：
+```bash
+python scripts/check_missing_intermediate.py
+```
+
+重新运行以生成中间结果：
+```bash
+python scripts/run_full_benchmark.py --config multi --samples data/experiments/test_samples_phase1.json --output-dir data/experiments/results/ph1 --interval 10.0 --sequential --re-evaluate
+```
+
+---
+
+## 2026-06-03 添加样本ID指定和串行处理参数
+
+### 问题
+
+1. 无法指定特定样本ID进行重跑，只能依赖 `--limit` 和样本文件顺序
+2. 并行处理导致瞬间发送多个LLM请求，触发API速率限制（429错误）
+
+### 目标
+
+1. 添加 `--sample-id` 参数，允许用户指定特定样本ID进行评估
+2. 添加 `--sequential` 参数，禁用并行处理以避免API速率限制
+
+### 修改内容
+
+**修改文件**：
+
+1. **`scripts/run_full_benchmark.py`**：
+   - 添加 `--sample-id` 参数：指定样本ID进行评估（优先级高于--limit）
+   - 添加 `--sequential` 参数：串行处理，禁用并行以避免API速率限制
+   - 修改 `FullBenchmarkRunner.__init__`：接收 `sample_id` 和 `sequential` 参数
+   - 添加样本筛选逻辑：根据 `sample_id` 筛选样本
+   - 修改所有创建 `PipelineOrchestrator` 的位置：传递 `sequential` 参数
+
+2. **`backend/services/pipeline/base.py`**：
+   - 在 `PipelineContext` 中添加 `sequential` 属性
+
+3. **`backend/services/pipeline/orchestrator.py`**：
+   - 修改 `PipelineOrchestrator.__init__`：接收 `sequential` 参数
+   - 修改所有创建 `PipelineContext` 的位置：传递 `sequential` 参数
+
+4. **`backend/services/pipeline/stages/turn_cleaning.py`**：
+   - 修改 `_process_segments_parallel` 方法：检查 `ctx.sequential` 标志
+   - 如果 `sequential=True`，使用串行处理而非并行
+
+### 使用方法
+
+```bash
+# 指定样本ID重跑
+python scripts/run_full_benchmark.py --config multi --sample-id 10027169 --re-evaluate --sequential
+
+# 串行处理避免速率限制
+python scripts/run_full_benchmark.py --config multi --limit 1 --sequential
+```
+
+## 2026-06-03 多变量评估调试日志增强
+
+### 问题
+
+6月3日运行了2个样本评估，但结果中没有端到端管线和完整管线的记录。现有调试日志无法定位问题。
+
+### 目标
+
+添加详细的调试日志来定位问题，不尝试解决问题。
+
+### 修改内容
+
+**修改文件**：`scripts/run_full_benchmark.py`
+
+1. **`_check_intermediate_results`方法**：
+   - 添加查询开始和结果的日志记录
+   - 添加existing记录的详细状态日志（id、status、created_at、emr各字段存在性、llm统计）
+   - 添加EMR空检查的详细日志
+   - 添加results构建过程的日志
+
+2. **`_compute_llm_stats_for_config`方法**：
+   - 添加方法调用开始日志
+   - 添加llm_stats和stage_breakdown的状态日志
+   - 添加stage_group状态日志
+   - 添加每个stage的统计日志
+   - 添加最终计算结果日志
+
+3. **`_save_benchmark_run`方法**：
+   - 添加保存参数的详细日志（visit_id、status、elapsed_seconds、llm统计、emr各字段）
+   - 添加保存后状态的日志
+
+4. **`run_multi_variant`方法**：
+   - 添加中间结果检查状态日志
+   - 添加中间结果详情日志（各字段存在性）
+   - 添加cached_run详细状态日志（id、visit_id、status、elapsed_seconds、llm统计、emr空检查）
+   - 添加llm_stats清空警告日志和恢复尝试日志
+   - 添加配置评估循环开始状态日志（existing_configs数量、missing_configs数量、llm_stats状态、emr各字段存在性）
+   - 添加每个配置评估状态日志（emr_key、output_type）
+   - 添加EMR选择结果日志（emr_map内容、emr_to_eval存在性、空检查）
+   - 添加quality_metrics计算完成日志
+   - 添加LLM stats计算前后的状态日志
+   - 添加elapsed计算日志
+   - 添加数据库保存结果日志
+
+### 下一步
+
+重新测试一个6月3日的样本，通过日志定位问题。
+
+---
+
 ## 2026-06-03 自由文本草稿保存与显示修复
 
 ### 问题

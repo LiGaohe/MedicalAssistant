@@ -12,6 +12,7 @@ class PipelineContext:
     prompt_manager: Optional[Any] = None
     language: str = "zh"
     debug_mode: bool = False
+    sequential: bool = False  # 串行处理标志，禁用并行以避免API速率限制
     visit_id: str = ""
     turns: list = field(default_factory=list)
     segments: list = field(default_factory=list)

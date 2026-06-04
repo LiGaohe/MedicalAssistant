@@ -60,10 +60,11 @@ class PipelineOrchestrator:
     
     MAX_PARALLEL_SEGMENTS = 4
     
-    def __init__(self, db: Session, llm_service: Optional[LLMService] = None, language: str = "zh"):
+    def __init__(self, db: Session, llm_service: Optional[LLMService] = None, language: str = "zh", sequential: bool = False):
         self.db = db
         self.llm_service = llm_service
         self.language = language
+        self.sequential = sequential
         self.prompt_manager = PromptManager(language=language)
         self.debug_mode = settings.LLM_DEBUG_MODE
         self.segment_turns = settings.LLM_SEGMENT_TURNS
@@ -74,7 +75,7 @@ class PipelineOrchestrator:
         self.debug_interactor = DebugInteractor(self.llm_service)
         self.emr_persistence = EMRPersistence(db, self.validation_service)
         self.interactive_service = InteractivePipelineService(self)
-        logger.info(f"PipelineOrchestrator initialized, debug_mode={self.debug_mode}, language={language}, UMLS={'enabled' if self.terminology_service.umls_client else 'disabled'}")
+        logger.info(f"PipelineOrchestrator initialized, debug_mode={self.debug_mode}, language={language}, sequential={sequential}, UMLS={'enabled' if self.terminology_service.umls_client else 'disabled'}")
     
     
         
@@ -211,6 +212,7 @@ class PipelineOrchestrator:
             prompt_manager=self.prompt_manager,
             language=self.language,
             debug_mode=self.debug_mode,
+            sequential=self.sequential,
             visit_id=visit_id,
             turns=turns,
             save_evidence=save_evidence,
@@ -395,6 +397,7 @@ class PipelineOrchestrator:
             prompt_manager=self.prompt_manager,
             language=self.language,
             debug_mode=self.debug_mode,
+            sequential=self.sequential,
             visit_id=visit_id,
             turns=turns,
             save_evidence=save_evidence,
@@ -506,6 +509,7 @@ class PipelineOrchestrator:
             prompt_manager=self.prompt_manager,
             language=self.language,
             debug_mode=self.debug_mode,
+            sequential=self.sequential,
             visit_id=visit_id,
             turns=turns,
             save_evidence=False,
@@ -601,6 +605,7 @@ class PipelineOrchestrator:
             prompt_manager=self.prompt_manager,
             language=self.language,
             debug_mode=self.debug_mode,
+            sequential=self.sequential,
             visit_id=visit_id,
             turns=turns,
             save_evidence=save_evidence,
@@ -1201,6 +1206,7 @@ C. 硬规则核查 - 确定性规则检查（部位矛盾、否定冲突等）
                 prompt_manager=self.prompt_manager,
                 language=self.language,
                 debug_mode=False,
+                sequential=self.sequential,
                 visit_id=visit_id,
                 turns=turns,
                 save_evidence=False

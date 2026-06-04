@@ -242,7 +242,14 @@ class EMRPersistence:
                 if isinstance(val, str):
                     section_data[field] = {"value": val or "", "evidence_traces": []}
 
+        # 先尝试从顶层获取assessment_items，如果没有则从section内部获取
         assessment_items = result.get("assessment_items", [])
+        if not assessment_items:
+            # 从assessment section内部获取assessment_items
+            assessment_items = assessment_section.get("assessment_items", [])
+            if assessment_items:
+                logger.info(f"normalize_format: 从assessment section内部获取assessment_items={len(assessment_items)}")
+
         if assessment_items:
             explicit_diags = [item for item in assessment_items if item.get("diagnosis_type") == "explicit_diagnosis"]
             suspected_diags = [item for item in assessment_items if item.get("diagnosis_type") == "suspected_diagnosis"]
@@ -259,8 +266,19 @@ class EMRPersistence:
             diagnosis_value = "；".join(filter(None, diagnosis_parts))
             if diagnosis_value:
                 assessment_section["diagnosis"] = {"value": diagnosis_value, "evidence_traces": []}
+                logger.info(f"normalize_format: 从assessment_items构建diagnosis={diagnosis_value[:50]}...")
 
+        # 先尝试从顶层获取plan_items，如果没有则从section内部获取
         plan_items = result.get("plan_items", {})
+        if not plan_items:
+            # plan_section内部可能已有treatment和advice字段，检查并保留
+            if plan_section.get("treatment") or plan_section.get("advice"):
+                logger.info(f"normalize_format: plan_section内部已有treatment/advice字段，保留原样")
+            # 从plan section内部获取plan_items（如果存在）
+            plan_items = plan_section.get("plan_items", {})
+            if plan_items:
+                logger.info(f"normalize_format: 从plan section内部获取plan_items")
+
         if plan_items:
             medications = plan_items.get("medications", [])
             tests = plan_items.get("tests", [])
@@ -298,6 +316,19 @@ class EMRPersistence:
             advice_value = "；".join(filter(None, advice_parts))
             if advice_value:
                 plan_section["advice"] = {"value": advice_value, "evidence_traces": []}
+
+        # 如果plan_section内部已有treatment/advice字段但不是标准格式，进行格式化
+        for field_name in ["treatment", "advice"]:
+            field_value = plan_section.get(field_name)
+            if field_value:
+                if isinstance(field_value, str):
+                    # 字符串格式转换为标准格式
+                    plan_section[field_name] = {"value": field_value, "evidence_traces": []}
+                    logger.info(f"normalize_format: plan.{field_name} 字符串格式转换为标准格式")
+                elif isinstance(field_value, dict):
+                    # 已经是标准格式，保留
+                    if not field_value.get("value"):
+                        logger.warning(f"normalize_format: plan.{field_name} 缺少value字段")
 
         result["subjective"] = subject_section
         result["objective"] = objective_section

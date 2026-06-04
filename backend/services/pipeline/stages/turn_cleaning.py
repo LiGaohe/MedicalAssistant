@@ -68,8 +68,10 @@ class TurnCleaningStage(PipelineStage):
         if not segments:
             return {}, []
 
-        if ctx.debug_mode:
-            logger.info("调试模式：使用串行处理")
+        # 串行处理模式：禁用并行以避免API速率限制
+        if ctx.sequential or ctx.debug_mode:
+            reason = "串行模式" if ctx.sequential else "调试模式"
+            logger.info(f"{reason}：使用串行处理")
             all_role_mappings = {}
             all_cleaned_turns = []
             for i, segment in enumerate(segments):
@@ -155,8 +157,8 @@ class TurnCleaningStage(PipelineStage):
                 return speaker_handler.fallback_role_annotation(segment)
 
             try:
-                response = ctx.llm_service.generate(prompt, timeout=300.0, thinking_enabled=False)
-                logger.debug("转写清洗阶段: thinking模式已禁用")
+                response = ctx.llm_service.generate_stream_to_response(prompt, timeout=300.0, thinking_enabled=False)
+                logger.debug("转写清洗阶段: thinking模式已禁用，使用流式处理")
                 ctx.llm_stats.record_from_response("turn_cleaning", prompt, response)
                 response_text = response.text
             except Exception as e:

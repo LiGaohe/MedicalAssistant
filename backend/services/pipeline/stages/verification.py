@@ -56,8 +56,8 @@ class VerificationStage(PipelineStage):
                 return result
 
             try:
-                response = ctx.llm_service.generate(prompt)
-                logger.debug("核查修订阶段: thinking模式已启用（问题判断）")
+                response = ctx.llm_service.generate_stream_to_response(prompt)
+                logger.debug("核查修订阶段: thinking模式已启用（问题判断），使用流式处理")
                 ctx.llm_stats.record_from_response("verification", prompt, response)
                 response_text = response.text
             except Exception as e:

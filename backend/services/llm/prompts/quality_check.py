@@ -1,0 +1,248 @@
+"""质量核查阶段提示词模板"""
+from .template import PromptTemplate
+
+
+def get_quality_check_templates_zh() -> dict:
+    """获取中文质量核查模板"""
+    templates = {}
+
+    templates["claim_verification"] = PromptTemplate(
+        template="""你是一个医疗病历审核专家。请对以下SOAP病历草稿的A（评估）和P（计划）部分做**逐claim原子核查**。
+
+## 原始对话
+$transcript
+
+## SOAP草稿
+$draft_emr
+
+## 预识别的无依据事实（来自幻觉检查阶段）
+以下事实已在幻觉检查阶段被识别为无对话依据，请直接将其标记为unsupported，无需再次核查：
+$preidentified_unsupported
+
+## 核查任务
+1. 提取A和P部分中的每一条**原子陈述（atomic claim）**
+2. 在原始对话中逐条检索证据
+3. 对每条claim做出判定
+
+## 判定标准
+- **supported**：对话中有明确的原句支持该陈述
+- **unsupported**：对话中没有相应依据，或与对话明确矛盾
+- **not_addressed**：对话中部分涉及但信息不足以确认
+
+## 输出格式
+请严格按照以下JSON格式输出：
+{
+  "claims": [
+    {
+      "claim_text": "从SOAP中提取的原子陈述",
+      "soap_section": "A或P",
+      "soap_field": "soap中的字段路径，如assessment.diagnosis或plan.treatment",
+      "verdict": "supported|unsupported|not_addressed",
+      "evidence_text": "对话中的原文依据（unsupported时可为空）",
+      "reasoning": "判定推理过程（简要说明为何做此判定）"
+    }
+  ],
+  "summary": {
+    "total": N,
+    "supported": N,
+    "unsupported": N,
+    "not_addressed": N
+  }
+}
+
+## 注意事项
+- claim_text必须是原子级别的，一条claim只陈述一个事实
+- 如果A或P部分为空，对应claims数组为空，summary中相应计数为0
+- 判定需严格，不确定的情况应归为not_addressed而非强行判定
+- **如果预识别列表中的事实出现在SOAP中，请直接将其标记为unsupported，无需再次核查**""",
+        required_vars=["transcript", "draft_emr", "preidentified_unsupported"]
+    )
+
+    templates["checklist_verification"] = PromptTemplate(
+        template="""你是一个医疗病历审核专家。请检查以下SOAP病历草稿是否遗漏了对话中的**关键信息**。
+
+## 原始对话
+$transcript
+
+## SOAP草稿
+$draft_emr
+
+## 检查清单
+请逐项检查以下内容是否遗漏：
+
+### 1. 主诉完整性
+- 对话中患者明确表述的主诉症状是否完整记录？
+- 症状持续时间是否记录？
+- 就诊原因是否体现？
+
+### 2. 关键阳性/阴性症状
+- 对话中患者明确表述的关键阳性症状是否全部记录？
+- 患者明确否认的症状（医生主动询问的）是否记录？
+- 伴随症状是否完整？
+
+### 3. 关键处置建议
+- 医生明确给出的用药方案是否完整记录？
+- 医生明确建议的检查项目是否记录？
+- 医生明确要求的复诊安排是否记录？
+- 医生明确给出的健康教育/注意事项是否记录？
+
+## 输出格式
+请严格按照以下JSON格式输出：
+{
+  "missing_items": [
+    {
+      "item": "遗漏的具体内容描述",
+      "importance": "high|medium|low",
+      "soap_section": "S|O|A|P",
+      "evidence_text": "对话中的原文依据（证明该信息存在但未被记录）"
+    }
+  ],
+  "summary": {
+    "total_missing": N,
+    "high_importance_missing": N
+  }
+}
+
+## 注意事项
+- 只报告对话中**确实存在**但病历中**未记录**的信息
+- 对话中未提及的内容不算遗漏，不要报告
+- importance=high：影响诊断或治疗安全的关键信息（如药物过敏、关键症状、用药方案）
+- importance=medium：影响诊断完整性的补充信息
+- importance=low：辅助性信息（如一般性健康建议）
+- 如果认为病历已完整覆盖对话信息，missing_items为空数组，各项count为0""",
+        required_vars=["transcript", "draft_emr"]
+    )
+
+    templates["field_revision"] = PromptTemplate(
+        template="""你是一个医疗病历修订专家。请根据核查问题清单对SOAP病历草稿做**定点修订**。
+
+## SOAP草稿
+$draft_emr
+
+## 核查问题清单
+$issues_json
+
+## 原始对话（供核实）
+$transcript
+
+## 修订原则
+**只修改失败的字段，其他字段严格保持不变。**
+
+### 修订规则
+
+#### 1. unsupported claim → 删除或改弱措辞
+- 如果claim在对话中完全无依据：删除该claim对应的内容
+- 如果claim的确定性被高估：改为更弱的措辞（如"确诊XXX"改为"考虑XXX"）
+
+#### 2. missing item → 如果对话有依据则补充
+- 从original transcript中找到对应原文
+- 将内容补充到对应的SOAP字段中
+- 补充时保持与原有内容的风格一致
+- 如果对话中确实没有依据，则不要补充
+
+#### 3. 确定性错误 → 降级
+- 将明确诊断(explicit_diagnosis)降级为倾向性诊断(suspected_diagnosis)
+- 将倾向性诊断降级为症状性评估(symptom_based_assessment)
+- 对应assessment_items中的diagnosis_type和certainty_level同步更新
+
+## 输出格式
+输出修订后的完整SOAP JSON，格式必须与草稿完全一致（含value和source_turn_indices）：
+{
+  "subjective": {
+    "text": "...",
+    "chief_complaint": {"value": "...", "source_turn_indices": [0, 1]},
+    "history_present_illness": {"value": "...", "source_turn_indices": [2, 3]},
+    "denied_symptoms": {"value": "...", "source_turn_indices": []},
+    "past_history": {"value": "...", "source_turn_indices": []}
+  },
+  "objective": {
+    "text": "...",
+    "physical_examination": {"value": "...", "source_turn_indices": []},
+    "auxiliary_examination": {"value": "...", "source_turn_indices": []}
+  },
+  "assessment": {
+    "text": "...",
+    "diagnosis": {"value": "...", "source_turn_indices": []},
+    "assessment_items": [
+      {
+        "text": "...",
+        "certainty_level": "high",
+        "source_turn_indices": [],
+        "diagnosis_type": "explicit_diagnosis"
+      }
+    ]
+  },
+  "plan": {
+    "text": "...",
+    "treatment": {"value": "...", "source_turn_indices": []},
+    "advice": {"value": "...", "source_turn_indices": []},
+    "plan_items": {
+      "medications": [{"name": "", "dosage": "", "frequency": "", "duration": "", "source_turn_indices": []}],
+      "tests": [{"name": "", "reason": "", "source_turn_indices": []}],
+      "follow_up": {"text": "", "source_turn_indices": []},
+      "education": {"text": "", "source_turn_indices": []}
+    }
+  }
+}
+
+## 注意事项
+- 严禁重写整份SOAP，只做最小化定点修订
+- 未涉及问题的字段必须原样保留，不得修改
+- source_turn_indices必须保持准确：删除内容时清空对应数组，补充内容时填入正确的turn序号""",
+        required_vars=["draft_emr", "issues_json", "transcript"]
+    )
+
+    templates["certainty_verification"] = PromptTemplate(
+        template="""你是一个医疗病历审核专家。请检查以下SOAP病历草稿的A（评估）部分中诊断的**确定性层级**是否被拔高。
+
+## 原始对话
+$transcript
+
+## SOAP草稿（仅A部分）
+$assessment_json
+
+## 任务
+逐条检查assessment_items中的diagnosis_type和certainty_level是否与对话原文匹配：
+
+### 判定规则
+1. **explicit_diagnosis 检查**：如果 diagnosis_type=explicit_diagnosis，必须在对话中找到医生**明确下诊断**的原文
+   - 医生明确说"你是XX病""诊断是XX""确诊XX" → 有效
+   - 医生说"可能是XX""考虑XX""不排除XX""倾向XX" → **确定性被拔高**，应标记为certainty_mismatch
+2. **certainty_level 检查**：dialogue证据力度与certainty_level不匹配
+   - high：对话中有明确诊断语句
+   - medium：对话中为倾向性表述
+   - low：对话中仅推测或无直接诊断
+3. **symptom_based_assessment 检查**：对话中只有症状描述无任何诊断线索时，若有诊断内容则为拔高
+
+### 输出格式
+{
+  "certainty_errors": [
+    {
+      "soap_text": "SOAP中的诊断文本",
+      "current_diagnosis_type": "explicit_diagnosis",
+      "current_certainty_level": "high",
+      "correct_diagnosis_type": "suspected_diagnosis",
+      "correct_certainty_level": "medium",
+      "evidence_text": "对话中表明仅为倾向性诊断的原文",
+      "reasoning": "判定理由"
+    }
+  ],
+  "summary": {
+    "total_checked": N,
+    "errors_found": N
+  }
+}
+
+## 注意事项
+- 如果没有发现确定性错误，certainty_errors为空数组，summary中errors_found为0
+- 只检查确定性层级被拔高的情况，不检查降级（保守偏向安全侧）
+- 不确定则不标记，避免误报""",
+        required_vars=["transcript", "assessment_json"]
+    )
+
+    return templates
+
+
+def get_quality_check_templates_en() -> dict:
+    """获取英文质量核查模板（暂无，返回空字典）"""
+    return {}

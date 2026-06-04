@@ -196,3 +196,113 @@ def _extract_all_json_objects(text: str) -> List[Dict[str, Any]]:
                 start = -1
 
     return results
+
+
+# ──────────────────────────────────────────────
+#  转写裁剪工具函数（供多个阶段复用）
+# ──────────────────────────────────────────────
+
+def extract_section_fields(section: Dict[str, Any], section_name: str):
+    """提取章节字段，区分三种情况。
+
+    Args:
+        section: SOAP章节dict
+        section_name: 章节名称（用于日志）
+
+    Returns:
+        (normal_fields, suspect_fields, skipped_count)
+        - normal_fields: value非空且有source_turn_indices的字段
+        - suspect_fields: value非空但无source_turn_indices的字段
+        - skipped_count: value为空跳过的字段数
+    """
+    normal_fields = []
+    suspect_fields = []
+    skipped_count = 0
+
+    for field_name, field_data in section.items():
+        if field_name in ("text", "evidence_traces", "assessment_items", "plan_items"):
+            continue
+        if not isinstance(field_data, dict):
+            continue
+
+        value = field_data.get("value", "")
+        if not value or not isinstance(value, str) or not value.strip():
+            skipped_count += 1
+            continue
+
+        source_indices = field_data.get("source_turn_indices", [])
+
+        field_info = {
+            "field_name": field_name,
+            "value": value.strip(),
+            "section": section_name,
+        }
+
+        if source_indices and isinstance(source_indices, list) and len(source_indices) > 0:
+            field_info["source_turn_indices"] = source_indices
+            normal_fields.append(field_info)
+        else:
+            suspect_fields.append(field_info)
+
+    return normal_fields, suspect_fields, skipped_count
+
+
+def collect_turn_indices(fields: list) -> list:
+    """从字段列表中收集所有source_turn_indices，去重排序。
+
+    Args:
+        fields: 字段信息列表，每个元素含可选的source_turn_indices
+
+    Returns:
+        sorted unique indices
+    """
+    all_indices = set()
+    for field in fields:
+        indices = field.get("source_turn_indices", [])
+        if isinstance(indices, list):
+            all_indices.update(indices)
+    return sorted(all_indices)
+
+
+def build_section_transcript(turns: list, indices: list, buffer: int = 1) -> str:
+    """根据turn_index列表构建裁剪后的对话文本。
+
+    Args:
+        turns: 所有对话轮次列表（每个turn需有turn_index, speaker, text/corrected_text属性）
+        indices: 需要包含的turn_index列表
+        buffer: 每个索引前后额外包含的轮次数
+
+    Returns:
+        裁剪后的对话文本
+    """
+    if not indices:
+        return ""
+
+    # 构建turn_index到turn的映射
+    turn_map = {}
+    for turn in turns:
+        turn_map[turn.turn_index] = turn
+
+    if not turn_map:
+        return ""
+
+    # 计算需要包含的轮次范围（加缓冲）
+    min_idx = min(indices) - buffer
+    max_idx = max(indices) + buffer
+    # 限制在有效范围内
+    min_idx = max(min_idx, min(turn_map.keys()))
+    max_idx = min(max_idx, max(turn_map.keys()))
+
+    # 收集范围内的轮次
+    selected_turns = []
+    for idx in range(min_idx, max_idx + 1):
+        turn = turn_map.get(idx)
+        if turn:
+            text = turn.corrected_text or turn.text
+            if text:
+                selected_turns.append(f"[{turn.speaker}]: {text}")
+
+    if not selected_turns:
+        return ""
+
+    return "\n".join(selected_turns)

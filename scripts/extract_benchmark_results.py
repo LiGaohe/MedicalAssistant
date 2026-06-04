@@ -42,6 +42,37 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 定义每个配置包含的LLM调用阶段（与run_full_benchmark.py保持一致）
+CONFIG_STAGE_GROUPS = {
+    "end_to_end": [
+        "draft_generation_free_text",
+        "draft_generation_json"
+    ],
+    "simplified": [
+        # 简化管线：skip_cleaning=True, skip_hallucination_check=True, skip_verification=True
+        # 实际LLM调用：draft_generation → soap_structuring
+        "draft_generation_free_text",
+        "draft_generation_json",
+        "soap_structuring"
+    ],
+    "standard": [
+        # 标准管线：skip_hallucination_check=True
+        # 实际LLM调用：turn_cleaning → draft_generation → soap_structuring → verification → field_revision
+        "turn_cleaning",
+        "draft_generation_free_text",
+        "draft_generation_json",
+        "soap_structuring",
+        "claim_verification",
+        "checklist_verification",
+        "certainty_verification",
+        "field_revision"
+    ],
+    "full": None,  # 使用全部stage
+    "no_verification": None,
+    "no_hallucination": None,
+    "no_term_norm": None
+}
+
 
 class BenchmarkResultExtractor:
     def __init__(self, db_url: str = None):
@@ -201,48 +232,109 @@ class BenchmarkResultExtractor:
             metrics["diagnosis_match_count"] = 0
 
         sample_tokens = {}
+        sample_tokens_complete = {}  # 只包含有generation token的完整记录
         total_tokens_list = []
         prompt_tokens_list = []
         completion_tokens_list = []
 
+        # 获取该配置对应的stage_group
+        stage_group = CONFIG_STAGE_GROUPS.get(config_key)
+        logger.info(f"配置 {config_key}: stage_group={stage_group}")
+
+        # 统计每个样本的总token（generation + evaluation）
         for run in success_runs:
-            llm_calls = self.get_llm_calls_by_run(run.id)
             run_total_tokens = 0
-            has_token_data = False
+            has_gen_tokens = False
+            has_eval_tokens = False
+
+            # 1. 从stage_breakdown中获取generation阶段的token
+            stage_breakdown = run.stage_breakdown if hasattr(run, 'stage_breakdown') and run.stage_breakdown else {}
+            
+            if stage_breakdown:
+                # 如果有stage_breakdown，根据stage_group提取对应阶段的token
+                if stage_group:
+                    # 提取指定阶段的token
+                    gen_tokens = 0
+                    for stage in stage_group:
+                        stage_stats = stage_breakdown.get(stage, {})
+                        stage_tokens = stage_stats.get("total_tokens", 0)
+                        if stage_tokens:
+                            gen_tokens += stage_tokens
+                            logger.debug(f"Run {run.id}: stage={stage}, tokens={stage_tokens}")
+                    
+                    if gen_tokens > 0:
+                        run_total_tokens += gen_tokens
+                        has_gen_tokens = True
+                        logger.debug(f"Run {run.id}: generation tokens (from stage_breakdown) = {gen_tokens}")
+                else:
+                    # stage_group为None，使用全部token（full配置）
+                    gen_tokens = sum(
+                        stage_stats.get("total_tokens", 0) 
+                        for stage_stats in stage_breakdown.values()
+                    )
+                    if gen_tokens > 0:
+                        run_total_tokens += gen_tokens
+                        has_gen_tokens = True
+                        logger.debug(f"Run {run.id}: generation tokens (all stages) = {gen_tokens}")
+            else:
+                # 没有stage_breakdown，使用旧的token_count字段（兼容旧数据）
+                if run.token_count and run.token_count > 0:
+                    run_total_tokens += run.token_count
+                    has_gen_tokens = True
+                    logger.debug(f"Run {run.id}: generation tokens (legacy) = {run.token_count}")
+
+            # 2. 获取evaluation阶段的token（benchmark_llm_calls.total_tokens）
+            llm_calls = self.get_llm_calls_by_run(run.id)
+            eval_tokens = 0
             for call in llm_calls:
                 if call.total_tokens is not None:
+                    eval_tokens += call.total_tokens
                     total_tokens_list.append(call.total_tokens)
-                    run_total_tokens += call.total_tokens
-                    has_token_data = True
                 if call.prompt_tokens is not None:
                     prompt_tokens_list.append(call.prompt_tokens)
                 if call.completion_tokens is not None:
                     completion_tokens_list.append(call.completion_tokens)
-            if has_token_data:
+
+            if eval_tokens > 0:
+                run_total_tokens += eval_tokens
+                has_eval_tokens = True
+                logger.debug(f"Run {run.id}: evaluation tokens = {eval_tokens}")
+
+            # 记录所有有token数据的样本
+            if run_total_tokens > 0:
                 sample_tokens[run.id] = run_total_tokens
+                logger.debug(f"Run {run.id}: total tokens = {run_total_tokens}")
 
-        # 如果 BenchmarkLLMCall 没有 token 数据，使用 BenchmarkRun.token_count 作为备选
-        run_token_counts = []
-        for run in success_runs:
-            if run.id not in sample_tokens and run.token_count and run.token_count > 0:
-                total_tokens_list.append(run.token_count)
-                run_token_counts.append(run.token_count)
-                sample_tokens[run.id] = run.token_count
+            # 只记录有generation token的完整样本（用于准确计算平均值）
+            if has_gen_tokens and run_total_tokens > 0:
+                sample_tokens_complete[run.id] = run_total_tokens
+                logger.debug(f"Run {run.id}: 完整token记录 = {run_total_tokens}")
 
-        if total_tokens_list:
-            metrics["total_tokens"] = sum(total_tokens_list)
-            metrics["avg_tokens_per_call"] = statistics.mean(total_tokens_list)
-            if sample_tokens:
-                metrics["avg_tokens_per_sample"] = statistics.mean(list(sample_tokens.values()))
-                metrics["samples_with_tokens"] = len(sample_tokens)
-            else:
-                metrics["avg_tokens_per_sample"] = None
-                metrics["samples_with_tokens"] = 0
+        # 计算token统计指标
+        # 使用完整记录计算平均值（排除缺失generation token的记录）
+        if sample_tokens_complete:
+            metrics["total_tokens"] = sum(sample_tokens_complete.values())
+            metrics["avg_tokens_per_sample"] = statistics.mean(list(sample_tokens_complete.values()))
+            metrics["samples_with_tokens"] = len(sample_tokens_complete)
+            metrics["samples_with_partial_tokens"] = len(sample_tokens) - len(sample_tokens_complete)
+            logger.info(f"配置 {config_key}: {len(sample_tokens_complete)} 个完整样本, {metrics['samples_with_partial_tokens']} 个部分样本, 总token={metrics['total_tokens']}, 平均={metrics['avg_tokens_per_sample']:.1f}")
+        elif sample_tokens:
+            # 如果没有完整记录，使用所有有token数据的记录（但标记为不完整）
+            metrics["total_tokens"] = sum(sample_tokens.values())
+            metrics["avg_tokens_per_sample"] = statistics.mean(list(sample_tokens.values()))
+            metrics["samples_with_tokens"] = len(sample_tokens)
+            metrics["samples_with_partial_tokens"] = 0
+            logger.warning(f"配置 {config_key}: 无完整token记录，使用 {len(sample_tokens)} 个部分样本, 总token={metrics['total_tokens']}, 平均={metrics['avg_tokens_per_sample']:.1f}")
         else:
             metrics["total_tokens"] = None
-            metrics["avg_tokens_per_call"] = None
             metrics["avg_tokens_per_sample"] = None
             metrics["samples_with_tokens"] = 0
+
+        # evaluation阶段的每次调用的平均token（用于分析调用效率）
+        if total_tokens_list:
+            metrics["avg_tokens_per_call"] = statistics.mean(total_tokens_list)
+        else:
+            metrics["avg_tokens_per_call"] = None
 
         if prompt_tokens_list:
             metrics["total_prompt_tokens"] = sum(prompt_tokens_list)
@@ -370,8 +462,7 @@ class BenchmarkResultExtractor:
             "full": "完整管线（六阶段）",
             "no_term_norm": "− 术语规范化",
             "no_hallucination": "− 幻觉检查",
-            "no_verification": "− 后置核查",
-            "no_field_revision": "− 字段修订",
+            "no_verification": "− 后置核查与字段修订",
         }
 
         def fmt(val, precision=1, default="未检测"):
@@ -445,7 +536,7 @@ def main():
         results = extractor.export_all_results()
 
         if args.include_ablation:
-            ablation_configs = ["full", "no_term_norm", "no_hallucination", "no_verification", "no_field_revision"]
+            ablation_configs = ["full", "no_term_norm", "no_hallucination", "no_verification"]
             for config in ablation_configs:
                 if config not in results:
                     try:

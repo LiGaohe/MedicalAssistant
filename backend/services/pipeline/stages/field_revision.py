@@ -120,8 +120,8 @@ class FieldRevisionStage(PipelineStage):
                 return None
 
             try:
-                response = ctx.llm_service.generate(prompt)
-                logger.debug("字段级修订阶段: thinking模式已启用（默认）")
+                response = ctx.llm_service.generate_stream_to_response(prompt)
+                logger.debug("字段级修订阶段: thinking模式已启用（默认），使用流式处理")
                 ctx.llm_stats.record_from_response("field_revision", prompt, response)
                 response_text = response.text
             except Exception as e:

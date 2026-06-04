@@ -31,3 +31,6 @@ skills-lock.json
 opencode.jsonc
 .codegraph
 med_env/
+.opencode/
+node_modules/
+.*

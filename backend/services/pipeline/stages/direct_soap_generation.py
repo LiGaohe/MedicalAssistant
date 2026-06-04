@@ -62,8 +62,8 @@ class DirectSOAPGenerationStage(PipelineStage):
                 return {"draft_text": "", "emr_draft": self._empty_draft(), "status": "llm_unavailable"}
 
             try:
-                response = ctx.llm_service.generate(prompt, thinking_enabled=False)
-                logger.debug("自由文本草稿生成阶段: thinking模式已禁用")
+                response = ctx.llm_service.generate_stream_to_response(prompt, thinking_enabled=False)
+                logger.debug("自由文本草稿生成阶段: thinking模式已禁用，使用流式处理")
                 ctx.llm_stats.record_from_response("draft_generation_free_text", prompt, response)
                 response_text = response.text
             except Exception as e:
@@ -158,8 +158,8 @@ class DirectSOAPGenerationStage(PipelineStage):
                 return {"emr_draft": empty_draft, "status": "llm_unavailable"}
 
             try:
-                response = ctx.llm_service.generate(prompt, thinking_enabled=False)
-                logger.debug("直接草稿生成阶段: thinking模式已禁用")
+                response = ctx.llm_service.generate_stream_to_response(prompt, thinking_enabled=False)
+                logger.debug("直接草稿生成阶段: thinking模式已禁用，使用流式处理")
                 ctx.llm_stats.record_from_response("draft_generation_json", prompt, response)
                 response_text = response.text
             except Exception as e:
@@ -242,6 +242,7 @@ class DirectSOAPGenerationStage(PipelineStage):
 
                 section[field_name] = {
                     "value": field_value.get("value", ""),
+                    "source_turn_indices": source_indices if source_indices else [],
                     "evidence_traces": evidence_traces
                 }
                 total_traces += len(evidence_traces)

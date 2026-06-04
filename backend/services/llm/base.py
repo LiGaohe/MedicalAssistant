@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Iterator, Generator
 
 
 @dataclass
@@ -15,6 +15,7 @@ class LLMRequest:
     thinking_enabled: bool = False
     thinking_effort: str = "high"
     timeout: Optional[float] = None
+    stream: bool = False
     
 
 @dataclass
@@ -27,6 +28,18 @@ class LLMResponse:
     raw_response: Optional[Dict[str, Any]] = None
     thinking_content: Optional[str] = None
     actual_latency: Optional[float] = None
+
+
+@dataclass
+class LLMStreamChunk:
+    """流式响应的单个chunk"""
+    text: str
+    model: str
+    provider: str
+    finish_reason: Optional[str] = None
+    thinking_content: Optional[str] = None
+    is_final: bool = False
+    usage: Optional[Dict[str, int]] = None
     
 
 class LLMAdapter(ABC):
@@ -40,6 +53,11 @@ class LLMAdapter(ABC):
         
     @abstractmethod
     def generate(self, request: LLMRequest) -> LLMResponse:
+        pass
+    
+    @abstractmethod
+    def generate_stream(self, request: LLMRequest) -> Generator[LLMStreamChunk, None, None]:
+        """流式生成响应"""
         pass
     
     @abstractmethod

@@ -81,10 +81,19 @@ MedicalAssisstant/
 │   │   ├── postprocessor.py   # 后处理服务（医疗术语纠错）
 │   │   ├── llm/               # LLM服务模块
 │   │   │   ├── __init__.py
-│   │   │   ├── base.py        # LLM基类
-│   │   │   ├── openai_compatible_adapter.py # OpenAI兼容接口（支持JSON模式、思考模式）
-│   │   │   ├── prompts.py     # Prompt模板管理（中英文）
-│   │   │   └── llm_service.py # LLM服务封装
+│   │   │   ├── base.py        # LLM基类（含LLMStreamChunk流式响应数据类）
+│   │   │   ├── openai_compatible_adapter.py # OpenAI兼容接口（支持JSON模式、思考模式、流式处理）
+│   │   │   ├── prompts/         # Prompt模板管理（按阶段拆分）
+│   │   │   │   ├── __init__.py  # 包入口，导出PromptTemplate和PromptManager
+│   │   │   │   ├── template.py  # PromptTemplate基类
+│   │   │   │   ├── preprocessing.py  # 对话预处理模板
+│   │   │   │   ├── soap_generation.py # SOAP病历生成模板
+│   │   │   │   ├── quality_check.py  # 质量核查模板
+│   │   │   │   ├── evaluation.py     # 评估模板
+│   │   │   │   ├── terminology.py    # 术语处理模板
+│   │   │   │   ├── deprecated.py     # 已废弃模板
+│   │   │   │   └── manager.py        # PromptManager管理器
+│   │   │   └── llm_service.py # LLM服务封装（含generate_stream流式生成、generate_stream_to_response兼容方法）
 │   │   ├── umls/              # UMLS医学术语库模块
 │   │   │   ├── __init__.py    # 数据类定义
 │   │   │   ├── umls_client.py # UMLS API客户端（同步）
@@ -122,7 +131,7 @@ MedicalAssisstant/
 │   │   │   │   ├── __init__.py
 │   │   │   │   ├── turn_cleaning.py    # 阶段1: 转写清洗与角色纠错
 │   │   │   │   ├── direct_soap_generation.py  # 阶段2: 直接草稿生成
-│   │   │   │   ├── hallucination_check.py    # 阶段2.5: 幻觉检查（草稿生成后立即核查全SOAP各字段与对话的一致性）
+│   │   │   │   ├── hallucination_check.py    # 阶段2.5: 幻觉检查（按SOAP章节分段核查，利用source_turn_indices裁剪转写减少token消耗）
 │   │   │   │   ├── claim_verification.py    # 阶段3: 后置核查（Claim/Checklist/硬规则/确定性四步核查）
 │   │   │   ├── soap_structuring.py      # 阶段3: 草稿结构化（自由文本草稿→SOAP JSON）
 │   │   │   └── field_revision.py        # 阶段4: 字段级修订与落盘
@@ -552,9 +561,125 @@ Audio (16kHz) → 128-mel Spectrogram → Conv2d×3 (8× downsample)
 - **仅需高精度转写**：使用Qwen3-ASR
 - **医疗术语识别**：FunASR + 热词增强
 
-### 2. 语音采集模块设计
+### 2. LLM流式处理模块设计
 
-#### 2.1 音频采集流程
+#### 2.1 流式处理架构
+
+```mermaid
+graph TB
+    A[LLM请求] --> B{请求类型}
+    B -->|非流式| C[generate方法]
+    B -->|流式| D[generate_stream方法]
+    
+    C --> E[一次性HTTP请求]
+    E --> F[完整响应]
+    F --> G[LLMResponse对象]
+    
+    D --> H[流式HTTP请求]
+    H --> I[SSE响应流]
+    I --> J[逐chunk处理]
+    J --> K[LLMStreamChunk对象]
+    K --> L{是否最终chunk}
+    L -->|否| M[实时输出]
+    L -->|是| N[完整响应]
+    
+    M --> J
+    N --> O[可选: 转换为LLMResponse]
+    
+    style A fill:#e1f5ff
+    style G fill:#e8f5e9
+    style K fill:#fff3e0
+    style O fill:#fce4ec
+```
+
+#### 2.2 流式处理优势
+
+| 特性 | 非流式处理 | 流式处理 |
+|------|-----------|---------|
+| 请求方式 | 一次性发送 | 逐步接收 |
+| 超时风险 | 高（长时间等待） | 低（持续接收） |
+| 限流风险 | 高（大量token） | 低（分块传输） |
+| 实时反馈 | 无 | 有（逐chunk显示） |
+| 内存占用 | 高（完整响应） | 低（增量处理） |
+| 兼容性 | 完全兼容现有代码 | 提供兼容方法 |
+
+#### 2.3 核心类设计
+
+**LLMRequest扩展**：
+
+```python
+@dataclass
+class LLMRequest:
+    prompt: str
+    max_tokens: int = 2048
+    temperature: float = 0.7
+    stream: bool = False  # 新增流式标志
+    # ... 其他参数
+```
+
+**LLMStreamChunk数据类**：
+
+```python
+@dataclass
+class LLMStreamChunk:
+    text: str              # 当前chunk文本
+    model: str             # 模型名称
+    provider: str          # 提供商名称
+    finish_reason: Optional[str] = None  # 结束原因
+    thinking_content: Optional[str] = None  # thinking内容
+    is_final: bool = False  # 是否最终chunk
+    usage: Optional[Dict[str, int]] = None  # token使用统计
+```
+
+#### 2.4 使用方式
+
+**方式1：直接流式处理**：
+
+```python
+for chunk in llm_service.generate_stream(prompt, config_name="agnes"):
+    if not chunk.is_final:
+        # 实时处理每个chunk
+        print(chunk.text, end='', flush=True)
+    else:
+        # 最终完整响应
+        print(f"\n完成: {chunk.finish_reason}")
+        print(f"Token使用: {chunk.usage}")
+```
+
+**方式2：兼容现有代码**：
+
+```python
+# 内部使用流式处理，但返回完整响应对象
+response = llm_service.generate_stream_to_response(prompt)
+# 与原有 generate() 方法返回类型一致
+text = response.text
+usage = response.usage
+```
+
+#### 2.5 技术实现细节
+
+**SSE响应解析**：
+
+- 使用 `httpx.Client.stream()` 进行流式HTTP请求
+- 解析Server-Sent Events格式：`data: {JSON}`
+- 处理特殊标记：`data: [DONE]` 表示流结束
+- 支持thinking模式的流式输出
+
+**错误处理与重试**：
+
+- 保持原有的重试机制（max_retries=5）
+- 流式请求失败时自动重试
+- 完整的日志记录和错误追踪
+
+**性能优化**：
+
+- 使用生成器模式，避免内存占用过高
+- 支持chunk回调函数，实时处理每个chunk
+- 保持请求间隔控制，防止API过载
+
+### 3. 语音采集模块设计
+
+#### 3.1 音频采集流程
 
 ```mermaid
 graph TB
@@ -581,7 +706,7 @@ graph TB
 | 声道数   | 1            | 单声道     |
 | 缓冲区大小 | 1024 samples | 约64ms延迟 |
 
-#### 2.2 多麦克风支持
+#### 3.2 多麦克风支持
 
 ```mermaid
 graph LR
@@ -1170,9 +1295,9 @@ graph TB
 | PipelineOrchestrator | 核心编排器，串联 6 个 PipelineStage + 术语规范化后处理（TurnCleaningStage → DirectSOAPGenerationStage → SoapStructuringStage[free_text模式] → _normalize_terms_in_draft → HallucinationCheckStage → ClaimVerificationStage → FieldRevisionStage）；HallucinationCheckStage 在草稿结构化后使用 consistency_check 模板核查全SOAP各字段与对话的一致性，标记无依据的虚假内容；process_transcript/process_with_callback 支持 skip_cleaning/skip_hallucination_check/stop_after_draft/skip_verification 参数控制各阶段执行与跳过；free_text模式下推送 draft_text_ready 事件（含draft_text字段），结构化完成后推送 draft_ready 事件（含emr_draft字段）；_format_turns 方法用于 skip_cleaning=True 时直接构建 combined_text；_compute_changes 方法对比 before/after EMR 字段值差异生成变更记录（term_replacement/unsupported_claim_removed/missing_item_added/downgrade/revision） | backend/services/pipeline/orchestrator.py |
 | LLMPipelineServiceEnglish | 英文多阶段LLM处理，跳过翻译步骤优化 | backend/services/llm_pipeline_service_en.py |
 | LLMService | LLM服务，支持多适配器、模板渲染、JSON模式和思考模式 | backend/services/llm/llm_service.py |
-| PromptManager | Prompt模板管理器，支持中英文模板，按需渲染（Template.safe_substitute） | backend/services/llm/prompts.py |
+| PromptManager | Prompt模板管理器，支持中英文模板，按需渲染（Template.safe_substitute）；按阶段拆分为子模块（preprocessing/soap_generation/quality_check/evaluation/terminology/deprecated），由manager.py组合 | backend/services/llm/prompts/ |
 
-### prompts.py 模板清单
+### prompts/ 模板清单
 
 `_load_chinese_templates()` 注册的中文模板：
 
@@ -1712,7 +1837,35 @@ funasr_engine  medasr_engine │
 | `key_facts` | JSON | 关键事实提取结果（中间结果） |
 | `elapsed_seconds` | Float | 运行耗时 |
 | `llm_call_count` | Integer | LLM调用次数 |
+| `char_count` | Integer | 字符消耗 |
+| `token_count` | Integer | Token消耗 |
+| `stage_breakdown` | JSON | **每个阶段的LLM调用统计**（新增字段） |
 | `error_message` | Text | 错误信息 |
+
+**stage_breakdown字段结构**：
+
+```json
+{
+  "draft_generation_free_text": {
+    "call_count": 1,
+    "total_chars": 1234,
+    "total_tokens": 567,
+    "total_latency": 2.5
+  },
+  "soap_structuring": {
+    "call_count": 1,
+    "total_chars": 456,
+    "total_tokens": 123,
+    "total_latency": 1.2
+  }
+}
+```
+
+**用途**：
+- 区分不同配置包含的不同阶段的token消耗
+- 简化管线只统计draft_generation和soap_structuring的token
+- 标准管线统计turn_cleaning、draft_generation、soap_structuring、verification、field_revision的token
+- 完整管线统计全部阶段的token
 
 **中间结果持久化机制**：
 

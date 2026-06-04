@@ -59,8 +59,7 @@ def main():
         ('standard', '标准管线'),
         ('no_term_norm', '无术语规范化'),
         ('no_hallucination', '无幻觉检测'),
-        ('no_verification', '无后验证'),
-        ('no_field_revision', '无字段修订'),
+        ('no_verification', '无后置核查与字段修订'),
         ('full_ablation', '完整消融')
     ]
     
