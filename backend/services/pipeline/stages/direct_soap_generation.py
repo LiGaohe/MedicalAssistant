@@ -35,9 +35,17 @@ class DirectSOAPGenerationStage(PipelineStage):
             return self._execute_free_text_mode(ctx, combined_text, stage_start)
 
     def _execute_free_text_mode(self, ctx: PipelineContext, combined_text: str, stage_start: float) -> Dict[str, Any]:
+        # 压缩transcript
+        compressed_transcript, dict_str = ctx.get_compressed_transcript()
+        if dict_str:
+            logger.info(f"自由文本草稿生成: transcript已压缩, 原文{len(combined_text)}字符 -> 压缩后{len(compressed_transcript)}字符")
+        else:
+            logger.info(f"自由文本草稿生成: transcript未压缩, 使用原文{len(combined_text)}字符")
+
         prompt = ctx.prompt_manager.render(
             "free_soap_generation",
-            transcript=combined_text
+            compression_dict=dict_str,
+            transcript=compressed_transcript
         )
         logger.debug(f"自由文本草稿生成提示词长度: {len(prompt)} 字符")
 
@@ -62,7 +70,7 @@ class DirectSOAPGenerationStage(PipelineStage):
                 return {"draft_text": "", "emr_draft": self._empty_draft(), "status": "llm_unavailable"}
 
             try:
-                response = ctx.llm_service.generate_stream_to_response(prompt, thinking_enabled=False)
+                response = ctx.llm_service.generate_stream_to_response(prompt, thinking_enabled=False, compression_dict=dict_str)
                 logger.debug("自由文本草稿生成阶段: thinking模式已禁用，使用流式处理")
                 ctx.llm_stats.record_from_response("draft_generation_free_text", prompt, response)
                 response_text = response.text
@@ -131,9 +139,17 @@ class DirectSOAPGenerationStage(PipelineStage):
         return "\n\n".join(sections) if sections else ""
 
     def _execute_json_mode(self, ctx: PipelineContext, combined_text: str, stage_start: float) -> Dict[str, Any]:
+        # 压缩transcript
+        compressed_transcript, dict_str = ctx.get_compressed_transcript()
+        if dict_str:
+            logger.info(f"直接草稿生成: transcript已压缩, 原文{len(combined_text)}字符 -> 压缩后{len(compressed_transcript)}字符")
+        else:
+            logger.info(f"直接草稿生成: transcript未压缩, 使用原文{len(combined_text)}字符")
+
         prompt = ctx.prompt_manager.render(
             "direct_soap_generation",
-            transcript=combined_text
+            compression_dict=dict_str,
+            transcript=compressed_transcript
         )
         logger.debug(f"直接草稿生成提示词长度: {len(prompt)} 字符")
 
@@ -158,7 +174,7 @@ class DirectSOAPGenerationStage(PipelineStage):
                 return {"emr_draft": empty_draft, "status": "llm_unavailable"}
 
             try:
-                response = ctx.llm_service.generate_stream_to_response(prompt, thinking_enabled=False)
+                response = ctx.llm_service.generate_stream_to_response(prompt, thinking_enabled=False, compression_dict=dict_str)
                 logger.debug("直接草稿生成阶段: thinking模式已禁用，使用流式处理")
                 ctx.llm_stats.record_from_response("draft_generation_json", prompt, response)
                 response_text = response.text

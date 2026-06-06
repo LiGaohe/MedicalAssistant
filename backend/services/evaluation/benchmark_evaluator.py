@@ -50,9 +50,11 @@ class LoggedEvaluator(BaseEvaluator):
         logger.info(f"[{self.evaluator_name}] LLM调用 - 模板: {template_name}, prompt长度: {prompt_length}")
 
         try:
+            # 关闭thinking模式：评估是模式匹配任务，不需要深度推理
             response = self.llm_service.generate(
                 prompt=prompt,
-                temperature=temperature
+                temperature=temperature,
+                thinking_enabled=False
             )
             response_length = len(response.text)
             
@@ -110,33 +112,59 @@ class LoggedConsistencyEvaluator(LoggedEvaluator):
         super().__init__(llm_service, "consistency", call_records)
         self._base_evaluator = ConsistencyEvaluator(llm_service)
 
-    def evaluate(self, transcript: str, emr_content: Dict[str, Any]) -> Dict[str, Any]:
-        logger.info(f"[consistency] 开始一致性评估")
+    def evaluate(
+        self,
+        transcript: str,
+        emr_content: Dict[str, Any],
+        key_facts: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        logger.info(f"[consistency] 开始一致性评估, use_key_facts={key_facts is not None}")
 
         emr_text = self._format_emr_content(emr_content)
 
-        consistency_result = self._call_llm_json(
-            "consistency_check",
-            transcript=transcript,
-            emr_content=emr_text
-        )
+        # 优先使用 key_facts：合并事实一致性检查和内部一致性检查为一次 LLM 调用
+        if key_facts:
+            combined_result = self._call_llm_json(
+                "consistency_combined_check",
+                key_facts=json.dumps(key_facts, ensure_ascii=False, indent=2),
+                emr_content=emr_text
+            )
 
-        internal_result = self._call_llm_json(
-            "internal_consistency_check",
-            emr_content=emr_text
-        )
+            result = {
+                "facts": combined_result.get("facts", []),
+                "summary": combined_result.get("summary", {
+                    "total_facts": 0,
+                    "supported_count": 0,
+                    "unsupported_count": 0,
+                    "support_rate": 0.0
+                }),
+                "internal_conflicts": combined_result.get("internal_conflicts", []),
+                "consistency_score": combined_result.get("consistency_score", 1.0)
+            }
+        else:
+            # 无 key_facts 时仍使用两次调用（consistency_check 不含内部一致性）
+            consistency_result = self._call_llm_json(
+                "consistency_check",
+                transcript=transcript,
+                emr_content=emr_text
+            )
 
-        result = {
-            "facts": consistency_result.get("facts", []),
-            "summary": consistency_result.get("summary", {
-                "total_facts": 0,
-                "supported_count": 0,
-                "unsupported_count": 0,
-                "support_rate": 0.0
-            }),
-            "internal_conflicts": internal_result.get("conflicts", []),
-            "consistency_score": internal_result.get("consistency_score", 1.0)
-        }
+            internal_result = self._call_llm_json(
+                "internal_consistency_check",
+                emr_content=emr_text
+            )
+
+            result = {
+                "facts": consistency_result.get("facts", []),
+                "summary": consistency_result.get("summary", {
+                    "total_facts": 0,
+                    "supported_count": 0,
+                    "unsupported_count": 0,
+                    "support_rate": 0.0
+                }),
+                "internal_conflicts": internal_result.get("conflicts", []),
+                "consistency_score": internal_result.get("consistency_score", 1.0)
+            }
 
         support_rate = result["summary"].get("support_rate", 0)
         logger.info(f"[consistency] 评估完成: support_rate={support_rate}")
@@ -294,16 +322,37 @@ class BenchmarkEvaluator:
         transcript: str,
         emr_content: Dict[str, Any],
         sample_id: str = "",
-        key_facts: Optional[Dict[str, Any]] = None
+        key_facts: Optional[Dict[str, Any]] = None,
+        skip_quality_safety: bool = False
     ) -> BenchmarkEvaluationResult:
+        """
+        四层评估
+
+        Args:
+            skip_quality_safety: 跳过 quality 和 safety 评估器，仅运行 consistency + completeness，
+                                 适用于量化评估场景（所需指标仅依赖前两层）
+        """
         result = BenchmarkEvaluationResult()
         call_records: List[LLMCallRecord] = []
 
-        logger.info(f"[BenchmarkEvaluator] 开始四层评估 - sample_id={sample_id}, key_facts={key_facts is not None}")
+        logger.info(f"[BenchmarkEvaluator] 开始评估 - sample_id={sample_id}, key_facts={key_facts is not None}, skip_quality_safety={skip_quality_safety}")
+
+        # 先提取 key_facts，供 consistency 和 completeness 共用
+        if key_facts is None:
+            try:
+                completeness_eval_for_extraction = LoggedCompletenessEvaluator(self.llm_service, call_records)
+                key_facts = completeness_eval_for_extraction.extract_key_facts(transcript)
+                logger.info(f"[BenchmarkEvaluator] 提取key_facts完成")
+            except Exception as e:
+                error_msg = f"Key fact extraction failed: {str(e)}"
+                logger.error(f"[BenchmarkEvaluator] {error_msg}")
+                result.errors.append(error_msg)
+        else:
+            logger.info(f"[BenchmarkEvaluator] 使用传入的key_facts，跳过提取")
 
         try:
             consistency_eval = LoggedConsistencyEvaluator(self.llm_service, call_records)
-            result.consistency = consistency_eval.evaluate(transcript, emr_content)
+            result.consistency = consistency_eval.evaluate(transcript, emr_content, key_facts=key_facts)
         except Exception as e:
             error_msg = f"ConsistencyEvaluator failed: {str(e)}"
             logger.error(f"[BenchmarkEvaluator] {error_msg}")
@@ -311,36 +360,32 @@ class BenchmarkEvaluator:
 
         try:
             completeness_eval = LoggedCompletenessEvaluator(self.llm_service, call_records)
-            if key_facts is None:
-                key_facts = completeness_eval.extract_key_facts(transcript)
-                logger.info(f"[BenchmarkEvaluator] 提取key_facts完成")
-            else:
-                logger.info(f"[BenchmarkEvaluator] 使用传入的key_facts，跳过提取")
             result.completeness = completeness_eval.evaluate(key_facts, emr_content)
         except Exception as e:
             error_msg = f"CompletenessEvaluator failed: {str(e)}"
             logger.error(f"[BenchmarkEvaluator] {error_msg}")
             result.errors.append(error_msg)
 
-        try:
-            quality_eval = LoggedQualityEvaluator(self.llm_service, call_records)
-            result.quality = quality_eval.evaluate(emr_content)
-        except Exception as e:
-            error_msg = f"QualityEvaluator failed: {str(e)}"
-            logger.error(f"[BenchmarkEvaluator] {error_msg}")
-            result.errors.append(error_msg)
+        if not skip_quality_safety:
+            try:
+                quality_eval = LoggedQualityEvaluator(self.llm_service, call_records)
+                result.quality = quality_eval.evaluate(emr_content)
+            except Exception as e:
+                error_msg = f"QualityEvaluator failed: {str(e)}"
+                logger.error(f"[BenchmarkEvaluator] {error_msg}")
+                result.errors.append(error_msg)
 
-        try:
-            safety_eval = LoggedSafetyEvaluator(self.llm_service, call_records)
-            result.safety = safety_eval.evaluate(transcript, emr_content)
-        except Exception as e:
-            error_msg = f"SafetyEvaluator failed: {str(e)}"
-            logger.error(f"[BenchmarkEvaluator] {error_msg}")
-            result.errors.append(error_msg)
+            try:
+                safety_eval = LoggedSafetyEvaluator(self.llm_service, call_records)
+                result.safety = safety_eval.evaluate(transcript, emr_content)
+            except Exception as e:
+                error_msg = f"SafetyEvaluator failed: {str(e)}"
+                logger.error(f"[BenchmarkEvaluator] {error_msg}")
+                result.errors.append(error_msg)
 
         result.llm_calls = call_records
 
-        logger.info(f"[BenchmarkEvaluator] 四层评估完成 - LLM调用次数: {len(call_records)}, "
+        logger.info(f"[BenchmarkEvaluator] 评估完成 - LLM调用次数: {len(call_records)}, "
                     f"support_rate: {result.get_support_rate()}, "
                     f"recall_rate: {result.get_recall_rate()}")
 

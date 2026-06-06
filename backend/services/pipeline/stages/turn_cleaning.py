@@ -35,6 +35,17 @@ class TurnCleaningStage(PipelineStage):
         ctx.all_cleaned_turns = all_cleaned_turns
         ctx.combined_text = combined_text
 
+        # 预压缩对话原文
+        if combined_text:
+            try:
+                compressed, dict_str = ctx.get_compressed_transcript()
+                if dict_str:
+                    logger.info(f"对话原文预压缩完成: 原文{len(combined_text)}字符 → 压缩后{len(compressed)}字符")
+                else:
+                    logger.info("对话原文压缩率不足，使用原文")
+            except Exception as e:
+                logger.warning(f"对话原文压缩失败: {e}，将使用原文")
+
         return {
             "role_mapping": all_role_mappings,
             "cleaned_turns": all_cleaned_turns,

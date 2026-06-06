@@ -1,6 +1,6 @@
 """提示词管理器，组合各子模块模板"""
 import logging
-from typing import Dict
+from typing import Dict, Optional
 
 from .template import PromptTemplate
 from .preprocessing import get_preprocessing_templates_zh, get_preprocessing_templates_en
@@ -75,6 +75,50 @@ class PromptManager:
         self.templates[name] = PromptTemplate(template, required_vars)
         logger.info("添加自定义模板: %s", name)
 
-    def render(self, template_name: str, **kwargs) -> str:
+    # 对话标题锚点前缀，用于在标题后插入编码字典说明
+    _TRANSCRIPT_TITLE_PREFIXES = (
+        "## 原始对话",
+        "## 对话片段",
+        "## 对话\n",
+        "## Original conversation",
+        "## Original Conversation",
+        "## Conversation snippet",
+    )
+
+    def render(self, template_name: str, compression_dict: Optional[str] = None, **kwargs) -> str:
+        """渲染模板，可选在对话原文标题后插入压缩编码字典说明。
+
+        Args:
+            template_name: 模板名称
+            compression_dict: 压缩编码字典文本，为None时不插入
+            **kwargs: 模板变量
+
+        Returns:
+            渲染后的完整提示词文本
+        """
         template = self.get_template(template_name)
-        return template.render(**kwargs)
+        rendered = template.render(**kwargs)
+
+        if compression_dict:
+            dict_block = (
+                f"\n## 编码说明\n"
+                f"以下对话使用了编码缩写，请按此字典解读：\n"
+                f"{compression_dict}\n"
+            )
+            # 查找对话标题行并在其后插入字典说明
+            inserted = False
+            for prefix in self._TRANSCRIPT_TITLE_PREFIXES:
+                idx = rendered.find(prefix)
+                if idx != -1:
+                    # 找到该标题行的末尾（换行符位置）
+                    line_end = rendered.find("\n", idx)
+                    if line_end != -1:
+                        rendered = rendered[:line_end + 1] + dict_block + rendered[line_end + 1:]
+                        logger.debug("在模板 %s 中插入编码字典说明，锚点: %s", template_name, prefix.strip())
+                        inserted = True
+                    break
+
+            if not inserted:
+                logger.warning("模板 %s 中未找到对话标题锚点，无法插入编码字典说明", template_name)
+
+        return rendered

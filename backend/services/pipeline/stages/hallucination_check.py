@@ -175,10 +175,21 @@ class HallucinationCheckStage(PipelineStage):
         """
         section_label = self.SECTION_LABELS.get(section_name, section_name)
 
+        # 压缩transcript_section
+        compressed_section, section_dict = ctx.compress_text(transcript_section)
+        if section_dict:
+            logger.info(
+                f"章节 {section_name} 幻觉检查: transcript_section已压缩, "
+                f"原文{len(transcript_section)}字符 -> 压缩后{len(compressed_section)}字符"
+            )
+        else:
+            logger.info(f"章节 {section_name} 幻觉检查: transcript_section未压缩, 使用原文{len(transcript_section)}字符")
+
         try:
             prompt = ctx.prompt_manager.render(
                 "consistency_check_section",
-                transcript_section=transcript_section,
+                compression_dict=section_dict,
+                transcript_section=compressed_section,
                 emr_section=emr_section,
                 section_name=section_label,
             )
@@ -204,9 +215,9 @@ class HallucinationCheckStage(PipelineStage):
                 return {"status": "llm_unavailable", "section": section_name}
 
             try:
-                # 使用默认LLM配置（thinking模式+自动5倍max_tokens），不手动覆盖
-                response = ctx.llm_service.generate_stream_to_response(prompt)
-                logger.debug(f"章节 {section_name} 幻觉检查: 使用默认LLM配置")
+                # 关闭thinking模式：幻觉检查是模式匹配任务，不需要深度推理
+                response = ctx.llm_service.generate_stream_to_response(prompt, thinking_enabled=False, compression_dict=section_dict)
+                logger.debug(f"章节 {section_name} 幻觉检查: thinking模式已禁用，使用流式处理")
                 ctx.llm_stats.record_from_response("hallucination_check", prompt, response)
                 response_text = response.text
                 parsed = parse_json_response(response_text, f"幻觉检查_{section_name}")

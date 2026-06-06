@@ -174,11 +174,19 @@ class ClaimVerificationStage(PipelineStage):
             preidentified_str = "\n".join([f"- {text}" for text in preidentified_texts])
         else:
             preidentified_str = "无"
-        
+
+        # 压缩transcript（裁剪后的转写）
+        compressed_transcript, dict_str = ctx.compress_text(transcript)
+        if dict_str:
+            logger.info(f"Claim核查: transcript已压缩, 原文{len(transcript)}字符 -> 压缩后{len(compressed_transcript)}字符")
+        else:
+            logger.info(f"Claim核查: transcript未压缩, 使用原文{len(transcript)}字符")
+
         try:
             prompt = ctx.prompt_manager.render(
                 "claim_verification",
-                transcript=transcript,
+                compression_dict=dict_str,
+                transcript=compressed_transcript,
                 draft_emr=draft_emr_json,
                 preidentified_unsupported=preidentified_str,
             )
@@ -204,8 +212,9 @@ class ClaimVerificationStage(PipelineStage):
                 return [], []
 
             try:
-                response = ctx.llm_service.generate_stream_to_response(prompt)
-                logger.debug("Claim核查阶段: thinking模式已启用（默认），使用流式处理")
+                # 关闭thinking模式：Claim核查是模式匹配任务，不需要深度推理
+                response = ctx.llm_service.generate_stream_to_response(prompt, thinking_enabled=False, compression_dict=dict_str)
+                logger.debug("Claim核查阶段: thinking模式已禁用，使用流式处理")
                 ctx.llm_stats.record_from_response("claim_verification", prompt, response)
                 response_text = response.text
             except Exception as e:
@@ -234,10 +243,18 @@ class ClaimVerificationStage(PipelineStage):
         draft_emr_json: str,
     ) -> List[Dict]:
         """调用LLM进行checklist核查，返回missing_items列表"""
+        # 压缩transcript（完整转写，使用缓存）
+        compressed_transcript, dict_str = ctx.get_compressed_transcript()
+        if dict_str:
+            logger.info(f"Checklist核查: transcript已压缩, 原文{len(transcript)}字符 -> 压缩后{len(compressed_transcript)}字符")
+        else:
+            logger.info(f"Checklist核查: transcript未压缩, 使用原文{len(transcript)}字符")
+
         try:
             prompt = ctx.prompt_manager.render(
                 "checklist_verification",
-                transcript=transcript,
+                compression_dict=dict_str,
+                transcript=compressed_transcript,
                 draft_emr=draft_emr_json,
             )
             logger.debug(f"Checklist核查提示词长度: {len(prompt)} 字符")
@@ -262,8 +279,9 @@ class ClaimVerificationStage(PipelineStage):
                 return []
 
             try:
-                response = ctx.llm_service.generate_stream_to_response(prompt)
-                logger.debug("Checklist核查阶段: thinking模式已启用（默认），使用流式处理")
+                # 关闭thinking模式：Checklist核查是模式匹配任务，不需要深度推理
+                response = ctx.llm_service.generate_stream_to_response(prompt, thinking_enabled=False, compression_dict=dict_str)
+                logger.debug("Checklist核查阶段: thinking模式已禁用，使用流式处理")
                 ctx.llm_stats.record_from_response("checklist_verification", prompt, response)
                 response_text = response.text
             except Exception as e:
@@ -387,10 +405,18 @@ class ClaimVerificationStage(PipelineStage):
 
         assessment_json = json.dumps(assessment, ensure_ascii=False, indent=2)
 
+        # 压缩transcript（裁剪后的转写）
+        compressed_transcript, dict_str = ctx.compress_text(transcript)
+        if dict_str:
+            logger.info(f"确定性核查: transcript已压缩, 原文{len(transcript)}字符 -> 压缩后{len(compressed_transcript)}字符")
+        else:
+            logger.info(f"确定性核查: transcript未压缩, 使用原文{len(transcript)}字符")
+
         try:
             prompt = ctx.prompt_manager.render(
                 "certainty_verification",
-                transcript=transcript,
+                compression_dict=dict_str,
+                transcript=compressed_transcript,
                 assessment_json=assessment_json,
             )
             logger.debug(f"确定性核查提示词长度: {len(prompt)} 字符")
@@ -415,8 +441,9 @@ class ClaimVerificationStage(PipelineStage):
                 return []
 
             try:
-                response = ctx.llm_service.generate_stream_to_response(prompt)
-                logger.debug("确定性核查阶段: thinking模式已启用（默认），使用流式处理")
+                # 关闭thinking模式：确定性核查是模式匹配任务，不需要深度推理
+                response = ctx.llm_service.generate_stream_to_response(prompt, thinking_enabled=False, compression_dict=dict_str)
+                logger.debug("确定性核查阶段: thinking模式已禁用，使用流式处理")
                 ctx.llm_stats.record_from_response("certainty_verification", prompt, response)
                 response_text = response.text
             except Exception as e:

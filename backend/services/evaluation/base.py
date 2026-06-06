@@ -31,9 +31,11 @@ class BaseEvaluator(ABC):
         logger.info(f"评估器LLM调用 - 模板: {template_name}")
         logger.debug(f"评估器LLM调用 - prompt长度: {len(prompt)} 字符")
         
+        # 关闭thinking模式：评估是模式匹配任务，不需要深度推理
         response = self.llm_service.generate(
             prompt=prompt,
-            temperature=temperature
+            temperature=temperature,
+            thinking_enabled=False
         )
         
         logger.info(f"评估器LLM响应长度: {len(response.text)} 字符")

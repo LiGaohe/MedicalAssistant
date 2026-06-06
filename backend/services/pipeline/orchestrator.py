@@ -116,8 +116,19 @@ class PipelineOrchestrator:
             logger.info("skip_term_norm=True, 跳过术语规范化")
             emr_draft = ctx.emr_draft
         else:
-            emr_draft = self._normalize_terms_in_draft(ctx.emr_draft)
+            emr_draft, term_norm_calls, term_norm_chars, term_norm_tokens, term_norm_latency = self._normalize_terms_in_draft(ctx.emr_draft)
             ctx.emr_draft = emr_draft
+            # 记录术语规范化的LLM调用到ctx.llm_stats
+            if term_norm_calls > 0:
+                ctx.llm_stats.record_call(
+                    stage="term_norm",
+                    prompt_length=term_norm_chars,
+                    response_length=0,
+                    completion_tokens=term_norm_tokens,
+                    actual_latency=term_norm_latency,
+                    success=True
+                )
+                logger.info(f"术语规范化LLM统计已记录: calls={term_norm_calls}, chars={term_norm_chars}, tokens={term_norm_tokens}, latency={term_norm_latency:.2f}s")
         
         if skip_hallucination_check:
             logger.info("skip_hallucination_check=True, 跳过阶段4: 幻觉检查")
@@ -361,7 +372,7 @@ class PipelineOrchestrator:
         save_evidence: bool = False
     ) -> Dict[str, Any]:
         """
-        多变量Pipeline：一次运行产出4份不同配置的EMR
+        多变量Pipeline：一次运行产出5份不同配置的EMR
         
         流程：
         1. 阶段1-3（清洗→草稿→结构化）与 process_transcript() 相同
@@ -369,6 +380,7 @@ class PipelineOrchestrator:
         3. 阶段3后保存 ctx_before_fork（深拷贝）
         4. 路径A：在 ctx 上运行阶段4-6（全程）→ emr_result
         5. 路径B：在 ctx_before_fork 上运行阶段4-6（skip_term_norm=True）→ emr_no_term_norm
+        6. 路径C：在 ctx_before_fork 上运行阶段4-6（skip_hallucination_check=True）→ emr_no_hallucination
         
         Returns:
             Dict: {
@@ -376,6 +388,7 @@ class PipelineOrchestrator:
                 "emr_pre_revision": 阶段5前的EMR（修订前）,
                 "emr_result": 路径A完整运行结果,
                 "emr_no_term_norm": 路径B（skip_term_norm）结果,
+                "emr_no_hallucination": 路径C（skip_hallucination_check）结果,
                 "hallucination_result": 幻觉检查结果,
                 "verification_issues": 后置核查问题
             }
@@ -429,6 +442,7 @@ class PipelineOrchestrator:
                 "emr_pre_revision": None,
                 "emr_result": None,
                 "emr_no_term_norm": None,
+                "emr_no_hallucination": None,
                 "hallucination_result": None,
                 "verification_issues": None,
                 "processing_time": total_time
@@ -455,6 +469,7 @@ class PipelineOrchestrator:
                     "emr_pre_revision": None,
                     "emr_result": None,
                     "emr_no_term_norm": None,
+                    "emr_no_hallucination": None,
                     "hallucination_result": None,
                     "verification_issues": None,
                     "processing_time": total_time
@@ -464,7 +479,11 @@ class PipelineOrchestrator:
         combined_text_before_fork = ctx.combined_text
         draft_text_before_fork = ctx.draft_text
         logger.info(f"保存fork前数据: emr_draft keys={list(emr_draft_before_fork.keys())[:3] if emr_draft_before_fork else 'None'}")
-        
+
+        # 保存阶段1-3的共享LLM统计（fork前），用于后续各路径独立统计
+        shared_llm_stats = copy.deepcopy(ctx.llm_stats)
+        logger.info(f"保存共享LLM统计（阶段1-3）: calls={shared_llm_stats.get_total_calls()}, chars={shared_llm_stats.get_total_char_count()}")
+
         logger.info("路径A: 完整运行阶段4-6")
         fork_status_a, hallucination_result, verification_issues, emr_pre_revision_raw = self._run_stages_4_to_6(
             ctx,
@@ -488,6 +507,7 @@ class PipelineOrchestrator:
                 "emr_pre_revision": emr_pre_revision,
                 "emr_result": emr_result,
                 "emr_no_term_norm": None,
+                "emr_no_hallucination": None,
                 "hallucination_result": hallucination_result,
                 "verification_issues": verification_issues,
                 "processing_time": total_time
@@ -495,11 +515,9 @@ class PipelineOrchestrator:
         
         emr_pre_revision = copy.deepcopy(ctx.emr_draft) if ctx.emr_draft else None
         logger.info(f"保存emr_pre_revision（修订前）: {type(emr_pre_revision).__name__}")
-        
-        logger.info("阶段6: 字段级修订与落盘（路径A）")
-        FieldRevisionStage().execute(ctx)
-        emr_result = ctx.emr_draft
-        emr_result = self.emr_persistence.normalize_format(emr_result)
+
+        # _run_stages_4_to_6 已包含字段级修订，直接使用其返回结果
+        emr_result = self.emr_persistence.normalize_format(emr_pre_revision_raw)
         logger.info(f"路径A完成: emr_result keys={list(emr_result.keys())[:3] if emr_result else 'None'}")
         
         logger.info("路径B: 创建新ctx并运行阶段4-6（skip_term_norm=True）")
@@ -537,28 +555,84 @@ class PipelineOrchestrator:
         emr_no_term_norm = self.emr_persistence.normalize_format(emr_no_term_norm) if emr_no_term_norm else None
         logger.info(f"路径B完成: emr_no_term_norm keys={list(emr_no_term_norm.keys())[:3] if emr_no_term_norm else 'None'}")
         
+        # 路径C: 跳过幻觉检查，保留其他所有阶段 → emr_no_hallucination（对应standard配置）
+        logger.info("路径C: 创建新ctx并运行阶段4-6（skip_hallucination_check=True）")
+        ctx_fork_c = PipelineContext(
+            db=self.db,
+            llm_service=self.llm_service,
+            prompt_manager=self.prompt_manager,
+            language=self.language,
+            debug_mode=self.debug_mode,
+            sequential=self.sequential,
+            visit_id=visit_id,
+            turns=turns,
+            save_evidence=False,
+            skip_cleaning=True,
+            skip_hallucination_check=True
+        )
+        ctx_fork_c.emr_draft = copy.deepcopy(emr_draft_before_fork)
+        ctx_fork_c.combined_text = combined_text_before_fork
+        ctx_fork_c.draft_text = draft_text_before_fork
+        
+        fork_status_c, hallucination_result_c, verification_issues_c, emr_no_hallucination_raw = self._run_stages_4_to_6(
+            ctx_fork_c,
+            skip_term_norm=False,
+            skip_hallucination_check=True,
+            skip_verification=False,
+            skip_field_revision=False,
+            save_evidence=False,
+            visit_id=""
+        )
+        
+        if fork_status_c == "failed":
+            logger.warning(f"路径C阶段4-6失败, 但路径A已完成, 继续返回路径A结果")
+            emr_no_hallucination = None
+        else:
+            emr_no_hallucination = self.emr_persistence.normalize_format(emr_no_hallucination_raw) if emr_no_hallucination_raw else None
+        logger.info(f"路径C完成: emr_no_hallucination keys={list(emr_no_hallucination.keys())[:3] if emr_no_hallucination else 'None'}")
+        
         total_time = time.time() - start_time
         logger.info(f"=== 多变量Pipeline完成: {visit_id}, 总耗时: {total_time:.2f}秒 ===")
-        
-        llm_stats_summary = ctx.llm_stats.get_summary()
+
+        # 保存各路径的独立LLM统计（不再合并为总数）
+        # 路径A: 阶段1-3 + 路径A阶段4-6（完整管线）
+        llm_stats_full = ctx.llm_stats.get_summary()
+        logger.info(f"路径A(full) LLM统计: calls={llm_stats_full.get('total_calls')}, "
+                    f"chars={llm_stats_full.get('total_char_count')}, "
+                    f"tokens={llm_stats_full.get('total_tokens')}")
+
+        # 路径B: 阶段1-3 + 路径B阶段4-6（skip_term_norm）
+        shared_copy_b = copy.deepcopy(shared_llm_stats)
         if ctx_fork.llm_stats.get_total_calls() > 0:
-            ctx.llm_stats.merge(ctx_fork.llm_stats)
-            llm_stats_summary = ctx.llm_stats.get_summary()
-        
-        logger.info(f"LLM调用统计: calls={llm_stats_summary.get('total_calls')}, "
-                    f"chars={llm_stats_summary.get('total_char_count')}, "
-                    f"tokens={llm_stats_summary.get('total_tokens')}")
-        
+            shared_copy_b.merge(ctx_fork.llm_stats)
+        llm_stats_no_term_norm = shared_copy_b.get_summary()
+        logger.info(f"路径B(no_term_norm) LLM统计: calls={llm_stats_no_term_norm.get('total_calls')}, "
+                    f"chars={llm_stats_no_term_norm.get('total_char_count')}, "
+                    f"tokens={llm_stats_no_term_norm.get('total_tokens')}")
+
+        # 路径C: 阶段1-3 + 路径C阶段4-6（skip_hallucination_check）
+        shared_copy_c = copy.deepcopy(shared_llm_stats)
+        if ctx_fork_c.llm_stats.get_total_calls() > 0:
+            shared_copy_c.merge(ctx_fork_c.llm_stats)
+        llm_stats_no_hallucination = shared_copy_c.get_summary()
+        logger.info(f"路径C(no_hallucination) LLM统计: calls={llm_stats_no_hallucination.get('total_calls')}, "
+                    f"chars={llm_stats_no_hallucination.get('total_char_count')}, "
+                    f"tokens={llm_stats_no_hallucination.get('total_tokens')}")
+
         return {
             "status": "completed",
             "emr_raw_draft": emr_raw_draft,
             "emr_pre_revision": emr_pre_revision,
             "emr_result": emr_result,
             "emr_no_term_norm": emr_no_term_norm,
+            "emr_no_hallucination": emr_no_hallucination,
             "hallucination_result": hallucination_result,
             "verification_issues": verification_issues,
             "processing_time": total_time,
-            "llm_stats": llm_stats_summary
+            "llm_stats": llm_stats_full,
+            "llm_stats_full": llm_stats_full,
+            "llm_stats_no_term_norm": llm_stats_no_term_norm,
+            "llm_stats_no_hallucination": llm_stats_no_hallucination
         }
     
     def process_with_callback(
@@ -745,8 +819,18 @@ class PipelineOrchestrator:
                 )
                 return
         
-        emr_draft = self._normalize_terms_in_draft(ctx.emr_draft)
+        emr_draft, term_norm_calls, term_norm_chars, term_norm_tokens, term_norm_latency = self._normalize_terms_in_draft(ctx.emr_draft)
         ctx.emr_draft = emr_draft
+        # 记录术语规范化的LLM调用到ctx.llm_stats
+        if term_norm_calls > 0:
+            ctx.llm_stats.record_call(
+                stage="term_norm",
+                prompt_length=term_norm_chars,
+                response_length=0,
+                completion_tokens=term_norm_tokens,
+                actual_latency=term_norm_latency,
+                success=True
+            )
         
         yield emit_progress(3, "证据溯源构建", "running", "正在为病历内容标注来源对话轮次...")
         EvidenceMappingStage().execute(ctx)
@@ -902,10 +986,11 @@ class PipelineOrchestrator:
         logger.info(f"_format_turns: 格式化 {len(turns)} 个轮次，文本长度={len(combined_text)}")
         return combined_text
     
-    def _normalize_terms_in_draft(self, emr_draft: Dict[str, Any]) -> Dict[str, Any]:
+    def _normalize_terms_in_draft(self, emr_draft: Dict[str, Any]) -> Tuple[Dict[str, Any], int, int, int, float]:
+        """术语规范化，返回 (emr_draft, llm_call_count, char_count, token_count, latency)"""
         if not self.terminology_service:
             logger.info("术语服务不可用，跳过术语规范化")
-            return emr_draft
+            return emr_draft, 0, 0, 0, 0.0
 
         logger.info(f"开始术语规范化（后处理SOAP草稿），language={self.language}")
         norm_start = time.time()
@@ -982,21 +1067,21 @@ class PipelineOrchestrator:
 
         if not field_texts:
             logger.info("草稿中无有效文本，跳过术语规范化")
-            return emr_draft
+            return emr_draft, 0, 0, 0, 0.0
 
         combined_text = "\n".join(field_texts)
         logger.info(f"收集到 {len(field_texts)} 个字段文本，总长度: {len(combined_text)}")
 
         try:
-            replacement_map = self.terminology_service.normalize_draft_terms(combined_text)
+            replacement_map, term_norm_calls, term_norm_chars, term_norm_tokens = self.terminology_service.normalize_draft_terms(combined_text)
         except Exception as e:
             logger.error(f"调用 normalize_draft_terms 失败: {e}")
-            return emr_draft
+            return emr_draft, 0, 0, 0, 0.0
 
         if not replacement_map:
             norm_time = time.time() - norm_start
             logger.info(f"术语规范化完成: 无需替换, 耗时: {norm_time:.2f}秒")
-            return emr_draft
+            return emr_draft, term_norm_calls, term_norm_chars, term_norm_tokens, norm_time
 
         total_replacements = 0
         for section_name in sections:
@@ -1039,10 +1124,11 @@ class PipelineOrchestrator:
         norm_time = time.time() - norm_start
         logger.info(
             f"术语规范化完成: {total_replacements} 处替换, "
-            f"耗时: {norm_time:.2f}秒"
+            f"耗时: {norm_time:.2f}秒, LLM调用: {term_norm_calls}次, "
+            f"字符: {term_norm_chars}, Token: {term_norm_tokens}"
         )
 
-        return emr_draft
+        return emr_draft, term_norm_calls, term_norm_chars, term_norm_tokens, norm_time
 
     # DEPRECATED: replaced by _normalize_terms_in_draft which uses ICD-11 local KB
     def _lightweight_normalize(self, facts_data: List[Dict[str, Any]]) -> None:
@@ -1214,7 +1300,16 @@ C. 硬规则核查 - 确定性规则检查（部位矛盾、否定冲突等）
             ctx.emr_draft = emr_draft
             
             if stage == "term_norm":
-                emr_draft_after = self._normalize_terms_in_draft(emr_draft)
+                emr_draft_after, tn_calls, tn_chars, tn_tokens, tn_latency = self._normalize_terms_in_draft(emr_draft)
+                if tn_calls > 0:
+                    ctx.llm_stats.record_call(
+                        stage="term_norm",
+                        prompt_length=tn_chars,
+                        response_length=0,
+                        completion_tokens=tn_tokens,
+                        actual_latency=tn_latency,
+                        success=True
+                    )
             elif stage == "evidence_mapping":
                 combined_text = self._format_turns(turns)
                 ctx.combined_text = combined_text

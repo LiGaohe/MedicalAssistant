@@ -237,7 +237,8 @@ Please output in the following JSON format:
 
 Note: Only output JSON, no other content."""
 
-            response = self.llm_service.generate(prompt, max_tokens=8000)
+            # 关闭thinking模式：术语识别是模式匹配任务，不需要深度推理
+            response = self.llm_service.generate(prompt, max_tokens=8000, thinking_enabled=False)
             
             logger.info(f"LLM识别口语化术语响应长度: {len(response.text)} 字符")
             logger.debug(f"LLM识别口语化术语响应内容:\n{response.text}")
@@ -1006,7 +1007,8 @@ Note: Only output JSON, no other content."""
 
 英文翻译:"""
 
-                response = self.llm_service.generate(prompt, max_tokens=2000)
+                # 关闭thinking模式：翻译是简单映射任务
+                response = self.llm_service.generate(prompt, max_tokens=2000, thinking_enabled=False)
                 
                 if not response or not response.text:
                     logger.warning(f"Translation attempt {attempt + 1} returned empty response for '{term}'")
@@ -1076,7 +1078,8 @@ UMLS Candidates:
 
 Please output only the number (1-{len(candidates)}) of the best match, no other content."""
 
-            response = self.llm_service.generate(prompt, max_tokens=2000)
+            # 关闭thinking模式：候选选择是简单匹配任务
+            response = self.llm_service.generate(prompt, max_tokens=2000, thinking_enabled=False)
             
             match = re.search(r'(\d+)', response.text)
             if match:
@@ -1150,7 +1153,8 @@ Please output in the following JSON format:
 
 Note: Output the most reasonable standard term based on your medical knowledge. If uncertain, set normalized_term to the same value as input with confidence 0.3."""
 
-            response = self.llm_service.generate(prompt, max_tokens=1000)
+            # 关闭thinking模式：术语标准化是简单映射任务
+            response = self.llm_service.generate(prompt, max_tokens=1000, thinking_enabled=False)
             
             text = response.text.strip()
             text = self._strip_whitespace_padding(text)
@@ -1217,37 +1221,80 @@ Note: Output the most reasonable standard term based on your medical knowledge. 
             return self.cache_service.get_stats()
         return None
 
-    def _extract_medical_terms_with_llm(self, text: str) -> List[str]:
+    def _extract_medical_terms_with_llm(self, text: str) -> Tuple[List[str], int, int, int]:
+        """
+        从文本中提取医学术语
+
+        Returns:
+            Tuple[terms, llm_call_count, char_count, token_count]
+        """
         logger.info(f"[EXTRACT_TERMS] Extracting medical terms from draft via LLM, text length: {len(text)}")
         if not self.llm_service:
             logger.warning("[EXTRACT_TERMS] LLM service not available, skipping term extraction")
-            return []
+            return [], 0, 0, 0
 
         try:
-            response = self.llm_service.generate_with_template(
+            prompt = self.llm_service.prompt_manager.render(
                 "extract_medical_terms",
                 draft_text=text
+            )
+            # 术语提取是模式匹配任务，关闭thinking模式；使用流式调用减少等待
+            response = self.llm_service.generate_stream_to_response(
+                prompt,
+                thinking_enabled=False,
+                max_tokens=4096
             )
             logger.info(f"[EXTRACT_TERMS] LLM response length: {len(response.text)} characters")
             raw_text = response.text.strip()
             raw_text = self._strip_whitespace_padding(raw_text)
 
-            json_match = re.search(r'\[[\s\S]*\]', raw_text)
-            if not json_match:
-                logger.warning("[EXTRACT_TERMS] No valid JSON array in LLM response, skipping term extraction")
-                logger.warning(f"[EXTRACT_TERMS] Raw response: {raw_text[:500]}")
-                return []
+            # 统计LLM调用信息
+            prompt_chars = getattr(response, 'prompt_chars', 0) or 0
+            completion_tokens = getattr(response, 'completion_tokens', 0) or 0
+            if prompt_chars == 0 and completion_tokens == 0:
+                prompt_chars = len(prompt)
+                completion_tokens = len(raw_text) // 4
 
-            json_str = json_match.group()
-            try:
-                term_objects = json.loads(json_str)
-            except json.JSONDecodeError as e:
-                logger.warning(f"[EXTRACT_TERMS] JSON parse failed: {e}, skipping term extraction")
-                return []
+            # 优先尝试解析JSON数组
+            json_match = re.search(r'\[[\s\S]*\]', raw_text)
+            if json_match:
+                json_str = json_match.group()
+                try:
+                    term_objects = json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"[EXTRACT_TERMS] JSON array parse failed: {e}")
+                    term_objects = None
+            else:
+                term_objects = None
+
+            # 如果数组解析失败，尝试解析JSON对象并包装为数组
+            if term_objects is None:
+                json_match = re.search(r'\{[\s\S]*\}', raw_text)
+                if json_match:
+                    json_str = json_match.group()
+                    try:
+                        obj = json.loads(json_str)
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"[EXTRACT_TERMS] JSON object parse failed: {e}, skipping term extraction")
+                        return [], 1, prompt_chars, completion_tokens
+
+                    if isinstance(obj, dict):
+                        # 单个对象包装为数组
+                        term_objects = [obj]
+                        logger.info(f"[EXTRACT_TERMS] Parsed single JSON object as array: {obj}")
+                    elif isinstance(obj, list):
+                        term_objects = obj
+                    else:
+                        logger.warning(f"[EXTRACT_TERMS] Unexpected JSON type: {type(obj)}, skipping term extraction")
+                        return [], 1, prompt_chars, completion_tokens
+                else:
+                    logger.warning("[EXTRACT_TERMS] No valid JSON found in LLM response, skipping term extraction")
+                    logger.warning(f"[EXTRACT_TERMS] Raw response: {raw_text[:500]}")
+                    return [], 1, prompt_chars, completion_tokens
 
             if not isinstance(term_objects, list):
                 logger.warning(f"[EXTRACT_TERMS] Response is not a list: {type(term_objects)}, skipping term extraction")
-                return []
+                return [], 1, prompt_chars, completion_tokens
 
             terms = []
             for item in term_objects:
@@ -1258,30 +1305,50 @@ Note: Output the most reasonable standard term based on your medical knowledge. 
 
             unique_terms = list(dict.fromkeys(terms))
             logger.info(f"[EXTRACT_TERMS] LLM extracted {len(unique_terms)} unique medical terms: {unique_terms}")
-            return unique_terms
+            return unique_terms, 1, prompt_chars, completion_tokens
 
         except Exception as e:
             logger.error(f"[EXTRACT_TERMS] LLM extraction failed: {e}, skipping term extraction")
-            return []
+            return [], 0, 0, 0
 
-    def _llm_standardize_terms(self, terms: List[str]) -> Dict[str, str]:
+    def _llm_standardize_terms(self, terms: List[str]) -> Tuple[Dict[str, str], int, int, int]:
+        """
+        LLM术语标准化
+
+        Returns:
+            Tuple[term_mapping, llm_call_count, char_count, token_count]
+        """
         logger.info(f"[LLM_STD] Starting LLM standardization for {len(terms)} terms")
         if not self.llm_service:
             logger.warning("[LLM_STD] LLM service not available, returning empty mapping")
-            return {}
+            return {}, 0, 0, 0
         try:
             terms_json = json.dumps(terms, ensure_ascii=False)
-            response = self.llm_service.generate_with_template(
+            prompt = self.llm_service.prompt_manager.render(
                 "term_standardization",
                 terms=terms_json
+            )
+            # 术语标准化是简单映射任务，关闭thinking模式；使用流式调用减少等待
+            response = self.llm_service.generate_stream_to_response(
+                prompt,
+                thinking_enabled=False,
+                max_tokens=4096
             )
             logger.info(f"[LLM_STD] LLM response length: {len(response.text)} characters")
             text = response.text.strip()
             text = self._strip_whitespace_padding(text)
+
+            # 统计LLM调用信息
+            prompt_chars = getattr(response, 'prompt_chars', 0) or 0
+            completion_tokens = getattr(response, 'completion_tokens', 0) or 0
+            if prompt_chars == 0 and completion_tokens == 0:
+                prompt_chars = len(prompt)
+                completion_tokens = len(text) // 4
+
             json_match = re.search(r'\{[\s\S]*\}', text)
             if not json_match:
                 logger.warning("[LLM_STD] No valid JSON found in LLM response")
-                return {}
+                return {}, 1, prompt_chars, completion_tokens
             json_str = json_match.group()
             try:
                 result = json.loads(json_str)
@@ -1290,14 +1357,14 @@ Note: Output the most reasonable standard term based on your medical knowledge. 
                 result = self._try_fix_json(json_str)
             if result is None or not isinstance(result, dict):
                 logger.error("[LLM_STD] JSON fix also failed or result is not a dict")
-                return {}
+                return {}, 1, prompt_chars, completion_tokens
             for original, standardized in result.items():
                 logger.info(f"[LLM_STD] '{original}' -> '{standardized}'")
             logger.info(f"[LLM_STD] Standardized {len(result)} terms")
-            return result
+            return result, 1, prompt_chars, completion_tokens
         except Exception as e:
             logger.error(f"[LLM_STD] LLM standardization failed: {e}")
-            return {}
+            return {}, 0, 0, 0
 
     def _lookup_standardized_terms_zh(self, term_mapping: Dict[str, str]) -> Dict[str, Tuple[str, Optional[str], Optional[str]]]:
         logger.info(f"[LOOKUP_ZH] Looking up {len(term_mapping)} terms in ICD-11")
@@ -1365,14 +1432,26 @@ Note: Output the most reasonable standard term based on your medical knowledge. 
         logger.info(f"[LOOKUP_EN] Lookup completed: {len(result)} results")
         return result
 
-    def normalize_draft_terms(self, text: str) -> Dict[str, str]:
+    def normalize_draft_terms(self, text: str) -> Tuple[Dict[str, str], int, int, int]:
+        """
+        术语规范化
+
+        Returns:
+            Tuple[replacement_map, llm_call_count, char_count, token_count]
+        """
         logger.info(f"[NORM_DRAFT] Starting draft term normalization, text length: {len(text)}")
         start_time = time.time()
+        total_llm_calls = 0
+        total_chars = 0
+        total_tokens = 0
 
-        terms = self._extract_medical_terms_with_llm(text)
+        terms, extract_calls, extract_chars, extract_tokens = self._extract_medical_terms_with_llm(text)
+        total_llm_calls += extract_calls
+        total_chars += extract_chars
+        total_tokens += extract_tokens
         if not terms:
             logger.info("[NORM_DRAFT] No terms extracted, returning empty dict")
-            return {}
+            return {}, total_llm_calls, total_chars, total_tokens
         logger.info(f"[NORM_DRAFT] Extracted {len(terms)} medical terms: {terms}")
 
         pre_matched = {}
@@ -1411,7 +1490,10 @@ Note: Output the most reasonable standard term based on your medical knowledge. 
 
         llm_result = {}
         if terms_needing_llm:
-            term_mapping = self._llm_standardize_terms(terms_needing_llm)
+            term_mapping, std_calls, std_chars, std_tokens = self._llm_standardize_terms(terms_needing_llm)
+            total_llm_calls += std_calls
+            total_chars += std_chars
+            total_tokens += std_tokens
             if term_mapping:
                 if self.language == "zh":
                     lookup_result = self._lookup_standardized_terms_zh(term_mapping)
@@ -1425,8 +1507,8 @@ Note: Output the most reasonable standard term based on your medical knowledge. 
 
         replacement_map = {**pre_matched, **llm_result}
         elapsed = time.time() - start_time
-        logger.info(f"[NORM_DRAFT] Completed: extracted={len(terms)}, pre_matched={len(pre_matched)}, llm_processed={len(terms_needing_llm)}, replacements={len(replacement_map)}, elapsed={elapsed:.2f}s")
-        return replacement_map
+        logger.info(f"[NORM_DRAFT] Completed: extracted={len(terms)}, pre_matched={len(pre_matched)}, llm_processed={len(terms_needing_llm)}, replacements={len(replacement_map)}, llm_calls={total_llm_calls}, chars={total_chars}, tokens={total_tokens}, elapsed={elapsed:.2f}s")
+        return replacement_map, total_llm_calls, total_chars, total_tokens
 
     def _batch_select_candidates(
         self,
@@ -1482,7 +1564,8 @@ Output format (JSON):
 
 Note: Only output JSON, no other content."""
 
-            response = self.llm_service.generate(prompt, max_tokens=4000)
+            # 关闭thinking模式：批量选择是简单匹配任务
+            response = self.llm_service.generate(prompt, max_tokens=4000, thinking_enabled=False)
 
             json_match = re.search(r'\{[\s\S]*\}', response.text)
             if not json_match:

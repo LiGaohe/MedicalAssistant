@@ -192,6 +192,69 @@ $transcript
         required_vars=["draft_emr", "issues_json", "transcript"]
     )
 
+    templates["field_revision_patch"] = PromptTemplate(
+        template="""你是一个医疗病历修订专家。请根据核查问题清单，对SOAP病历草稿做**定点修订**。
+你只需要输出需要修改的字段（补丁），不需要输出完整的SOAP。
+
+## 需要修订的字段（从核查问题中定位）
+$affected_fields
+
+## 核查问题清单
+$issues_json
+
+## 原始对话（供核实）
+$transcript
+
+## 修订规则
+
+### 1. unsupported claim → 删除或改弱措辞
+- 如果claim在对话中完全无依据：将该字段value清空为空字符串，source_turn_indices清空为[]
+- 如果claim的确定性被高估：改为更弱的措辞（如"确诊XXX"改为"考虑XXX"）
+
+### 2. missing item → 如果对话有依据则补充
+- 从对话中找到对应原文，填入对应字段的value
+- source_turn_indices填入对话中的turn序号
+- 如果对话中确实没有依据，则不输出该字段的补丁
+
+### 3. 确定性错误 → 降级
+- 将diagnosis_type降级：explicit_diagnosis → suspected_diagnosis → symptom_based_assessment
+- 将certainty_level降级：high → medium → low
+- 如果需要修改assessment_items中的某一项，输出该项的完整修订内容
+
+### 4. hard_rule_violation → 根据描述修正
+- 按违规描述修正对应字段
+
+## 输出格式
+只输出需要修改的字段补丁，格式为JSON数组。每个补丁包含path（字段路径）和value（新值）：
+
+```json
+{
+  "patches": [
+    {
+      "path": "assessment.diagnosis",
+      "value": {"value": "考虑婴儿大便偏少", "source_turn_indices": [2]}
+    },
+    {
+      "path": "assessment.assessment_items",
+      "value": [{"text": "考虑婴儿大便偏少", "certainty_level": "medium", "source_turn_indices": [2], "diagnosis_type": "symptom_based_assessment"}]
+    }
+  ]
+}
+```
+
+### path格式说明
+- 普通字段：`section.field`，如 `assessment.diagnosis`、`plan.treatment`
+- 数组字段：`section.array_field`，如 `assessment.assessment_items`，value为完整的新数组
+- text字段：`section.text`，如 `subjective.text`
+
+### 注意事项
+- 只输出需要修改的字段，未涉及的字段不要输出
+- value的格式必须与SOAP草稿中对应字段的格式一致（含value和source_turn_indices）
+- 如果某个问题不需要修改（如对话中确实没有依据补充遗漏项），则不输出对应补丁
+- 如果没有任何需要修改的字段，输出空数组：{"patches": []}""",
+        required_vars=["affected_fields", "issues_json", "transcript"]
+    )
+
     templates["certainty_verification"] = PromptTemplate(
         template="""你是一个医疗病历审核专家。请检查以下SOAP病历草稿的A（评估）部分中诊断的**确定性层级**是否被拔高。
 

@@ -127,6 +127,7 @@ MedicalAssisstant/
 │   │   │   ├── evidence_enricher.py # 证据溯源富化器
 │   │   │   ├── emr_persistence.py # EMR持久化服务
 │   │   │   ├── interactive.py     # 交互式分步处理服务
+│   │   │   ├── transcript_compressor.py # 对话原文字典编码压缩器（前缀压缩+高频短语压缩，减少LLM token消耗）
 │   │   │   ├── stages/            # Pipeline阶段实现（PipelineStage子类）
 │   │   │   │   ├── __init__.py
 │   │   │   │   ├── turn_cleaning.py    # 阶段1: 转写清洗与角色纠错
@@ -1329,6 +1330,7 @@ graph TB
 | 模板名 | required_vars | 用途 |
 |--------|--------------|------|
 | `consistency_check` | `["transcript", "emr_content"]` | 病历-对话一致性检查 |
+| `consistency_check_from_facts` | `["key_facts", "emr_content"]` | 病历-关键事实一致性检查（token优化版，用key_facts替代完整转写文本） |
 | `internal_consistency_check` | `["emr_content"]` | 病历内部自相矛盾检查 |
 | `key_fact_extraction` | `["transcript"]` | 从对话提取关键事实清单 |
 | `completeness_check` | `["key_facts", "emr_content"]` | 关键事实覆盖度评估 |
@@ -1370,6 +1372,7 @@ graph TB
         EVI[evidence_enricher.py<br/>证据溯源富化]
         EMR_P[emr_persistence.py<br/>EMR持久化]
         INT[interactive.py<br/>交互式分步处理]
+        TC[transcript_compressor.py<br/>对话压缩器]
     end
 
     EMR_API --> LSP
@@ -1436,6 +1439,21 @@ class PipelineStage(ABC):
 | skip_hallucination_check | bool | 跳过阶段2.5: 幻觉检查（默认False） |
 | stop_after_draft | bool | 草稿生成后停止（默认True） |
 | skip_verification | bool | 术语规范化后停止，跳过阶段5+6（默认False） |
+
+**PipelineContext 压缩相关方法**：
+
+| 方法 | 返回类型 | 说明 |
+|------|----------|------|
+| get_compressed_transcript() | Tuple[str, Optional[str]] | 按需压缩 combined_text 并缓存，返回 (compressed_text, dictionary_str)，dictionary_str 为 None 表示回退到原文 |
+| compress_text(text) | Tuple[str, Optional[str]] | 压缩任意文本片段（如裁剪后的转写），使用 TranscriptCompressor.compress_section() |
+
+**PipelineContext 压缩相关内部字段**（init=False，不参与构造函数）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| _compressed_transcript | Optional[str] | 缓存的压缩后对话原文 |
+| _transcript_dictionary | Optional[str] | 缓存的压缩字典说明文本 |
+| _compressor | Optional[TranscriptCompressor] | 懒加载的压缩器实例 |
 
 #### 关键设计决策
 

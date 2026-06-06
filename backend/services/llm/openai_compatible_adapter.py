@@ -44,10 +44,19 @@ class OpenAICompatibleAdapter(LLMAdapter):
             headers["Authorization"] = f"Bearer {self.api_key}"
         
         use_json_mode = request.json_mode or self.json_mode
-        
+
         messages = []
+
+        # system message: JSON指令 + 压缩字典（如有）
+        system_parts = []
         if use_json_mode:
-            messages.append({"role": "system", "content": "请以JSON格式输出结果。"})
+            system_parts.append("请以JSON格式输出结果。")
+        if request.compression_dict:
+            system_parts.append(request.compression_dict)
+        if system_parts:
+            messages.append({"role": "system", "content": "\n\n".join(system_parts)})
+
+        # user message: 完整prompt
         messages.append({"role": "user", "content": request.prompt})
         
         payload = {
@@ -179,7 +188,19 @@ class OpenAICompatibleAdapter(LLMAdapter):
                         stripped_len = len(content.replace(' ', '').replace('\t', '').replace('\n', ''))
                         if stripped_len < len(content) * 0.1:
                             logger.warning(f"LLM响应疑似空白填充 (原始{len(content)}字符, 去空白后{stripped_len}字符), 可能因token截断导致")
-                    
+
+                    # 提取cached tokens信息
+                    cached_tokens = 0
+                    usage_data = data.get("usage", {})
+                    # OpenAI格式
+                    prompt_tokens_details = usage_data.get("prompt_tokens_details", {})
+                    cached_tokens = prompt_tokens_details.get("cached_tokens", 0)
+                    # Anthropic格式（可能在顶层）
+                    if cached_tokens == 0:
+                        cached_tokens = usage_data.get("cache_read_input_tokens", 0)
+                    if cached_tokens > 0:
+                        logger.info(f"Prompt缓存命中: cached_tokens={cached_tokens}")
+
                     return LLMResponse(
                         text=content,
                         model=self.model_name,
@@ -188,7 +209,8 @@ class OpenAICompatibleAdapter(LLMAdapter):
                         finish_reason=finish_reason,
                         raw_response=data,
                         thinking_content=thinking_content,
-                        actual_latency=total_actual_latency
+                        actual_latency=total_actual_latency,
+                        cached_tokens=cached_tokens
                     )
                     
             except httpx.HTTPStatusError as e:
@@ -242,8 +264,17 @@ class OpenAICompatibleAdapter(LLMAdapter):
             headers["Authorization"] = f"Bearer {self.api_key}"
         
         messages = []
+
+        # system message: JSON指令 + 压缩字典（如有）
+        system_parts = []
         if request.json_mode or self.json_mode:
-            messages.append({"role": "system", "content": "请以JSON格式输出结果。"})
+            system_parts.append("请以JSON格式输出结果。")
+        if request.compression_dict:
+            system_parts.append(request.compression_dict)
+        if system_parts:
+            messages.append({"role": "system", "content": "\n\n".join(system_parts)})
+
+        # user message: 完整prompt
         messages.append({"role": "user", "content": request.prompt})
         
         payload = {

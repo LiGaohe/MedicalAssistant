@@ -1,5 +1,497 @@
 # 完成状态记录
 
+## 2026-06-06 run_full_benchmark.py 中间结果检查逻辑修复
+
+### 问题
+
+`_check_intermediate_results` 方法只检查 `emr_result` 是否为空，不检查缺失配置对应的中间结果字段（如 `emr_no_term_norm`、`emr_no_hallucination`）。当 full 配置记录是在 `process_with_fork` 功能实现之前创建的，这些分叉字段为空，中间结果检查通过但实际无法复用，导致消融配置的 EMR 为空、校验失败、run 未保存。
+
+### 修复
+
+1. 新增 `CONFIG_EMR_KEY_MAPPING` 类属性，定义配置与中间结果字段的映射关系
+2. `_check_intermediate_results` 新增 `missing_configs` 参数，检查缺失配置对应的中间结果字段是否都存在
+3. 若缺失配置对应的字段为空，返回 None 强制重新执行 `process_with_fork`
+4. 清理冗余的 DEBUG 日志，统一使用 `[中间结果检查]` 和 `[复用中间结果]` 前缀
+
+## 2026-06-06 extract_benchmark_results.py CONFIG_STAGE_GROUPS 修复
+
+### 问题
+
+`scripts/extract_benchmark_results.py` 中 `CONFIG_STAGE_GROUPS` 将 `full`、`no_verification`、`no_hallucination`、`no_term_norm` 四个配置的 `stage_group` 都设为 `None`，导致提取 token 时把全部阶段都算进去，而不是只算该配置实际包含的阶段。
+
+### 修复
+
+将四个配置的 `stage_group` 从 `None` 改为与 `run_full_benchmark.py` 一致的阶段列表：
+
+- `full`: 10个阶段（全部）
+- `no_verification`: 6个阶段（不含 claim/checklist/certainty_verification 和 field_revision）
+- `no_hallucination`: 9个阶段（不含 hallucination_check）
+- `no_term_norm`: 9个阶段（不含 term_norm）
+
+## 2026-06-06 benchmark.db 异常记录清理
+
+### 问题
+
+`data/database/benchmark.db` 中存在量化指标为0或空的异常运行记录，影响评估结果准确性。
+
+### 异常类型
+
+1. **runs表**：status=failed（LLM错误导致管线中断）、关键指标为0/空
+2. **evaluations表**：overall_score=NULL（旧版本数据缺少评估指标）、support_rate=0
+3. **llm_calls表**：SSL错误、JSON解析错误
+4. **summaries表**：avg_support_rate=NULL（旧版本汇总缺少指标）、avg_support_rate=0
+
+### 删除结果
+
+| 表 | 删除数量 | 原因 |
+|---|---|---|
+| benchmark_runs | 46 条 | status=failed、关键指标为0/空、关联evaluation异常 |
+| benchmark_evaluations | 44 条 | overall_score=NULL（旧版本无评估数据） |
+| benchmark_llm_calls | 94 条 | 关联异常run_id的调用记录 |
+| benchmark_summaries | 108 条 | avg_support_rate=NULL 或 =0 |
+
+### 清理后数据状态
+
+- runs: 44条，全部status=completed
+- evaluations: 34条，所有指标非空非0
+- summaries: 73条，所有指标非空非0
+- support_rate范围: 0.83~1.0，均值0.9906
+- recall_rate范围: 0.71~0.95，均值0.8292
+
+## 2026-06-06 字段级修订阶段性能优化（补丁模式 + bug修复）
+
+### 问题
+
+字段级修订是管线绝对瓶颈，4次调用共628秒，占总耗时54.6%。根因：
+
+1. **路径A重复调用bug**：`_run_stages_4_to_6`已包含字段修订（第176行），但第519-520行又单独执行了一次`FieldRevisionStage().execute(ctx)`，路径A字段修订被调用了两次。
+2. **LLM输出完整SOAP JSON**：每次修订只涉及1-3个字段，但LLM必须输出完整SOAP JSON（~6600字符），reasoning_tokens高达7500-9800（占completion_tokens的83-89%），大量推理用于维护未变更字段的一致性。
+3. **thinking模式误启用**：字段修订使用默认`thinking_enabled=True`，max_tokens从8192膨胀到40960。
+
+### 修复
+
+1. **删除路径A重复调用**：`orchestrator.py`第519-520行的重复`FieldRevisionStage().execute(ctx)`已删除，直接使用`_run_stages_4_to_6`的返回结果。
+2. **重构为补丁模式**：新增`field_revision_patch` prompt模板，LLM只输出变更字段（补丁），格式为`{"patches": [{"path": "assessment.diagnosis", "value": {...}}]}`。代码将补丁应用到原始SOAP上。
+   - 输入：只传受影响字段 + 核查问题 + transcript（不传完整SOAP JSON）
+   - 输出：只输出补丁（预计200-500字符 vs 原来6600字符）
+   - 关闭thinking模式 + max_tokens=4096
+3. **保留原`field_revision`模板**作为回退，新增`field_revision_patch`模板。
+
+### 预期效果
+
+- 路径A少一次字段修订调用（省89-134秒）
+- 补丁模式：LLM输出从~6600字符降至~200-500字符，reasoning_tokens大幅减少
+- 关闭thinking：max_tokens从40960降至4096
+- 综合预计：单次字段修订从89-260秒降至5-20秒
+
+### 影响文件
+
+- `backend/services/pipeline/orchestrator.py`：删除路径A重复调用
+- `backend/services/pipeline/stages/field_revision.py`：重构为补丁模式
+- `backend/services/llm/prompts/quality_check.py`：新增`field_revision_patch`模板
+
+## 2026-06-06 修复术语规范化latency未记录到stage_breakdown的问题
+
+### 问题
+
+`term_norm`阶段在`stage_breakdown`中`latency=0, tokens=0`，但日志显示术语规范化实际耗时62s、tokens=49。原因是`orchestrator.py`中调用`record_call`时未传入`actual_latency`参数。
+
+### 修复
+
+1. `_normalize_terms_in_draft`返回值从`(emr_draft, calls, chars, tokens)`改为`(emr_draft, calls, chars, tokens, latency)`
+2. 3处调用`_normalize_terms_in_draft`的代码同步修改，接收`latency`并传入`record_call(actual_latency=...)`
+
+### 影响文件
+
+- `backend/services/pipeline/orchestrator.py`
+
+## 2026-06-06 术语规范化阶段性能优化
+
+### 问题
+
+术语规范化阶段耗时严重（68-168秒），根因分析：
+
+1. **thinking模式误启用**：`_extract_medical_terms_with_llm` 和 `_llm_standardize_terms` 通过 `generate_with_template` → `generate()` 调用LLM，未显式传 `thinking_enabled=False`，导致使用默认配置 `thinking_enabled=True`。术语提取/标准化是简单模式匹配任务，不需要深度推理，但thinking模式让max_tokens从8192膨胀到40960，LLM先做大量推理再输出，单次调用耗时167秒。
+2. **JSON解析不兼容**：LLM返回JSON对象 `{...}` 而非数组 `[{...}]` 时，代码直接跳过，导致结果被丢弃。
+3. **同步非流式调用**：`generate()` 使用httpx同步POST，需等待LLM完整生成才返回。
+
+### 修复
+
+1. **关闭thinking模式**：`_extract_medical_terms_with_llm` 和 `_llm_standardize_terms` 改用 `generate_stream_to_response(prompt, thinking_enabled=False, max_tokens=4096)`，显式关闭thinking并限制max_tokens。
+2. **改用流式调用**：从 `generate_with_template` 改为手动渲染模板 + `generate_stream_to_response`，减少等待时间。
+3. **修复JSON解析**：`_extract_medical_terms_with_llm` 优先解析JSON数组，失败后尝试解析JSON对象并包装为数组，兼容LLM返回单个对象的情况。
+
+### 预期效果
+
+- 术语提取LLM调用从168秒降至5-15秒（关闭thinking + 流式调用）
+- JSON解析不再因格式不匹配而丢弃结果
+
+### 影响文件
+
+- `backend/services/terminology_service.py`
+
+## 2026-06-05 术语规范化阶段LLM统计缺失修复
+
+### 问题
+
+术语规范化阶段（`term_norm`）有2次LLM调用（`_extract_medical_terms_with_llm` + `_llm_standardize_terms`），但这些调用直接通过 `self.llm_service.generate_with_template` 发起，没有经过 `ctx.llm_stats.record_call` 记录，导致：
+1. `stage_breakdown` 中没有 `term_norm` 条目
+2. `full` 和 `no_term_norm` 的 `stage_breakdown` 完全相同（都无法区分term_norm）
+3. `total_calls` 中包含了term_norm的调用但无法在阶段级别区分
+
+### 修复
+
+1. **`terminology_service.py`**：
+   - `_extract_medical_terms_with_llm` 返回 `Tuple[List[str], int, int, int]`（terms, calls, chars, tokens）
+   - `_llm_standardize_terms` 返回 `Tuple[Dict, int, int, int]`（mapping, calls, chars, tokens）
+   - `normalize_draft_terms` 返回 `Tuple[Dict, int, int, int]`（replacement_map, calls, chars, tokens）
+2. **`orchestrator.py`**：
+   - `_normalize_terms_in_draft` 返回 `Tuple[Dict, int, int, int]`（emr_draft, calls, chars, tokens）
+   - 三处调用点均解包返回值，并通过 `ctx.llm_stats.record_call(stage="term_norm", ...)` 记录
+3. **`run_full_benchmark.py`**：
+   - `CONFIG_STAGE_GROUPS` 中 `full`、`standard`、`no_hallucination`、`no_verification` 添加 `term_norm` 阶段
+   - `no_term_norm` 不包含 `term_norm`，与 `full` 真正区分
+
+### 影响文件
+
+- `backend/services/terminology_service.py`
+- `backend/services/pipeline/orchestrator.py`
+- `scripts/run_full_benchmark.py`
+
+## 2026-06-05 验证阶段和评估阶段关闭思考模式以优化性能
+
+### 问题
+
+开启思考模式(thinking_enabled)后，单样本full配置耗时从753s(12.5min)暴涨至1682s(28min)，主要瓶颈在验证阶段：
+- 验证阶段耗时从309s涨至1373s（4.45倍），占总耗时81.7%
+- certainty_verification最夸张：延迟17.67倍（15.7s→276.9s），token 4.59倍
+- 评估阶段也受影响：token约2-2.6倍
+
+### 修复
+
+在以下阶段显式设置`thinking_enabled=False`，因为这些任务是模式匹配而非深度推理：
+
+1. **hallucination_check**（幻觉检查）：`generate_stream_to_response(prompt, thinking_enabled=False, ...)`
+2. **claim_verification**（Claim核查）：同上
+3. **checklist_verification**（Checklist核查）：同上
+4. **certainty_verification**（确定性核查）：同上
+5. **评估阶段**（consistency/completeness）：`generate(prompt, thinking_enabled=False)`
+
+### 预期效果
+
+验证阶段从1373s降至约309s，full配置总耗时从1682s降至约620s。
+
+### 影响文件
+
+- `backend/services/pipeline/stages/hallucination_check.py`
+- `backend/services/pipeline/stages/claim_verification.py`
+- `backend/services/evaluation/benchmark_evaluator.py`
+- `backend/services/evaluation/base.py`
+
+## 2026-06-05 修复CONFIG_STAGE_GROUPS定义不完整问题
+
+### 问题
+
+`CONFIG_STAGE_GROUPS` 中 `full`、`no_hallucination`、`no_term_norm`、`standard` 均设为 `None`，语义不明确：
+- `None` 表示"使用全部阶段"，但 `no_hallucination` 实际不包含 `hallucination_check` 阶段
+- `no_verification` 中包含了 `soap_generation_*` 等不存在的阶段名
+- `_compute_llm_stats_for_config` 中有 `stage_group is None` 分支直接返回总数，绕过了阶段级计算
+
+### 修复
+
+1. **`CONFIG_STAGE_GROUPS`**：所有配置显式列出包含的阶段名称，不再使用 `None`
+   - `full`：9个阶段（全部）
+   - `standard`/`no_hallucination`：8个阶段（不含 `hallucination_check`）
+   - `no_term_norm`：9个阶段（与full相同，因term_norm无LLM调用）
+   - `no_verification`：5个阶段（不含 verification 和 field_revision 相关阶段）
+2. **`_compute_llm_stats_for_config`**：移除 `stage_group is None` 分支，所有配置统一走阶段级计算
+
+### 影响文件
+
+- `scripts/run_full_benchmark.py`
+
+## 2026-06-05 修复Benchmark多路径LLM统计合并Bug
+
+### 问题
+
+`process_with_fork` 运行三条路径（A/B/C）后将所有LLM统计合并为一个总数返回，导致 `full`、`no_hallucination`、`no_term_norm` 三个配置的 `elapsed_seconds`、`char_count`、`token_count` 完全相同，无法反映各配置的实际资源消耗差异。
+
+### 根因
+
+1. `orchestrator.py` 中 `process_with_fork` 将路径A/B/C的 `llm_stats` 通过 `merge()` 合并为一个总数
+2. `run_full_benchmark.py` 中 `CONFIG_STAGE_GROUPS` 对 `full`/`no_hallucination`/`no_term_norm` 均设为 `None`，导致 `_compute_llm_stats_for_config` 直接返回合并后的总数
+
+### 修复
+
+1. **`orchestrator.py`**：`process_with_fork` 不再合并三条路径的统计，改为分别返回 `llm_stats_full`（路径A）、`llm_stats_no_term_norm`（路径B）、`llm_stats_no_hallucination`（路径C），每条路径的统计 = 共享阶段1-3 + 该路径阶段4-6
+2. **`run_full_benchmark.py`**：新增 `CONFIG_LLM_STATS_SOURCE` 映射，每个配置选择对应路径的LLM统计源；配置评估循环和缓存复用路径均已更新
+
+### 影响文件
+
+- `backend/services/pipeline/orchestrator.py`
+- `scripts/run_full_benchmark.py`
+
+## 2026-06-05 评估阶段Token消耗优化：Prompt Caching + 合并一致性子任务
+
+### 问题
+
+评估阶段（multi模式）每条样本产生 19 次 LLM 调用，其中同一份 key_facts 被重复传入 18 次，同一份 emr_text 在每次 evaluate_all 内被传 3 次，token 消耗和时间成本很高。
+
+### 优化方案
+
+**方案A：Prompt Caching** — 调整 prompt 模板变量顺序，将大文本变量（key_facts、emr_content、transcript）放在 prompt 开头形成稳定前缀，利用 API 的 prompt caching 机制减少重复计费。
+
+**方案E：合并一致性子任务** — 新增 `consistency_combined_check` 模板，将事实一致性检查和内部一致性检查合并为一次 LLM 调用（原来 2 次减为 1 次）。
+
+### 优化效果
+
+- 每次 evaluate_all（有 key_facts 时）：LLM 调用从 3 次减为 2 次（consistency + completeness）
+- multi 模式每条样本：评估阶段 LLM 调用从 18 次减为 12 次，减少 33%
+- Prompt Caching：同一份 key_facts/emr_content 在多次调用中形成稳定前缀，API 可自动缓存
+
+### 修改文件
+
+- `backend/services/llm/prompts/evaluation.py`：所有模板变量顺序调整（大文本前置），新增 `consistency_combined_check` 中英文模板
+- `backend/services/evaluation/benchmark_evaluator.py`：`LoggedConsistencyEvaluator.evaluate()` 有 key_facts 时使用合并模板，无 key_facts 时保持原有两次调用
+
+### 兼容性
+
+- 旧模板 `consistency_check_from_facts` 和 `internal_consistency_check` 保留，无 key_facts 的 fallback 路径仍使用它们
+- 非 benchmark 的 `ConsistencyEvaluator`（evaluation_pipeline.py 使用）不受影响
+
+## 2026-06-05 修复standard与full共享同一emr_result的逻辑错误
+
+### 问题
+
+`run_multi_variant()` 中，`standard`（跳过幻觉检查）和 `full`（完整管线）都映射到 `emr_result`，但 `emr_result` 是 `process_with_fork()` 路径A的完整管线输出（包含幻觉检查）。`standard` 应该产出跳过幻觉检查步骤的EMR，两者应该不同。
+
+### 修改内容
+
+1. **`orchestrator.py` 的 `process_with_fork()` 新增路径C**：在路径B之后，新增路径C运行阶段4-6（`skip_hallucination_check=True`），产出 `emr_no_hallucination`。路径C从 `emr_draft_before_fork` 深拷贝开始，独立于路径A和路径B。
+
+2. **`run_full_benchmark.py` 的 `config_output_mapping` 更新**：`standard` 和 `no_hallucination` 的 `emr_key` 从 `emr_result` 改为 `emr_no_hallucination`。
+
+3. **`run_full_benchmark.py` 的 `emr_map` 更新**：新增 `emr_no_hallucination` 键。
+
+4. **数据库模型更新**：`BenchmarkRun` 新增 `emr_no_term_norm` 和 `emr_no_hallucination` 两个JSON列，`_save_benchmark_run()` 在保存 `full` 配置时同时存储这两个EMR，`_check_intermediate_results()` 返回这两个字段，复用场景从数据库恢复而非设为 `None`。
+
+5. **兼容性**：已有的 `full` 运行记录没有这两个字段，复用时值为 `None`，需用 `--re-evaluate` 重新运行。
+
+### 修改文件
+
+- `backend/services/pipeline/orchestrator.py`：`process_with_fork()` 新增路径C，返回值新增 `emr_no_hallucination`，所有失败返回值同步更新
+- `backend/models/benchmark.py`：`BenchmarkRun` 新增 `emr_no_term_norm` 和 `emr_no_hallucination` 列
+- `scripts/run_full_benchmark.py`：`config_output_mapping` 映射更新，`emr_map` 新增键，`_save_benchmark_run()` 新增参数，`_check_intermediate_results()` 返回新字段，复用场景从数据库恢复
+
+## 2026-06-05 评估阶段Token消耗优化：key_facts替代完整转写文本
+
+### 问题
+
+评估阶段 `consistency_check` 模板需要输入完整转写文本（平均43.5轮对话，约3000-5000字），每次评估都完整输入，token消耗巨大。multi模式下7个配置独立评估，每个配置的一致性检查都重复输入完整转写文本。
+
+### 优化方案
+
+用 `key_fact_extraction` 已提取的关键事实清单（key_facts）替代完整转写文本作为一致性检查的输入。一致性检查的本质是"EMR中的事实是否被对话支持"，等价于"EMR中的事实是否被关键事实覆盖"。key_facts 是结构化的精简摘要，输入长度减少约70-80%。
+
+### 修改内容
+
+1. **新增 `consistency_check_from_facts` 模板**（中英文）：输入 key_facts + emr_content，替代 transcript + emr_content，输出格式与 `consistency_check` 完全一致。
+
+2. **修改 `LoggedConsistencyEvaluator.evaluate()`**：新增 `key_facts` 可选参数。当 key_facts 存在时使用 `consistency_check_from_facts` 模板，否则回退到原始 `consistency_check` 模板。
+
+3. **修改 `BenchmarkEvaluator.evaluate_all()`**：调整评估顺序，先提取 key_facts（如未传入），再将 key_facts 同时传给 consistency 和 completeness 评估器。
+
+4. **修改 `_run_evaluation()`**：新增 `key_facts` 参数，透传给 `evaluate_all()`。
+
+### 修改文件
+
+- `backend/services/llm/prompts/evaluation.py`：新增 `consistency_check_from_facts` 模板（中英文各一份）
+- `backend/services/evaluation/benchmark_evaluator.py`：
+  - `LoggedConsistencyEvaluator.evaluate()` 新增 `key_facts` 参数
+  - `BenchmarkEvaluator.evaluate_all()` 调整评估顺序，key_facts 提取前置
+- `scripts/run_full_benchmark.py`：`_run_evaluation()` 新增 `key_facts` 参数
+
+### 效果预估
+
+| 指标 | 优化前 | 优化后 | 节省 |
+|---|---|---|---|
+| consistency_check 输入 | 完整转写(~4000字) + EMR | key_facts(~800字) + EMR | ~70% |
+| 每样本评估LLM调用 | 4次(含key_facts提取) | 4次(不变) | - |
+| 每样本评估token消耗 | 高 | 降低约50-60% | ~55% |
+
+## 2026-06-05 评估脚本Token/时间消耗优化
+
+### 问题
+
+`run_full_benchmark.py --config multi` 评估阶段消耗大量token和时间，每个样本评估LLM调用约35次（7配置 × 5评估器）。
+
+### 优化内容
+
+1. **跳过 quality/safety 评估器**：量化评估所需指标（事实支持率、幻觉率、关键召回率、遗漏率、结构完整率、字段缺失率、诊断一致性）仅依赖 consistency 和 completeness 两层评估器，quality 和 safety 对所需指标无贡献。修改 `BenchmarkEvaluator.evaluate_all()` 添加 `skip_quality_safety` 参数，默认在量化评估场景跳过。
+
+2. **评估去重**：`standard` 和 `no_hallucination` 配置相同（均跳过幻觉检查），EMR相同，通过 `eval_cache` 缓存评估结果，`no_hallucination` 直接复用 `standard` 的评估结果。
+
+### 修改文件
+
+- `backend/services/evaluation/benchmark_evaluator.py`：`evaluate_all()` 新增 `skip_quality_safety` 参数
+- `scripts/run_full_benchmark.py`：
+  - `_run_evaluation()` 新增 `skip_quality_safety` 参数（默认True）
+  - `run_multi_variant()` 添加 `EVAL_DEDUP_GROUPS` 去重组和 `eval_cache` 缓存机制
+  - 评估调用处传入 `skip_quality_safety=True`
+
+### 效果
+
+| 指标 | 优化前 | 优化后 | 节省 |
+|---|---|---|---|
+| 每样本评估LLM调用 | 35次 (7×5) | 18次 (6唯一EMR×3) | 49% |
+| 每配置评估LLM调用 | 5次 | 3次 | 40% |
+
+## 2026-06-05 修复 extract_benchmark_results.py 表格列名错误
+
+### 问题
+
+`format_paper_table()` 方法输出的 "LLM 调用效率" 表格列名与实际数据不一致：
+- "总 LLM 调用次数" 实际显示的是平均值 `avg_llm_call_count`
+- "总字符消耗" 实际显示的是平均值 `avg_char_count`
+
+### 修改内容
+
+修改 `scripts/extract_benchmark_results.py` 第 440 行表格列名：
+- "总 LLM 调用次数" → "平均 LLM 调用次数"
+- "总字符消耗" → "平均字符消耗"
+
+修正后表格列名与数据一致：`平均 LLM 调用次数 | 平均延迟 (s) | 平均字符消耗 | 平均 Token 消耗 | 总 Token 消耗`
+
+## 2026-06-05 Pipeline Stage 集成 transcript 压缩功能
+
+### 背景
+
+在 PipelineContext 提供了 `get_compressed_transcript()` 和 `compress_text()` 接口后，需要在各 Pipeline Stage 的 prompt 构建和 LLM 调用中实际使用压缩后的 transcript，并将压缩字典传递给 LLM 以支持 Prompt Caching。
+
+### 修改内容
+
+1. **修改 `backend/services/pipeline/stages/direct_soap_generation.py`**
+   - `_execute_free_text_mode()` 方法：调用 `ctx.get_compressed_transcript()` 获取压缩后的 transcript 和字典，渲染 prompt 时传入 `compression_dict=dict_str` 和 `transcript=compressed_transcript`，LLM 调用时传入 `compression_dict=dict_str`
+   - `_execute_json_mode()` 方法：同上模式修改
+
+2. **修改 `backend/services/pipeline/stages/hallucination_check.py`**
+   - `_check_section()` 方法：对裁剪后的 `transcript_section` 调用 `ctx.compress_text(transcript_section)` 压缩，渲染 prompt 时传入 `compression_dict=section_dict` 和 `transcript_section=compressed_section`，LLM 调用时传入 `compression_dict=section_dict`
+
+3. **修改 `backend/services/pipeline/stages/claim_verification.py`**
+   - `_step_claim_verification()` 方法：对裁剪后的 transcript 调用 `ctx.compress_text(transcript)` 压缩，渲染 prompt 和 LLM 调用均传入 compression_dict
+   - `_step_checklist_verification()` 方法：对完整转写调用 `ctx.get_compressed_transcript()`（使用缓存），渲染 prompt 和 LLM 调用均传入 compression_dict
+   - `_step_certainty_verification()` 方法：对裁剪后的 transcript 调用 `ctx.compress_text(transcript)` 压缩，渲染 prompt 和 LLM 调用均传入 compression_dict
+
+4. **修改 `backend/services/pipeline/stages/field_revision.py`**
+   - `_call_llm_revision()` 方法：调用 `ctx.get_compressed_transcript()` 获取压缩后的 transcript 和字典，渲染 prompt 时传入 `compression_dict=dict_str` 和 `transcript=compressed_transcript`，LLM 调用时传入 `compression_dict=dict_str`
+
+### 设计要点
+
+- 完整转写（combined_text）使用 `ctx.get_compressed_transcript()`，利用缓存避免重复压缩
+- 裁剪后的转写片段使用 `ctx.compress_text(text)`，独立压缩
+- 每处修改均添加日志记录压缩情况（原文长度、压缩后长度、是否压缩）
+- 压缩失败时 dict_str 为 None，compression_dict 也为 None，LLM 调用正常回退到原文
+- 不改变各 stage 的核心逻辑，只替换 transcript 来源和添加 compression_dict 参数
+
+## 2026-06-05 PipelineContext 集成 transcript 压缩功能
+
+### 背景
+
+在转写清洗阶段完成后，对 combined_text 执行压缩并缓存结果，使后续阶段可直接使用压缩后的对话原文，减少 LLM token 消耗。
+
+### 修改内容
+
+1. **修改 `backend/services/pipeline/base.py`**
+   - PipelineContext 新增三个压缩相关字段（`_compressed_transcript`、`_transcript_dictionary`、`_compressor`），使用 `field(default=None, init=False, repr=False)` 声明，不参与 dataclass 构造函数
+   - 新增 `get_compressed_transcript()` 方法：按需压缩 combined_text 并缓存结果，返回 `(compressed_text, dictionary_str)`，dictionary_str 为 None 表示回退到原文
+   - 新增 `compress_text(text)` 方法：压缩任意文本片段（如裁剪后的转写），使用 `compress_section()` 接口
+   - 两个方法均使用懒加载方式导入 `TranscriptCompressor`，避免循环导入
+
+2. **修改 `backend/services/pipeline/stages/turn_cleaning.py`**
+   - 在 `execute()` 方法中，`ctx.combined_text = combined_text` 之后添加预压缩逻辑
+   - 调用 `ctx.get_compressed_transcript()` 触发压缩，根据结果记录日志（压缩成功/压缩率不足/压缩失败）
+   - 压缩失败时 try-except 捕获异常，不影响后续流程
+
+### 兼容性
+
+- 压缩是可选的，失败时回退到原文，不改变现有行为
+- `_compressed_transcript`、`_transcript_dictionary`、`_compressor` 使用 `init=False`，不影响现有 PipelineContext 构造代码
+
+## 2026-06-05 LLM模块支持 Prompt Caching 优化
+
+### 背景
+
+LLM调用时，system message中包含稳定的压缩字典内容，适合利用 Prompt Caching 减少重复token计费。需要在LLM请求/响应数据结构中支持compression_dict传递和cached_tokens记录。
+
+### 修改内容
+
+1. **修改 `backend/services/llm/base.py`**
+   - LLMRequest 新增 `compression_dict: Optional[str] = None` 字段，用于传递压缩字典文本
+   - LLMResponse 新增 `cached_tokens: int = 0` 字段，用于记录缓存命中的token数
+
+2. **修改 `backend/services/llm/openai_compatible_adapter.py`**
+   - generate() 和 generate_stream() 的 messages 构建逻辑改为：将 JSON指令 和 compression_dict 合并到 system message 中（用 `\n\n` 连接）
+   - 当 compression_dict 为 None 且 json_mode 为 False 时，不生成 system message，行为与修改前完全一致
+   - generate() 方法中新增 cached_tokens 提取逻辑：优先从 `usage.prompt_tokens_details.cached_tokens`（OpenAI格式）提取，其次从 `usage.cache_read_input_tokens`（Anthropic格式）提取
+   - LLMResponse 构造时传入 cached_tokens
+
+3. **修改 `backend/services/llm/llm_service.py`**
+   - generate() 方法中新增缓存命中日志：当 cached_tokens > 0 时，计算 cache_rate 并输出 info 日志
+   - generate_stream_to_response() 方法中新增从流式 usage 提取 cached_tokens 的逻辑，构造 LLMResponse 时传入 cached_tokens，并输出缓存命中日志
+
+### 兼容性
+
+- compression_dict 为 None 时，messages 构建行为与修改前完全一致
+- cached_tokens 默认值为 0，不影响现有代码
+
+## 2026-06-05 PromptManager 支持压缩字典说明插入
+
+### 背景
+
+当prompt中使用压缩后的transcript时，LLM需要理解编码符号的含义。需要在对话原文标题后自动插入编码字典说明。
+
+### 修改内容
+
+1. **修改 `backend/services/llm/prompts/manager.py`** — PromptManager.render() 方法
+   - 新增 `compression_dict: Optional[str]` 参数，默认为None
+   - compression_dict不为None时，在渲染结果中查找对话标题锚点，在其后插入编码字典说明块
+   - 支持的中文锚点前缀：`## 原始对话`、`## 对话片段`、`## 对话`
+   - 支持的英文锚点前缀：`## Original conversation`、`## Original Conversation`、`## Conversation snippet`
+   - 锚点前缀匹配标题行（含括号注释变体），在标题行末尾换行符后插入字典说明
+   - 未找到锚点时输出warning日志，不中断渲染
+   - compression_dict为None时行为与修改前完全一致
+
+### 模板锚点检查结果
+
+所有包含 `$transcript` 变量的模板均已有正确的对话标题锚点，无需修改：
+
+- `soap_generation.py`：emr_generation_with_role、direct_soap_generation、free_soap_generation、soap_structuring、evidence_mapping
+- `quality_check.py`：claim_verification、checklist_verification、field_revision、certainty_verification
+- `evaluation.py`：consistency_check、consistency_check_section、key_fact_extraction、safety_risk_check
+
+## 2026-06-05 新增 TranscriptCompressor 对话压缩器
+
+### 背景
+
+LLM处理医患对话时，对话原文占用大量token。通过字典编码压缩，减少发送给LLM的token数量，降低API调用成本和延迟。
+
+### 修改内容
+
+1. **新增 `backend/services/pipeline/transcript_compressor.py`** — TranscriptCompressor 类，实现对话原文字典编码压缩
+   - 对话前缀压缩：识别 `[#N] [spkX]:` 模式，按说话人分配短编码（①②...）
+   - 高频短语压缩：提取出现>=2次且长度>=3字符的子串，按频率*长度降序排列，分配编码（③④...）
+   - 子串去重：已选中长短语的子串不再重复编码
+   - 替换前检查：短语被先前替换消除后不再编码
+   - 回退机制：压缩后文本长度 > 原文80%时回退返回原文
+   - 语气词保留：不删除"嗯"、"好的"、"那个"、"就是"等语气词
+   - 标点边界过滤：排除以标点开头/结尾的n-gram
+   - 最多20个高频短语编码，避免字典过大
+
+### 压缩效果
+
+- 长对话（335字符）：压缩后157字符，压缩率46.87%，8个编码
+- 短对话（93字符）：压缩后45字符，压缩率48.39%，2个编码（仅前缀压缩）
+
 ## 2026-06-05 合并消融实验：删除 no_field_revision 配置
 
 ### 背景

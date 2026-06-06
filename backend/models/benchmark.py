@@ -23,6 +23,8 @@ class BenchmarkRun(BenchmarkBase):
     emr_raw_draft = Column(JSON, nullable=True)
     emr_pre_revision = Column(JSON, nullable=True)
     emr_result = Column(JSON, nullable=True)
+    emr_no_term_norm = Column(JSON, nullable=True)
+    emr_no_hallucination = Column(JSON, nullable=True)
     hallucination_result = Column(JSON, nullable=True)
     verification_issues = Column(JSON, nullable=True)
     key_facts = Column(JSON, nullable=True)

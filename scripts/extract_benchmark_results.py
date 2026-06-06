@@ -67,10 +67,52 @@ CONFIG_STAGE_GROUPS = {
         "certainty_verification",
         "field_revision"
     ],
-    "full": None,  # 使用全部stage
-    "no_verification": None,
-    "no_hallucination": None,
-    "no_term_norm": None
+    "full": [
+        # 完整管线：全部阶段（包含term_norm）
+        "turn_cleaning",
+        "draft_generation_free_text",
+        "draft_generation_json",
+        "soap_structuring",
+        "term_norm",
+        "hallucination_check",
+        "claim_verification",
+        "checklist_verification",
+        "certainty_verification",
+        "field_revision"
+    ],
+    "no_verification": [
+        # 消融：跳过后置核查与字段修订，不包含claim/checklist/certainty_verification和field_revision
+        "turn_cleaning",
+        "draft_generation_free_text",
+        "draft_generation_json",
+        "soap_structuring",
+        "term_norm",
+        "hallucination_check"
+    ],
+    "no_hallucination": [
+        # 消融：跳过幻觉检查，与standard相同（不含hallucination_check）
+        "turn_cleaning",
+        "draft_generation_free_text",
+        "draft_generation_json",
+        "soap_structuring",
+        "term_norm",
+        "claim_verification",
+        "checklist_verification",
+        "certainty_verification",
+        "field_revision"
+    ],
+    "no_term_norm": [
+        # 消融：跳过术语规范化（不含term_norm），其余与full相同
+        "turn_cleaning",
+        "draft_generation_free_text",
+        "draft_generation_json",
+        "soap_structuring",
+        "hallucination_check",
+        "claim_verification",
+        "checklist_verification",
+        "certainty_verification",
+        "field_revision"
+    ]
 }
 
 
@@ -438,7 +480,7 @@ class BenchmarkResultExtractor:
         table += f"| 安全风险 | 诊断一致性 (%) | {fmt(get_val('end_to_end', 'avg_diagnosis_match'))} | {fmt(get_val('simplified', 'avg_diagnosis_match'))} | {fmt(get_val('standard', 'avg_diagnosis_match'))} | {fmt(get_val('full', 'avg_diagnosis_match'))} |\n"
 
         table += "\n## LLM 调用效率\n\n"
-        table += "| 配置 | 总 LLM 调用次数 | 平均延迟 (s) | 总字符消耗 | 平均 Token 消耗 | 总 Token 消耗 |\n"
+        table += "| 配置 | 平均 LLM 调用次数 | 平均延迟 (s) | 平均字符消耗 | 平均 Token 消耗 | 总 Token 消耗 |\n"
         table += "| :--- | ---: | ---: | ---: | ---: | ---: |\n"
 
         def fmt_int(val, default="—"):

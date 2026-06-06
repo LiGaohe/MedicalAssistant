@@ -16,6 +16,7 @@ class LLMRequest:
     thinking_effort: str = "high"
     timeout: Optional[float] = None
     stream: bool = False
+    compression_dict: Optional[str] = None
     
 
 @dataclass
@@ -28,6 +29,7 @@ class LLMResponse:
     raw_response: Optional[Dict[str, Any]] = None
     thinking_content: Optional[str] = None
     actual_latency: Optional[float] = None
+    cached_tokens: int = 0
 
 
 @dataclass

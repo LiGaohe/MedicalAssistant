@@ -87,7 +87,8 @@ class LLMService:
         thinking_enabled: Optional[bool] = None,
         thinking_effort: Optional[str] = None,
         timeout: Optional[float] = None,
-        call_id: Optional[str] = None
+        call_id: Optional[str] = None,
+        compression_dict: Optional[str] = None
     ) -> LLMResponse:
         if not self.adapters:
             with self._config_lock:
@@ -120,7 +121,8 @@ class LLMService:
             json_mode=json_mode if json_mode is not None else cached_config["json_mode"],
             thinking_enabled=thinking_enabled if thinking_enabled is not None else cached_config["thinking_enabled"],
             thinking_effort=thinking_effort or cached_config["thinking_effort"],
-            timeout=timeout
+            timeout=timeout,
+            compression_dict=compression_dict
         )
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
@@ -137,6 +139,13 @@ class LLMService:
         logger.debug(f"LLM响应 - usage: {response.usage}")
         logger.info(f"LLM响应 - 返回文本长度: {len(response.text)} 字符")
         logger.debug(f"LLM响应 - 返回文本内容:\n{response.text}")
+
+        # 记录缓存命中信息
+        cached_tokens = response.cached_tokens if hasattr(response, 'cached_tokens') else 0
+        if cached_tokens > 0:
+            total_input = response.usage.get("prompt_tokens", 0)
+            cache_rate = cached_tokens / total_input if total_input > 0 else 0
+            logger.info(f"Prompt缓存命中: cached_tokens={cached_tokens}, cache_rate={cache_rate:.1%}")
         
         self._llm_raw_logger.info(f"\n{'='*80}\n[LLM RAW RESPONSE] call_id={call_id}, adapter={adapter_name}, timestamp={timestamp}\n{'='*80}\n[PROMPT]\n{prompt}\n\n[RESPONSE - {response.model}]\n{response.text}\n{'='*80}\n")
         
@@ -204,7 +213,8 @@ class LLMService:
         thinking_effort: Optional[str] = None,
         timeout: Optional[float] = None,
         call_id: Optional[str] = None,
-        on_chunk: Optional[callable] = None
+        on_chunk: Optional[callable] = None,
+        compression_dict: Optional[str] = None
     ) -> Generator[LLMStreamChunk, None, None]:
         """流式生成响应，避免一次性发送大量token导致限流和超时
         
@@ -255,7 +265,8 @@ class LLMService:
             thinking_enabled=thinking_enabled if thinking_enabled is not None else cached_config["thinking_enabled"],
             thinking_effort=thinking_effort or cached_config["thinking_effort"],
             timeout=timeout,
-            stream=True
+            stream=True,
+            compression_dict=compression_dict
         )
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
@@ -304,7 +315,8 @@ class LLMService:
         thinking_effort: Optional[str] = None,
         timeout: Optional[float] = None,
         call_id: Optional[str] = None,
-        on_chunk: Optional[callable] = None
+        on_chunk: Optional[callable] = None,
+        compression_dict: Optional[str] = None
     ) -> LLMResponse:
         """流式生成响应，但返回完整的LLMResponse对象（兼容现有代码）
         
@@ -326,7 +338,8 @@ class LLMService:
             thinking_effort=thinking_effort,
             timeout=timeout,
             call_id=call_id,
-            on_chunk=on_chunk
+            on_chunk=on_chunk,
+            compression_dict=compression_dict
         ):
             if chunk.is_final:
                 final_chunk = chunk
@@ -339,9 +352,21 @@ class LLMService:
         
         if final_chunk is None:
             raise RuntimeError("Stream ended without final chunk")
-        
+
         final_latency = time.time() - stream_start_time
-        
+
+        # 从流式响应的usage中提取cached_tokens
+        cached_tokens = 0
+        if final_chunk.usage:
+            prompt_tokens_details = final_chunk.usage.get("prompt_tokens_details", {})
+            cached_tokens = prompt_tokens_details.get("cached_tokens", 0)
+            if cached_tokens == 0:
+                cached_tokens = final_chunk.usage.get("cache_read_input_tokens", 0)
+        if cached_tokens > 0:
+            total_input = final_chunk.usage.get("prompt_tokens", 0) if final_chunk.usage else 0
+            cache_rate = cached_tokens / total_input if total_input > 0 else 0
+            logger.info(f"Prompt缓存命中(流式): cached_tokens={cached_tokens}, cache_rate={cache_rate:.1%}")
+
         return LLMResponse(
             text=accumulated_text,
             model=final_chunk.model,
@@ -349,5 +374,6 @@ class LLMService:
             usage=final_chunk.usage or {},
             finish_reason=final_chunk.finish_reason or "stop",
             thinking_content=accumulated_thinking,
-            actual_latency=final_latency
+            actual_latency=final_latency,
+            cached_tokens=cached_tokens
         )

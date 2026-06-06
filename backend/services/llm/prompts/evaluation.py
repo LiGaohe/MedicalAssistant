@@ -7,13 +7,13 @@ def get_evaluation_templates_zh() -> dict:
     templates = {}
 
     templates["consistency_check"] = PromptTemplate(
-        template="""你是一个医疗病历质量评估专家。请评估病历中的内容是否被原始对话支持。
-
-## 原始对话
+        template="""## 原始对话
 $transcript
 
 ## 待评估病历
 $emr_content
+
+你是一个医疗病历质量评估专家。请评估病历中的内容是否被原始对话支持。
 
 ## 评估任务
 请对病历中的每个关键事实进行二值判断：该事实是否能在原始对话中找到依据？
@@ -62,14 +62,70 @@ $emr_content
         required_vars=["transcript", "emr_content"]
     )
 
-    templates["consistency_check_section"] = PromptTemplate(
-        template="""你是医疗病历质量评估专家。请评估【$section_name】章节中哪些事实无法被对话支持。
+    templates["consistency_check_from_facts"] = PromptTemplate(
+        template="""## 关键事实清单（从原始对话中提取）
+$key_facts
 
-## 对话片段（仅包含与该章节相关的轮次）
+## 待评估病历
+$emr_content
+
+你是一个医疗病历质量评估专家。请评估病历中的内容是否被关键事实清单支持。
+
+## 评估任务
+请对病历中的每个关键事实进行二值判断：该事实是否能在关键事实清单中找到依据？
+
+关键事实包括：
+1. 主诉症状及持续时间
+2. 伴随症状
+3. 既往史
+4. 过敏史
+5. 体格检查结果
+6. 辅助检查结果
+7. 诊断结论
+8. 治疗药物
+9. 医嘱建议
+
+## 重要评估原则
+**仅评估关键事实清单中实际涉及的内容**：
+- 如果关键事实清单中**未提及**既往史，则不将"未提及既往史"作为评估项，跳过此项评估
+- 如果关键事实清单中**未提及**过敏史，则不将"未提及过敏史"作为评估项，跳过此项评估
+- 如果关键事实清单中**未提及**辅助检查，则不将"未行辅助检查"作为评估项，跳过此项评估
+- 只有当关键事实清单中明确涉及某类信息，而病历中缺失或矛盾时，才将其标记为不支持
+
+**证据为"无"的情况不作为扣分依据**：
+- 当某类信息在关键事实清单中完全未出现时，病历中是否记录该信息不纳入一致性评估
+- 仅评估关键事实清单中存在明确信息的事实项
+
+## 输出格式（JSON）
+请严格按照以下格式输出，不要添加任何额外内容：
+{
+  "facts": [
+    {
+      "fact": "从病历中提取的原子事实",
+      "section": "subjective|objective|assessment|plan",
+      "is_supported": true或false,
+      "evidence_text": "关键事实清单中支持该事实的原文（如果is_supported为true，否则为空字符串）",
+      "reasoning": "判断理由（简要说明为什么支持或不支持）"
+    }
+  ],
+  "summary": {
+    "total_facts": 事实总数（整数）,
+    "supported_count": 支持的事实数（整数）,
+    "unsupported_count": 不支持的事实数（整数）,
+    "support_rate": 支持率（0.0-1.0的小数）
+  }
+}""",
+        required_vars=["key_facts", "emr_content"]
+    )
+
+    templates["consistency_check_section"] = PromptTemplate(
+        template="""## 对话片段（仅包含与该章节相关的轮次）
 $transcript_section
 
 ## 待评估病历【$section_name】章节
 $emr_section
+
+你是医疗病历质量评估专家。请评估【$section_name】章节中哪些事实无法被对话支持。
 
 ## 评估任务
 逐条检查病历中每个事实，判断是否能在对话中找到依据。
@@ -101,10 +157,10 @@ reasoning必须简短，不超过30字，不要展开推理过程：
     )
 
     templates["internal_consistency_check"] = PromptTemplate(
-        template="""你是一个医疗病历质量评估专家。请检查病历内部是否存在自相矛盾。
-
-## 待评估病历
+        template="""## 待评估病历
 $emr_content
+
+你是一个医疗病历质量评估专家。请检查病历内部是否存在自相矛盾。
 
 ## 评估任务
 检查以下类型的内部冲突：
@@ -137,10 +193,10 @@ $emr_content
     )
 
     templates["key_fact_extraction"] = PromptTemplate(
-        template="""你是一个医疗病历质量评估专家。请从医患对话中提取病历生成的关键事实清单。
-
-## 原始对话
+        template="""## 原始对话
 $transcript
+
+你是一个医疗病历质量评估专家。请从医患对话中提取病历生成的关键事实清单。
 
 ## 提取任务
 请提取以下类型的关键事实：
@@ -178,13 +234,13 @@ $transcript
     )
 
     templates["completeness_check"] = PromptTemplate(
-        template="""你是一个医疗病历质量评估专家。请评估病历对关键事实的覆盖情况。
-
-## 关键事实清单
+        template="""## 关键事实清单
 $key_facts
 
 ## 待评估病历
 $emr_content
+
+你是一个医疗病历质量评估专家。请评估病历对关键事实的覆盖情况。
 
 ## 评估任务
 对每个关键事实，判断病历是否已覆盖。覆盖标准：
@@ -217,10 +273,10 @@ $emr_content
     )
 
     templates["document_quality_check"] = PromptTemplate(
-        template="""你是一个医疗病历质量评估专家。请评估病历的文档质量。
-
-## 待评估病历
+        template="""## 待评估病历
 $emr_content
+
+你是一个医疗病历质量评估专家。请评估病历的文档质量。
 
 ## 评估维度
 请对以下五个维度进行评分（0-2分）：
@@ -282,13 +338,13 @@ $emr_content
     )
 
     templates["safety_risk_check"] = PromptTemplate(
-        template="""你是一个医疗安全风险评估专家。请评估病历中是否存在高风险错误。
-
-## 原始对话
+        template="""## 原始对话
 $transcript
 
 ## 待评估病历
 $emr_content
+
+你是一个医疗安全风险评估专家。请评估病历中是否存在高风险错误。
 
 ## 评估任务
 请检查以下类型的高风险错误：
@@ -352,6 +408,79 @@ $emr_content
         required_vars=["transcript", "emr_content"]
     )
 
+    templates["consistency_combined_check"] = PromptTemplate(
+        template="""## 关键事实清单（从原始对话中提取）
+$key_facts
+
+## 待评估病历
+$emr_content
+
+你是一个医疗病历质量评估专家。请同时完成以下两项评估任务。
+
+## 任务一：事实一致性检查
+请对病历中的每个关键事实进行二值判断：该事实是否能在关键事实清单中找到依据？
+
+关键事实包括：
+1. 主诉症状及持续时间
+2. 伴随症状
+3. 既往史
+4. 过敏史
+5. 体格检查结果
+6. 辅助检查结果
+7. 诊断结论
+8. 治疗药物
+9. 医嘱建议
+
+**重要评估原则**：
+- 仅评估关键事实清单中实际涉及的内容，未提及的不作为评估项
+- 证据为"无"的情况不作为扣分依据
+- 只有当关键事实清单中明确涉及某类信息，而病历中缺失或矛盾时，才标记为不支持
+
+## 任务二：内部一致性检查
+检查病历内部是否存在自相矛盾：
+1. 年龄、性别在不同位置是否一致
+2. 身体部位（左/右）在不同位置是否一致
+3. 时间信息（病程、用药时间）是否自洽
+4. 诊断与治疗方案是否对应
+5. 主诉与现病史是否矛盾
+
+## 输出格式（JSON）
+请严格按照以下格式输出，不要添加任何额外内容：
+{
+  "facts": [
+    {
+      "fact": "从病历中提取的原子事实",
+      "section": "subjective|objective|assessment|plan",
+      "is_supported": true或false,
+      "evidence_text": "关键事实清单中支持该事实的原文（如果is_supported为true，否则为空字符串）",
+      "reasoning": "判断理由（简要说明为什么支持或不支持）"
+    }
+  ],
+  "summary": {
+    "total_facts": 事实总数（整数）,
+    "supported_count": 支持的事实数（整数）,
+    "unsupported_count": 不支持的事实数（整数）,
+    "support_rate": 支持率（0.0-1.0的小数）
+  },
+  "internal_conflicts": [
+    {
+      "conflict_type": "age|gender|body_part|time|diagnosis_treatment|chief_complaint_history",
+      "description": "冲突描述",
+      "location_1": "第一个矛盾位置",
+      "content_1": "第一个矛盾内容",
+      "location_2": "第二个矛盾位置",
+      "content_2": "第二个矛盾内容",
+      "severity": "high|medium|low"
+    }
+  ],
+  "is_consistent": true或false,
+  "consistency_score": 0.0-1.0（无冲突为1.0，每个冲突扣0.1-0.2）
+}
+
+如果没有发现内部冲突，internal_conflicts数组为空，is_consistent为true，consistency_score为1.0。""",
+        required_vars=["key_facts", "emr_content"]
+    )
+
     return templates
 
 
@@ -360,13 +489,13 @@ def get_evaluation_templates_en() -> dict:
     templates = {}
 
     templates["consistency_check"] = PromptTemplate(
-        template="""You are a medical record quality assessment expert. Please evaluate whether the content in the medical record is supported by the original conversation.
-
-## Original conversation
+        template="""## Original conversation
 $transcript
 
 ## Medical record to evaluate
 $emr_content
+
+You are a medical record quality assessment expert. Please evaluate whether the content in the medical record is supported by the original conversation.
 
 ## Assessment task
 Please make a binary judgment for each key fact in the medical record: can this fact find basis in the original conversation?
@@ -415,14 +544,70 @@ Please strictly follow this format, do not add any extra content:
         required_vars=["transcript", "emr_content"]
     )
 
-    templates["consistency_check_section"] = PromptTemplate(
-        template="""You are a medical record quality assessment expert. Please evaluate which facts in the [$section_name] section are not supported by the conversation.
+    templates["consistency_check_from_facts"] = PromptTemplate(
+        template="""## Key fact list (extracted from original conversation)
+$key_facts
 
-## Conversation snippet (only turns relevant to this section)
+## Medical record to evaluate
+$emr_content
+
+You are a medical record quality assessment expert. Please evaluate whether the content in the medical record is supported by the key fact list.
+
+## Assessment task
+Please make a binary judgment for each key fact in the medical record: can this fact find basis in the key fact list?
+
+Key facts include:
+1. Chief complaint symptoms and duration
+2. Associated symptoms
+3. Past medical history
+4. Allergy history
+5. Physical examination results
+6. Auxiliary examination results
+7. Diagnosis conclusions
+8. Treatment medications
+9. Medical advice
+
+## Important Assessment Principles
+**Only evaluate content actually mentioned in the key fact list**:
+- If past medical history is **not mentioned** in the key fact list, do not include "past medical history not mentioned" as an evaluation item, skip this assessment
+- If allergy history is **not mentioned** in the key fact list, do not include "allergy history not mentioned" as an evaluation item, skip this assessment
+- If auxiliary examination is **not mentioned** in the key fact list, do not include "auxiliary examination not performed" as an evaluation item, skip this assessment
+- Only mark as unsupported when the key fact list clearly involves certain information but the medical record is missing or contradictory
+
+**Evidence being "none" is not a basis for deduction**:
+- When certain information does not appear at all in the key fact list, whether the medical record records it is not included in consistency evaluation
+- Only evaluate facts where explicit information exists in the key fact list
+
+## Output format (JSON)
+Please strictly follow this format, do not add any extra content:
+{
+  "facts": [
+    {
+      "fact": "atomic fact extracted from medical record",
+      "section": "subjective|objective|assessment|plan",
+      "is_supported": true or false,
+      "evidence_text": "original text in key fact list supporting this fact (if is_supported is true, otherwise empty string)",
+      "reasoning": "judgment rationale (briefly explain why supported or not supported)"
+    }
+  ],
+  "summary": {
+    "total_facts": total number of facts (integer),
+    "supported_count": number of supported facts (integer),
+    "unsupported_count": number of unsupported facts (integer),
+    "support_rate": support rate (decimal 0.0-1.0)
+  }
+}""",
+        required_vars=["key_facts", "emr_content"]
+    )
+
+    templates["consistency_check_section"] = PromptTemplate(
+        template="""## Conversation snippet (only turns relevant to this section)
 $transcript_section
 
 ## Medical record [$section_name] section to evaluate
 $emr_section
+
+You are a medical record quality assessment expert. Please evaluate which facts in the [$section_name] section are not supported by the conversation.
 
 ## Assessment task
 Check each fact in the medical record to determine if it can find basis in the conversation.
@@ -454,10 +639,10 @@ Reasoning must be concise, no more than 20 words, do not elaborate the reasoning
     )
 
     templates["internal_consistency_check"] = PromptTemplate(
-        template="""You are a medical record quality assessment expert. Please check whether there are internal contradictions in the medical record.
-
-## Medical record to evaluate
+        template="""## Medical record to evaluate
 $emr_content
+
+You are a medical record quality assessment expert. Please check whether there are internal contradictions in the medical record.
 
 ## Assessment task
 Check for the following types of internal conflicts:
@@ -490,10 +675,10 @@ If no conflicts found, conflicts array is empty, is_consistent is true, consiste
     )
 
     templates["key_fact_extraction"] = PromptTemplate(
-        template="""You are a medical record quality assessment expert. Please extract a key fact list for medical record generation from the doctor-patient conversation.
-
-## Original conversation
+        template="""## Original conversation
 $transcript
+
+You are a medical record quality assessment expert. Please extract a key fact list for medical record generation from the doctor-patient conversation.
 
 ## Extraction task
 Please extract the following types of key facts:
@@ -531,13 +716,13 @@ Please strictly follow this format:
     )
 
     templates["completeness_check"] = PromptTemplate(
-        template="""You are a medical record quality assessment expert. Please evaluate the coverage of key facts in the medical record.
-
-## Key fact list
+        template="""## Key fact list
 $key_facts
 
 ## Medical record to evaluate
 $emr_content
+
+You are a medical record quality assessment expert. Please evaluate the coverage of key facts in the medical record.
 
 ## Assessment task
 For each key fact, determine if the medical record has covered it. Coverage criteria:
@@ -570,10 +755,10 @@ Please strictly follow this format:
     )
 
     templates["document_quality_check"] = PromptTemplate(
-        template="""You are a medical record quality assessment expert. Please evaluate the document quality of the medical record.
-
-## Medical record to evaluate
+        template="""## Medical record to evaluate
 $emr_content
+
+You are a medical record quality assessment expert. Please evaluate the document quality of the medical record.
 
 ## Assessment dimensions
 Please score the following five dimensions (0-2 points):
@@ -635,13 +820,13 @@ Please strictly follow this format:
     )
 
     templates["safety_risk_check"] = PromptTemplate(
-        template="""You are a medical safety risk assessment expert. Please evaluate if there are high-risk errors in the medical record.
-
-## Original conversation
+        template="""## Original conversation
 $transcript
 
 ## Medical record to evaluate
 $emr_content
+
+You are a medical safety risk assessment expert. Please evaluate if there are high-risk errors in the medical record.
 
 ## Assessment task
 Please check for the following types of high-risk errors:
@@ -704,6 +889,79 @@ Please strictly follow this format:
 
 If no risks found, risks array is empty, has_high_risk is false, all counts are 0.""",
         required_vars=["transcript", "emr_content"]
+    )
+
+    templates["consistency_combined_check"] = PromptTemplate(
+        template="""## Key fact list (extracted from original conversation)
+$key_facts
+
+## Medical record to evaluate
+$emr_content
+
+You are a medical record quality assessment expert. Please complete both assessment tasks below simultaneously.
+
+## Task 1: Fact Consistency Check
+Please make a binary judgment for each key fact in the medical record: can this fact find basis in the key fact list?
+
+Key facts include:
+1. Chief complaint symptoms and duration
+2. Associated symptoms
+3. Past medical history
+4. Allergy history
+5. Physical examination results
+6. Auxiliary examination results
+7. Diagnosis conclusions
+8. Treatment medications
+9. Medical advice
+
+**Important Assessment Principles**:
+- Only evaluate content actually mentioned in the key fact list, unmentioned items are not assessed
+- Evidence being "none" is not a basis for deduction
+- Only mark as unsupported when the key fact list clearly involves certain information but the medical record is missing or contradictory
+
+## Task 2: Internal Consistency Check
+Check for internal contradictions in the medical record:
+1. Are age and gender consistent in different locations
+2. Are body parts (left/right) consistent in different locations
+3. Is time information (disease duration, medication time) self-consistent
+4. Does diagnosis correspond to treatment plan
+5. Is there contradiction between chief complaint and history of present illness
+
+## Output format (JSON)
+Please strictly follow this format, do not add any extra content:
+{
+  "facts": [
+    {
+      "fact": "atomic fact extracted from medical record",
+      "section": "subjective|objective|assessment|plan",
+      "is_supported": true or false,
+      "evidence_text": "original text in key fact list supporting this fact (if is_supported is true, otherwise empty string)",
+      "reasoning": "judgment rationale (briefly explain why supported or not supported)"
+    }
+  ],
+  "summary": {
+    "total_facts": total number of facts (integer),
+    "supported_count": number of supported facts (integer),
+    "unsupported_count": number of unsupported facts (integer),
+    "support_rate": support rate (decimal 0.0-1.0)
+  },
+  "internal_conflicts": [
+    {
+      "conflict_type": "age|gender|body_part|time|diagnosis_treatment|chief_complaint_history",
+      "description": "conflict description",
+      "location_1": "first contradictory location",
+      "content_1": "first contradictory content",
+      "location_2": "second contradictory location",
+      "content_2": "second contradictory content",
+      "severity": "high|medium|low"
+    }
+  ],
+  "is_consistent": true or false,
+  "consistency_score": 0.0-1.0 (1.0 if no conflicts, deduct 0.1-0.2 for each conflict)
+}
+
+If no internal conflicts found, internal_conflicts array is empty, is_consistent is true, consistency_score is 1.0.""",
+        required_vars=["key_facts", "emr_content"]
     )
 
     return templates

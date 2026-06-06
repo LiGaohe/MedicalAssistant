@@ -93,8 +93,14 @@ ABLATION_CONFIGS = {
 }
 
 # 定义每个配置包含的LLM调用阶段（全局变量）
+# 阶段名称对应各Stage中record_call使用的名称
+# 有LLM调用的阶段：turn_cleaning, draft_generation_free_text, draft_generation_json,
+#   soap_structuring, hallucination_check, claim_verification, checklist_verification,
+#   certainty_verification, field_revision
+# 注意：term_norm无LLM调用，不出现在此列表中
 CONFIG_STAGE_GROUPS = {
     "end_to_end": [
+        # 端到端：仅草稿生成
         "draft_generation_free_text",
         "draft_generation_json"
     ],
@@ -106,31 +112,78 @@ CONFIG_STAGE_GROUPS = {
         "soap_structuring"
     ],
     "standard": [
-        # 标准管线：skip_hallucination_check=True
-        # 实际LLM调用：turn_cleaning → draft_generation → soap_structuring → verification → field_revision
+        # 标准管线：skip_hallucination_check=True，不包含hallucination_check
         "turn_cleaning",
         "draft_generation_free_text",
         "draft_generation_json",
         "soap_structuring",
+        "term_norm",
         "claim_verification",
         "checklist_verification",
         "certainty_verification",
         "field_revision"
     ],
     "no_verification": [
+        # 消融：跳过后置核查与字段修订，不包含claim/checklist/certainty_verification和field_revision
         "turn_cleaning",
         "draft_generation_free_text",
         "draft_generation_json",
         "soap_structuring",
-        "soap_generation_so",
-        "soap_generation_ap",
-        "soap_generation_assessment",
-        "soap_generation_plan",
+        "term_norm",
         "hallucination_check"
     ],
-    "full": None,  # 使用全部stage
-    "no_hallucination": None,  # 与standard相同，使用全部stage（但跳过hallucination_check）
-    "no_term_norm": None  # 使用全部stage（但跳过term_norm，term_norm无LLM调用）
+    "full": [
+        # 完整管线：全部阶段（包含term_norm）
+        "turn_cleaning",
+        "draft_generation_free_text",
+        "draft_generation_json",
+        "soap_structuring",
+        "term_norm",
+        "hallucination_check",
+        "claim_verification",
+        "checklist_verification",
+        "certainty_verification",
+        "field_revision"
+    ],
+    "no_hallucination": [
+        # 消融：跳过幻觉检查，与standard相同（不含hallucination_check）
+        "turn_cleaning",
+        "draft_generation_free_text",
+        "draft_generation_json",
+        "soap_structuring",
+        "term_norm",
+        "claim_verification",
+        "checklist_verification",
+        "certainty_verification",
+        "field_revision"
+    ],
+    "no_term_norm": [
+        # 消融：跳过术语规范化（不含term_norm），其余与full相同
+        "turn_cleaning",
+        "draft_generation_free_text",
+        "draft_generation_json",
+        "soap_structuring",
+        "hallucination_check",
+        "claim_verification",
+        "checklist_verification",
+        "certainty_verification",
+        "field_revision"
+    ]
+}
+
+# 配置到LLM统计源的映射
+# 每个配置使用对应fork路径的LLM统计，而不是合并后的统计
+# - llm_stats_full: 路径A（阶段1-3 + 路径A阶段4-6，完整管线）
+# - llm_stats_no_term_norm: 路径B（阶段1-3 + 路径B阶段4-6，skip_term_norm）
+# - llm_stats_no_hallucination: 路径C（阶段1-3 + 路径C阶段4-6，skip_hallucination_check）
+CONFIG_LLM_STATS_SOURCE = {
+    "end_to_end": "llm_stats_full",            # 路径A的子集（阶段1-2）
+    "no_verification": "llm_stats_full",        # 路径A的子集（阶段1-5）
+    "full": "llm_stats_full",                   # 路径A完整
+    "standard": "llm_stats_no_hallucination",   # 路径C完整（skip_hallucination_check）
+    "no_hallucination": "llm_stats_no_hallucination",  # 路径C完整
+    "no_term_norm": "llm_stats_no_term_norm",   # 路径B完整
+    "simplified": None  # 独立管线，使用自己的统计
 }
 
 SOAP_SECTIONS = ["subjective", "objective", "assessment", "plan"]
@@ -322,72 +375,71 @@ class FullBenchmarkRunner:
         ).order_by(BenchmarkRun.created_at.desc()).first()
         return existing
 
-    def _check_intermediate_results(self, benchmark_db, sample_id: str) -> Optional[Dict[str, Any]]:
-        # [DEBUG] 记录查询开始
-        logger.info(f"[DEBUG] _check_intermediate_results开始 - sample_id={sample_id}")
-        
+    # 缺失配置与中间结果字段的映射
+    CONFIG_EMR_KEY_MAPPING = {
+        "end_to_end": "emr_raw_draft",
+        "no_verification": "emr_pre_revision",
+        "full": "emr_result",
+        "standard": "emr_no_hallucination",
+        "no_hallucination": "emr_no_hallucination",
+        "no_term_norm": "emr_no_term_norm",
+    }
+
+    def _check_intermediate_results(self, benchmark_db, sample_id: str, missing_configs: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+        logger.info(f"[中间结果检查] sample_id={sample_id}, missing_configs={missing_configs}")
+
         existing = benchmark_db.query(BenchmarkRun).filter(
             BenchmarkRun.sample_id == sample_id,
             BenchmarkRun.config_key == "full"
         ).order_by(BenchmarkRun.created_at.desc()).first()
-        
-        # [DEBUG] 记录查询结果
-        if existing:
-            logger.info(f"[DEBUG] 找到existing记录 - sample_id={sample_id}")
-            logger.info(f"[DEBUG]   - existing.id={existing.id}")
-            logger.info(f"[DEBUG]   - existing.status={existing.status}")
-            logger.info(f"[DEBUG]   - existing.created_at={existing.created_at}")
-            logger.info(f"[DEBUG]   - existing.emr_result存在: {existing.emr_result is not None}")
-            logger.info(f"[DEBUG]   - existing.emr_raw_draft存在: {existing.emr_raw_draft is not None}")
-            logger.info(f"[DEBUG]   - existing.emr_pre_revision存在: {existing.emr_pre_revision is not None}")
-            logger.info(f"[DEBUG]   - existing.llm_call_count={existing.llm_call_count}")
-            logger.info(f"[DEBUG]   - existing.char_count={existing.char_count}")
-            logger.info(f"[DEBUG]   - existing.token_count={existing.token_count}")
-        else:
-            logger.info(f"[DEBUG] 未找到existing记录 - sample_id={sample_id}, config_key=full")
-        
+
         if not existing:
-            logger.info(f"[DEBUG] 返回None - 原因: 未找到记录")
+            logger.info(f"[中间结果检查] 未找到full配置记录 - sample_id={sample_id}")
             return None
-        
+
         if existing.status == "failed":
-            logger.info(f"[DEBUG] 返回None - 原因: status=failed, error={existing.error_message[:100] if existing.error_message else None}")
-            logger.info(f"[multi_variant] 发现失败状态的中间结果 - sample_id={sample_id}, error={existing.error_message[:100] if existing.error_message else None}")
+            logger.info(f"[中间结果检查] full配置状态为failed - sample_id={sample_id}, error={existing.error_message[:100] if existing.error_message else None}")
             return None
-        
+
         if not existing.emr_result or self._is_emr_empty(existing.emr_result):
-            logger.info(f"[DEBUG] 返回None - 原因: emr_result为空或空EMR")
-            logger.info(f"[multi_variant] 中间结果中emr_result为空 - sample_id={sample_id}")
+            logger.info(f"[中间结果检查] emr_result为空 - sample_id={sample_id}")
             return None
-        
-        # [DEBUG] 记录EMR空检查结果
-        logger.info(f"[DEBUG] emr_result空检查 - emr_result存在: {existing.emr_result is not None}, is_empty: {self._is_emr_empty(existing.emr_result)}")
-        logger.info(f"[DEBUG] emr_raw_draft空检查 - emr_raw_draft存在: {existing.emr_raw_draft is not None}, is_empty: {self._is_emr_empty(existing.emr_raw_draft) if existing.emr_raw_draft else 'N/A'}")
-        logger.info(f"[DEBUG] emr_pre_revision空检查 - emr_pre_revision存在: {existing.emr_pre_revision is not None}, is_empty: {self._is_emr_empty(existing.emr_pre_revision) if existing.emr_pre_revision else 'N/A'}")
-        
+
+        # 检查缺失配置对应的中间结果字段是否都存在
+        if missing_configs:
+            missing_fields = []
+            for config_key in missing_configs:
+                emr_key = self.CONFIG_EMR_KEY_MAPPING.get(config_key)
+                if emr_key is None:
+                    continue  # simplified等无对应EMR字段的配置跳过
+                field_value = getattr(existing, emr_key, None)
+                if not field_value or self._is_emr_empty(field_value):
+                    missing_fields.append(emr_key)
+
+            if missing_fields:
+                logger.warning(f"[中间结果检查] 缺失配置对应的中间结果字段为空 - sample_id={sample_id}, missing_fields={missing_fields}, 将重新执行process_with_fork")
+                return None
+
+        # 构建中间结果字典
         results = {}
         if existing.emr_raw_draft and not self._is_emr_empty(existing.emr_raw_draft):
             results["emr_raw_draft"] = existing.emr_raw_draft
-            logger.info(f"[DEBUG] 添加emr_raw_draft到results")
         if existing.emr_pre_revision and not self._is_emr_empty(existing.emr_pre_revision):
             results["emr_pre_revision"] = existing.emr_pre_revision
-            logger.info(f"[DEBUG] 添加emr_pre_revision到results")
         if existing.emr_result and not self._is_emr_empty(existing.emr_result):
             results["emr_result"] = existing.emr_result
-            logger.info(f"[DEBUG] 添加emr_result到results")
+        if existing.emr_no_term_norm and not self._is_emr_empty(existing.emr_no_term_norm):
+            results["emr_no_term_norm"] = existing.emr_no_term_norm
+        if existing.emr_no_hallucination and not self._is_emr_empty(existing.emr_no_hallucination):
+            results["emr_no_hallucination"] = existing.emr_no_hallucination
         if existing.hallucination_result:
             results["hallucination_result"] = existing.hallucination_result
-            logger.info(f"[DEBUG] 添加hallucination_result到results")
         if existing.verification_issues:
             results["verification_issues"] = existing.verification_issues
-            logger.info(f"[DEBUG] 添加verification_issues到results")
         if existing.key_facts:
             results["key_facts"] = existing.key_facts
-            logger.info(f"[DEBUG] 添加key_facts到results")
-        
-        # [DEBUG] 记录最终results
-        logger.info(f"[DEBUG] results构建完成 - keys={list(results.keys())}")
-        
+
+        logger.info(f"[中间结果检查] 检查通过 - sample_id={sample_id}, 可复用字段={list(results.keys())}")
         return results if results else None
 
     def _compute_llm_stats_for_config(
@@ -397,58 +449,35 @@ class FullBenchmarkRunner:
     ) -> Tuple[int, int, int, float]:
         """
         根据配置和LLM统计stage_breakdown计算配置对应的LLM调用次数、字符数和实际延迟
-        
-        配置对应的阶段范围：
-        - end_to_end: 阶段1-2 (turn_cleaning, draft_generation)
-        - no_verification: 阶段1-5 (不含verification和field_revision)
-        - full: 阶段1-6完整
-        - standard: 阶段1-6完整
-        - no_hallucination: 阶段1-6完整 (配置含义是跳过hallucination_check，但emr_result包含)
-        - no_term_norm: 路径B (阶段1-6，skip_term_norm)
-        - simplified: 独立管线，需要单独计算
-        
+
+        每个配置包含的阶段由 CONFIG_STAGE_GROUPS 定义，从对应路径的 llm_stats 中提取。
+
         Args:
             config_key: 配置键名
-            llm_stats: process_with_fork返回的LLM统计
-            
+            llm_stats: 对应路径的LLM统计（llm_stats_full/llm_stats_no_term_norm/llm_stats_no_hallucination）
+
         Returns:
             Tuple[int, int, int, float]: (llm_call_count, char_count, token_count, actual_latency)
         """
-        # [DEBUG] 记录方法调用
         logger.info(f"[DEBUG] _compute_llm_stats_for_config开始 - config_key={config_key}")
         logger.info(f"[DEBUG]   - llm_stats存在: {llm_stats is not None}")
         logger.info(f"[DEBUG]   - llm_stats keys: {list(llm_stats.keys()) if llm_stats else 'N/A'}")
-        
+
         if not llm_stats:
             logger.info(f"[DEBUG] 返回(0,0,0,0.0) - 原因: llm_stats为空")
             return 0, 0, 0, 0.0
-        
+
         stage_breakdown = llm_stats.get("stage_breakdown", {})
-        
-        # [DEBUG] 记录stage_breakdown状态
-        logger.info(f"[DEBUG]   - stage_breakdown存在: {stage_breakdown is not None}")
-        logger.info(f"[DEBUG]   - stage_breakdown keys: {list(stage_breakdown.keys()) if stage_breakdown else 'N/A'}")
-        
-        # 使用全局变量CONFIG_STAGE_GROUPS
         stage_group = CONFIG_STAGE_GROUPS.get(config_key)
-        
-        # [DEBUG] 记录stage_group状态
+
+        logger.info(f"[DEBUG]   - stage_breakdown keys: {list(stage_breakdown.keys()) if stage_breakdown else 'N/A'}")
         logger.info(f"[DEBUG]   - stage_group={stage_group}")
-        
-        if stage_group is None:
-            # [DEBUG] 记录使用全部stats的情况
-            logger.info(f"[DEBUG] 使用全部LLM stats - config_key={config_key}")
-            logger.info(f"[DEBUG]   - total_calls={llm_stats.get('total_calls') or 0}")
-            logger.info(f"[DEBUG]   - total_char_count={llm_stats.get('total_char_count') or 0}")
-            logger.info(f"[DEBUG]   - total_tokens={llm_stats.get('total_tokens') or 0}")
-            logger.info(f"[DEBUG]   - total_actual_latency={llm_stats.get('total_actual_latency') or 0.0}")
-            return (
-                llm_stats.get("total_calls") or 0,
-                llm_stats.get("total_char_count") or 0,
-                llm_stats.get("total_tokens") or 0,
-                llm_stats.get("total_actual_latency") or 0.0
-            )
-        
+
+        if not stage_group:
+            # stage_group为空列表或未定义，返回0
+            logger.warning(f"[DEBUG] config_key={config_key} 没有定义stage_group，返回(0,0,0,0.0)")
+            return 0, 0, 0, 0.0
+
         llm_call_count = 0
         char_count = 0
         token_count = 0
@@ -540,6 +569,8 @@ class FullBenchmarkRunner:
         emr_raw_draft: Optional[Dict] = None,
         emr_pre_revision: Optional[Dict] = None,
         emr_result: Optional[Dict] = None,
+        emr_no_term_norm: Optional[Dict] = None,
+        emr_no_hallucination: Optional[Dict] = None,
         hallucination_result: Optional[Dict] = None,
         verification_issues: Optional[Dict] = None,
         key_facts: Optional[Dict] = None,
@@ -584,6 +615,8 @@ class FullBenchmarkRunner:
             emr_raw_draft=emr_raw_draft if emr_raw_draft and not self._is_emr_empty(emr_raw_draft) else None,
             emr_pre_revision=emr_pre_revision if emr_pre_revision and not self._is_emr_empty(emr_pre_revision) else None,
             emr_result=emr_result if emr_result and not self._is_emr_empty(emr_result) else None,
+            emr_no_term_norm=emr_no_term_norm if emr_no_term_norm and not self._is_emr_empty(emr_no_term_norm) else None,
+            emr_no_hallucination=emr_no_hallucination if emr_no_hallucination and not self._is_emr_empty(emr_no_hallucination) else None,
             hallucination_result=hallucination_result,
             verification_issues=verification_issues,
             key_facts=key_facts,
@@ -591,7 +624,7 @@ class FullBenchmarkRunner:
             llm_call_count=llm_call_count,
             char_count=char_count,
             token_count=token_count,
-            stage_breakdown=stage_breakdown,  # 新增：保存每个阶段的统计
+            stage_breakdown=stage_breakdown,
             error_message=error_message
         )
         benchmark_db.add(run)
@@ -749,7 +782,9 @@ class FullBenchmarkRunner:
         self,
         sample: Dict[str, Any],
         emr: Dict[str, Any],
-        config_key: str
+        config_key: str,
+        skip_quality_safety: bool = True,
+        key_facts: Optional[Dict] = None
     ) -> Tuple[Any, Optional[str]]:
         sample_id = sample.get("sample_id", "")
         dialogue_text = sample.get("dialogue_text", "")
@@ -760,7 +795,7 @@ class FullBenchmarkRunner:
         if not emr:
             return None, "No emr_result to evaluate"
 
-        logger.info(f"[Evaluation] 开始评估 - sample_id={sample_id}, config={config_key}")
+        logger.info(f"[Evaluation] 开始评估 - sample_id={sample_id}, config={config_key}, skip_quality_safety={skip_quality_safety}, has_key_facts={key_facts is not None}")
 
         db = self._build_main_db_session()
         try:
@@ -768,7 +803,7 @@ class FullBenchmarkRunner:
             evaluator = BenchmarkEvaluator(llm_service)
 
             t_start = time.time()
-            eval_result = evaluator.evaluate_all(dialogue_text, emr, sample_id)
+            eval_result = evaluator.evaluate_all(dialogue_text, emr, sample_id, key_facts=key_facts, skip_quality_safety=skip_quality_safety)
             elapsed = time.time() - t_start
 
             logger.info(f"[Evaluation] 完成 - sample_id={sample_id}, elapsed={elapsed:.1f}s, "
@@ -1182,12 +1217,13 @@ class FullBenchmarkRunner:
         多变量Pipeline：一次运行产出7份评估结果
         
         流程：
-        1. process_with_fork() → 4份EMR (emr_raw_draft, emr_pre_revision, emr_result, emr_no_term_norm)
+        1. process_with_fork() → 5份EMR (emr_raw_draft, emr_pre_revision, emr_result, emr_no_term_norm, emr_no_hallucination)
         2. extract_key_facts() → key_facts（一次）
         3. 评估映射：
            - emr_raw_draft → end_to_end (experiment)
            - emr_pre_revision → no_verification (ablation)
-           - emr_result → full (experiment + ablation) + standard (experiment) + no_hallucination (ablation)
+           - emr_result → full (experiment + ablation)
+           - emr_no_hallucination → standard (experiment) + no_hallucination (ablation)
            - emr_no_term_norm → no_term_norm (ablation)
         4. 独立运行 simplified Pipeline → simplified (experiment)
         
@@ -1205,12 +1241,19 @@ class FullBenchmarkRunner:
         benchmark_db = get_benchmark_session()
         all_results = {}
         
+        # 评估去重组：相同EMR的配置只评估一次，结果复用
+        # standard 和 no_hallucination 配置相同（均跳过幻觉检查），EMR相同，只需评估一次
+        EVAL_DEDUP_GROUPS = {
+            "standard": "standard",       # 首次评估的配置
+            "no_hallucination": "standard" # 复用 standard 的评估结果
+        }
+
         config_output_mapping = {
             "end_to_end": {"type": "experiment", "emr_key": "emr_raw_draft"},
             "no_verification": {"type": "ablation", "emr_key": "emr_pre_revision"},
             "full": {"type": "both", "emr_key": "emr_result"},
-            "standard": {"type": "experiment", "emr_key": "emr_result"},
-            "no_hallucination": {"type": "ablation", "emr_key": "emr_result"},
+            "standard": {"type": "experiment", "emr_key": "emr_no_hallucination"},
+            "no_hallucination": {"type": "ablation", "emr_key": "emr_no_hallucination"},
             "no_term_norm": {"type": "ablation", "emr_key": "emr_no_term_norm"},
             "simplified": {"type": "experiment", "emr_key": None}
         }
@@ -1264,27 +1307,19 @@ class FullBenchmarkRunner:
                 logger.info(f"[multi_variant] 部分配置已存在，只评估缺失的 {len(missing_configs)} 个配置 - sample_id={sample_id}")
                 print(f"  已存在: {list(existing_configs.keys())}, 需评估: {missing_configs}", flush=True)
             
-            intermediate_results = self._check_intermediate_results(benchmark_db, sample_id)
-            
-            # [DEBUG] 检查中间结果状态
-            logger.info(f"[DEBUG] _check_intermediate_results返回: sample_id={sample_id}, has_results={intermediate_results is not None}, re_evaluate={self.re_evaluate}")
-            
+            intermediate_results = self._check_intermediate_results(benchmark_db, sample_id, missing_configs=missing_configs)
+
+            logger.info(f"[中间结果检查] 返回结果: sample_id={sample_id}, has_results={intermediate_results is not None}, re_evaluate={self.re_evaluate}")
+
             if intermediate_results and not self.re_evaluate:
                 logger.info(f"[multi_variant] 发现已有中间结果，尝试复用 - sample_id={sample_id}")
                 print(f"  复用中间结果: {list(intermediate_results.keys())}", flush=True)
                 
-                # [DEBUG] 记录中间结果详细内容
-                logger.info(f"[DEBUG] 中间结果详情 - sample_id={sample_id}:")
-                logger.info(f"[DEBUG]   - emr_raw_draft存在: {intermediate_results.get('emr_raw_draft') is not None}")
-                logger.info(f"[DEBUG]   - emr_pre_revision存在: {intermediate_results.get('emr_pre_revision') is not None}")
-                logger.info(f"[DEBUG]   - emr_result存在: {intermediate_results.get('emr_result') is not None}")
-                logger.info(f"[DEBUG]   - hallucination_result存在: {intermediate_results.get('hallucination_result') is not None}")
-                logger.info(f"[DEBUG]   - verification_issues存在: {intermediate_results.get('verification_issues') is not None}")
-                logger.info(f"[DEBUG]   - key_facts存在: {intermediate_results.get('key_facts') is not None}")
-                
                 emr_raw_draft = intermediate_results.get("emr_raw_draft")
                 emr_pre_revision = intermediate_results.get("emr_pre_revision")
                 emr_result = intermediate_results.get("emr_result")
+                emr_no_term_norm = intermediate_results.get("emr_no_term_norm")
+                emr_no_hallucination = intermediate_results.get("emr_no_hallucination")
                 hallucination_result = intermediate_results.get("hallucination_result")
                 verification_issues = intermediate_results.get("verification_issues")
                 key_facts_cached = intermediate_results.get("key_facts")
@@ -1294,31 +1329,18 @@ class FullBenchmarkRunner:
                     BenchmarkRun.sample_id == sample_id,
                     BenchmarkRun.config_key == "full"
                 ).order_by(BenchmarkRun.created_at.desc()).first()
-                
-                # [DEBUG] 记录cached_run详细状态
+
                 if cached_run:
-                    logger.info(f"[DEBUG] cached_run详情 - sample_id={sample_id}:")
-                    logger.info(f"[DEBUG]   - id={cached_run.id}")
-                    logger.info(f"[DEBUG]   - visit_id={cached_run.visit_id}")
-                    logger.info(f"[DEBUG]   - status={cached_run.status}")
-                    logger.info(f"[DEBUG]   - elapsed_seconds={cached_run.elapsed_seconds}")
-                    logger.info(f"[DEBUG]   - llm_call_count={cached_run.llm_call_count}")
-                    logger.info(f"[DEBUG]   - char_count={cached_run.char_count}")
-                    logger.info(f"[DEBUG]   - token_count={cached_run.token_count}")
-                    logger.info(f"[DEBUG]   - created_at={cached_run.created_at}")
-                    logger.info(f"[DEBUG]   - emr_result是否为空: {self._is_emr_empty(cached_run.emr_result)}")
-                    logger.info(f"[DEBUG]   - emr_raw_draft是否为空: {self._is_emr_empty(cached_run.emr_raw_draft)}")
-                    logger.info(f"[DEBUG]   - emr_pre_revision是否为空: {self._is_emr_empty(cached_run.emr_pre_revision)}")
+                    logger.info(f"[复用中间结果] cached_run id={cached_run.id}, visit_id={cached_run.visit_id}")
                     visit_id_cached = cached_run.visit_id
                 else:
-                    logger.warning(f"[DEBUG] cached_run不存在 - sample_id={sample_id}, config_key=full")
-                
+                    logger.warning(f"[复用中间结果] 未找到cached_run - sample_id={sample_id}")
+
                 fork_elapsed = cached_run.elapsed_seconds if cached_run else 0
                 fork_elapsed_actual = fork_elapsed
-                logger.info(f"[DEBUG] fork_elapsed={fork_elapsed}, fork_elapsed_actual={fork_elapsed_actual}")
             else:
                 intermediate_results = None
-                logger.info(f"[DEBUG] 不复用中间结果 - sample_id={sample_id}, 原因: {'re_evaluate=True' if self.re_evaluate else '无中间结果'}")
+                logger.info(f"[复用中间结果] 不复用 - sample_id={sample_id}, 原因: {'re_evaluate=True' if self.re_evaluate else '中间结果不完整'}")
             
             db = self._build_main_db_session()
             try:
@@ -1326,31 +1348,30 @@ class FullBenchmarkRunner:
                     visit_id = visit_id_cached or f"exp_{sample_id}_{uuid.uuid4().hex[:8]}"
                     llm_service = LLMService(db)
                     orchestrator = None
-                    emr_no_term_norm = None
                     
-                    # [DEBUG] 关键问题定位：llm_stats被清空
-                    logger.warning(f"[DEBUG] 复用中间结果时llm_stats被清空 - sample_id={sample_id}")
-                    logger.warning(f"[DEBUG]   - 原因: intermediate_results不包含llm_stats字段")
-                    logger.warning(f"[DEBUG]   - 影响: 后续配置评估无法获取正确的LLM统计数据")
-                    
-                    # [DEBUG] 尝试从cached_run恢复LLM stats
+                    # 复用中间结果时，从cached_run恢复LLM统计
                     if cached_run:
-                        logger.info(f"[DEBUG] 尝试从cached_run恢复LLM stats - sample_id={sample_id}")
-                        logger.info(f"[DEBUG]   - cached_run.llm_call_count={cached_run.llm_call_count}")
-                        logger.info(f"[DEBUG]   - cached_run.char_count={cached_run.char_count}")
-                        logger.info(f"[DEBUG]   - cached_run.token_count={cached_run.token_count}")
-                        # 注意：cached_run中没有stage_breakdown，无法恢复详细阶段统计
-                        llm_stats = {
+                        logger.info(f"[复用中间结果] 从cached_run恢复LLM统计 - sample_id={sample_id}, calls={cached_run.llm_call_count}, chars={cached_run.char_count}")
+                        # 注意：cached_run保存的是路径A(full)的统计
+                        # 对于no_term_norm和no_hallucination，无法从缓存恢复精确统计
+                        llm_stats_full = {
                             "total_calls": cached_run.llm_call_count or 0,
                             "total_char_count": cached_run.char_count or 0,
                             "total_tokens": cached_run.token_count or 0,
                             "total_actual_latency": cached_run.elapsed_seconds or 0,
-                            "stage_breakdown": {}  # 无法恢复
+                            "stage_breakdown": cached_run.stage_breakdown or {}
                         }
-                        logger.info(f"[DEBUG] 已从cached_run恢复llm_stats: total_calls={llm_stats['total_calls']}, total_char_count={llm_stats['total_char_count']}")
+                        # 复用路径A统计作为其他路径的近似值（无法精确恢复）
+                        llm_stats_no_term_norm = llm_stats_full
+                        llm_stats_no_hallucination = llm_stats_full
+                        llm_stats = llm_stats_full
+                        logger.warning(f"[复用中间结果] no_term_norm和no_hallucination使用路径A近似统计，可能不精确")
                     else:
                         llm_stats = {}
-                        logger.warning(f"[DEBUG] 无法恢复llm_stats - cached_run不存在")
+                        llm_stats_full = {}
+                        llm_stats_no_term_norm = {}
+                        llm_stats_no_hallucination = {}
+                        logger.warning(f"[复用中间结果] 无法恢复llm_stats - cached_run不存在")
                 else:
                     visit_id, turn_count = self._create_visit_and_turns(db, sample)
                     llm_service = LLMService(db)
@@ -1366,19 +1387,28 @@ class FullBenchmarkRunner:
                     emr_pre_revision = fork_result.get("emr_pre_revision")
                     emr_result = fork_result.get("emr_result")
                     emr_no_term_norm = fork_result.get("emr_no_term_norm")
+                    emr_no_hallucination = fork_result.get("emr_no_hallucination")
                     hallucination_result = fork_result.get("hallucination_result")
                     verification_issues = fork_result.get("verification_issues")
+
+                    # 提取各路径独立LLM统计
                     llm_stats = fork_result.get("llm_stats", {})
-                    stage_breakdown = llm_stats.get("stage_breakdown", {})  # 新增：获取stage_breakdown
-                    
-                    llm_call_count = llm_stats.get("total_calls") or 0
-                    char_count = llm_stats.get("total_char_count") or 0
-                    token_count = llm_stats.get("total_tokens") or 0
-                    actual_latency = llm_stats.get("total_actual_latency") or 0.0
-                    
+                    llm_stats_full = fork_result.get("llm_stats_full", llm_stats)
+                    llm_stats_no_term_norm = fork_result.get("llm_stats_no_term_norm", llm_stats)
+                    llm_stats_no_hallucination = fork_result.get("llm_stats_no_hallucination", llm_stats)
+
+                    # 使用路径A统计作为full配置的默认统计
+                    stage_breakdown = llm_stats_full.get("stage_breakdown", {})
+
+                    llm_call_count = llm_stats_full.get("total_calls") or 0
+                    char_count = llm_stats_full.get("total_char_count") or 0
+                    token_count = llm_stats_full.get("total_tokens") or 0
+                    actual_latency = llm_stats_full.get("total_actual_latency") or 0.0
+
                     fork_elapsed_actual = actual_latency if actual_latency > 0 else fork_elapsed
-                    
+
                     logger.info(f"[multi_variant] process_with_fork完成, status={fork_status}, elapsed={fork_elapsed:.1f}s, actual_latency={actual_latency:.2f}s, llm_calls={llm_call_count}")
+                    logger.info(f"[multi_variant] 各路径LLM统计: full_calls={llm_stats_full.get('total_calls')}, no_term_norm_calls={llm_stats_no_term_norm.get('total_calls')}, no_hallucination_calls={llm_stats_no_hallucination.get('total_calls')}")
                     
                     if fork_status != "completed":
                         logger.error(f"[multi_variant] process_with_fork失败: {fork_result.get('error')}")
@@ -1393,10 +1423,12 @@ class FullBenchmarkRunner:
                             emr_raw_draft=emr_raw_draft,
                             emr_pre_revision=emr_pre_revision,
                             emr_result=emr_result,
+                            emr_no_term_norm=emr_no_term_norm,
+                            emr_no_hallucination=emr_no_hallucination,
                             hallucination_result=hallucination_result,
                             verification_issues=verification_issues,
                             elapsed_seconds=fork_elapsed_actual,
-                            stage_breakdown=stage_breakdown,  # 新增：传入stage_breakdown
+                            stage_breakdown=stage_breakdown,
                             error_message=fork_result.get('error')
                         )
                         logger.info(f"[multi_variant] 已保存失败状态和中间结果到数据库 - sample_id={sample_id}")
@@ -1414,13 +1446,15 @@ class FullBenchmarkRunner:
                         emr_raw_draft=emr_raw_draft,
                         emr_pre_revision=emr_pre_revision,
                         emr_result=emr_result,
+                        emr_no_term_norm=emr_no_term_norm,
+                        emr_no_hallucination=emr_no_hallucination,
                         hallucination_result=hallucination_result,
                         verification_issues=verification_issues,
                         elapsed_seconds=fork_elapsed_actual,
                         llm_call_count=llm_call_count,
                         char_count=char_count,
                         token_count=token_count,
-                        stage_breakdown=stage_breakdown,  # 新增：传入stage_breakdown
+                        stage_breakdown=stage_breakdown,
                         error_message=None
                     )
                     logger.info(f"[multi_variant] 已保存中间结果到数据库 - sample_id={sample_id}, llm_calls={llm_call_count}")
@@ -1473,6 +1507,7 @@ class FullBenchmarkRunner:
                     print(f"  {config_key}: SKIP (已存在)", flush=True)
                 
                 simplified_elapsed = 0
+                eval_cache = {}  # 评估结果缓存：{emr_key: eval_result}，相同EMR只评估一次
                 
                 # [DEBUG] 记录配置评估循环开始状态
                 logger.info(f"[DEBUG] 配置评估循环开始 - sample_id={sample_id}")
@@ -1483,6 +1518,7 @@ class FullBenchmarkRunner:
                 logger.info(f"[DEBUG]   - emr_pre_revision存在: {emr_pre_revision is not None}")
                 logger.info(f"[DEBUG]   - emr_result存在: {emr_result is not None}")
                 logger.info(f"[DEBUG]   - emr_no_term_norm存在: {emr_no_term_norm is not None}")
+                logger.info(f"[DEBUG]   - emr_no_hallucination存在: {emr_no_hallucination is not None}")
                 
                 for config_key, mapping in config_output_mapping.items():
                     if config_key in existing_configs:
@@ -1553,7 +1589,8 @@ class FullBenchmarkRunner:
                             "emr_raw_draft": emr_raw_draft,
                             "emr_pre_revision": emr_pre_revision,
                             "emr_result": emr_result,
-                            "emr_no_term_norm": emr_no_term_norm
+                            "emr_no_term_norm": emr_no_term_norm,
+                            "emr_no_hallucination": emr_no_hallucination
                         }
                         emr_to_eval = emr_map.get(emr_key)
                         
@@ -1578,37 +1615,55 @@ class FullBenchmarkRunner:
                     # [DEBUG] 记录quality_metrics
                     logger.info(f"[DEBUG] {config_key}: quality_metrics计算完成 - structure_completeness={quality_metrics.get('structure_completeness')}, field_missing_rate={quality_metrics.get('field_missing_rate')}")
                     
-                    try:
-                        eval_result = evaluator.evaluate_all(
-                            dialogue_text,
-                            emr_to_eval,
-                            sample_id=sample_id,
-                            key_facts=key_facts
-                        )
-                        logger.info(f"[multi_variant] {config_key}评估完成: support_rate={eval_result.get_support_rate()}, recall_rate={eval_result.get_recall_rate()}")
-                    except Exception as e:
-                        logger.error(f"[multi_variant] {config_key}评估失败: {e}")
-                        eval_result = None
+                    # 评估去重：检查是否可以复用已有评估结果
+                    dedup_source = EVAL_DEDUP_GROUPS.get(config_key)
+                    eval_cache_key = dedup_source if dedup_source else config_key
+                    
+                    if eval_cache_key in eval_cache:
+                        eval_result = eval_cache[eval_cache_key]
+                        logger.info(f"[multi_variant] {config_key}: 复用 {eval_cache_key} 的评估结果 (去重), support_rate={eval_result.get_support_rate()}, recall_rate={eval_result.get_recall_rate()}")
+                    else:
+                        try:
+                            eval_result = evaluator.evaluate_all(
+                                dialogue_text,
+                                emr_to_eval,
+                                sample_id=sample_id,
+                                key_facts=key_facts,
+                                skip_quality_safety=True
+                            )
+                            eval_cache[eval_cache_key] = eval_result
+                            logger.info(f"[multi_variant] {config_key}评估完成: support_rate={eval_result.get_support_rate()}, recall_rate={eval_result.get_recall_rate()}")
+                        except Exception as e:
+                            logger.error(f"[multi_variant] {config_key}评估失败: {e}")
+                            eval_result = None
                     
                     config_info = EXPERIMENT_CONFIGS.get(config_key, ABLATION_CONFIGS.get(config_key, {"name": config_key}))
-                    
-                    # [DEBUG] 记录LLM stats计算前的状态
-                    logger.info(f"[DEBUG] {config_key}: 开始计算LLM stats")
-                    logger.info(f"[DEBUG]   - llm_stats传入状态: total_calls={llm_stats.get('total_calls', 0)}, stage_breakdown存在={llm_stats.get('stage_breakdown') is not None}")
-                    if llm_stats.get('stage_breakdown'):
-                        logger.info(f"[DEBUG]   - stage_breakdown keys: {list(llm_stats.get('stage_breakdown', {}).keys())}")
-                    
+
+                    # 根据配置选择正确的LLM统计源
+                    stats_source_key = CONFIG_LLM_STATS_SOURCE.get(config_key)
+                    if stats_source_key == "llm_stats_full":
+                        config_llm_stats = llm_stats_full
+                    elif stats_source_key == "llm_stats_no_term_norm":
+                        config_llm_stats = llm_stats_no_term_norm
+                    elif stats_source_key == "llm_stats_no_hallucination":
+                        config_llm_stats = llm_stats_no_hallucination
+                    else:
+                        config_llm_stats = llm_stats  # fallback
+
+                    logger.info(f"[DEBUG] {config_key}: 开始计算LLM stats, stats_source={stats_source_key}")
+                    logger.info(f"[DEBUG]   - config_llm_stats: total_calls={config_llm_stats.get('total_calls', 0)}, stage_breakdown存在={config_llm_stats.get('stage_breakdown') is not None}")
+
                     config_llm_calls, config_char_count, config_token_count, config_actual_latency = self._compute_llm_stats_for_config(
-                        config_key, llm_stats
+                        config_key, config_llm_stats
                     )
-                    
+
                     # [DEBUG] 记录LLM stats计算结果
                     logger.info(f"[DEBUG] {config_key}: LLM stats计算完成")
                     logger.info(f"[DEBUG]   - config_llm_calls={config_llm_calls}")
                     logger.info(f"[DEBUG]   - config_char_count={config_char_count}")
                     logger.info(f"[DEBUG]   - config_token_count={config_token_count}")
                     logger.info(f"[DEBUG]   - config_actual_latency={config_actual_latency}")
-                    
+
                     if config_key == "simplified" and simplified_result:
                         simplified_llm_stats = simplified_result.get("llm_stats", {})
                         simplified_total_calls = simplified_llm_stats.get("total_calls") or 0
@@ -1622,19 +1677,21 @@ class FullBenchmarkRunner:
                         else:
                             logger.warning(f"[DEBUG] {config_key}: simplified_llm_stats.total_calls=0，保留_compute_llm_stats_for_config的计算结果 - calls={config_llm_calls}, chars={config_char_count}, tokens={config_token_count}")
                     else:
-                        # 其他配置使用full的stage_breakdown，根据CONFIG_STAGE_GROUPS提取对应阶段
+                        # 使用对应路径的stage_breakdown，根据CONFIG_STAGE_GROUPS提取对应阶段
+                        config_stage_breakdown_source = config_llm_stats.get("stage_breakdown", {})
                         config_stage_group = CONFIG_STAGE_GROUPS.get(config_key)
-                        if config_stage_group and stage_breakdown:
+                        if config_stage_group and config_stage_breakdown_source:
                             # 提取对应阶段的stage_breakdown
                             config_stage_breakdown = {
-                                stage: stage_breakdown.get(stage, {})
+                                stage: config_stage_breakdown_source.get(stage, {})
                                 for stage in config_stage_group
-                                if stage in stage_breakdown
+                                if stage in config_stage_breakdown_source
                             }
                             logger.info(f"[DEBUG] {config_key}: 提取对应阶段的stage_breakdown - stages={config_stage_group}, extracted_keys={list(config_stage_breakdown.keys())}")
                         else:
-                            # stage_group为None（full配置），使用全部stage_breakdown
-                            config_stage_breakdown = stage_breakdown
+                            # 无法提取，使用空dict
+                            config_stage_breakdown = {}
+                            logger.warning(f"[DEBUG] {config_key}: 无法提取stage_breakdown, config_stage_group={config_stage_group}")
                     
                     config_elapsed = config_actual_latency if config_actual_latency > 0 else (fork_elapsed_actual if emr_key else simplified_elapsed)
                     

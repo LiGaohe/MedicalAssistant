@@ -1,6 +1,7 @@
+import copy
 import json
 import time
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from ..base import PipelineContext, PipelineStage
 from ..utils import parse_json_response
@@ -9,7 +10,11 @@ from ....utils.logger import logger
 
 
 class FieldRevisionStage(PipelineStage):
-    """字段级修订与落盘阶段：根据核查问题清单对SOAP草稿进行定点修订。"""
+    """字段级修订与落盘阶段：根据核查问题清单对SOAP草稿进行定点修订。
+
+    使用补丁模式：LLM只输出需要修改的字段（补丁），而非完整SOAP JSON。
+    代码将补丁应用到原始SOAP上，避免LLM重复输出未变更字段。
+    """
 
     # SOAP必须存在的四个section
     REQUIRED_SECTIONS = ["subjective", "objective", "assessment", "plan"]
@@ -23,7 +28,7 @@ class FieldRevisionStage(PipelineStage):
 
         draft_emr = ctx.emr_draft
         issues = ctx.verification_issues or {}
-        
+
         if not draft_emr:
             logger.error("draft_emr为空，无法进行字段修订")
             return {"status": "skipped_empty_draft", "issues_count": 0, "revised": False}
@@ -33,37 +38,32 @@ class FieldRevisionStage(PipelineStage):
         not_addressed_count = len(issues.get("not_addressed_claims", []))
         missing_count = len(issues.get("missing_items", []))
         hard_rule_count = len(issues.get("hard_rule_violations", []))
+        certainty_error_count = len(issues.get("certainty_errors", []))
         total_issues_count = (
-            unsupported_count + not_addressed_count + missing_count + hard_rule_count
+            unsupported_count + not_addressed_count
+            + missing_count + hard_rule_count + certainty_error_count
         )
 
         revised = False
-        revised_soap = dict(draft_emr)  # shallow copy，先保留原始
+        revised_soap = copy.deepcopy(draft_emr)
 
         if total_issues_count == 0:
-            # 没有核查问题，跳过LLM修订，直接进入schema校验
             logger.info("核查问题清单为空，跳过LLM修订，直接执行schema校验")
         else:
             logger.info(
                 f"核查问题清单非空: 无证据={unsupported_count}, "
                 f"未处理={not_addressed_count}, 遗漏={missing_count}, "
-                f"硬规则违规={hard_rule_count}，执行LLM字段级修订"
+                f"硬规则违规={hard_rule_count}, 确定性错误={certainty_error_count}，"
+                f"执行LLM字段级修订（补丁模式）"
             )
 
-            draft_emr_json = json.dumps(draft_emr, ensure_ascii=False, indent=2)
-            issues_json = json.dumps(issues, ensure_ascii=False, indent=2)
-
-            llm_revised = self._call_llm_revision(ctx, draft_emr_json, issues_json)
-            if llm_revised is not None:
-                # 部分修订处理：缺失字段从原始draft回填
-                revised_soap = self._backfill_missing_fields(llm_revised, draft_emr)
-                # 确保evidence_traces不丢失
-                revised_soap = self._preserve_evidence_traces(revised_soap, draft_emr)
+            patches = self._call_llm_patch_revision(ctx, draft_emr, issues)
+            if patches:
+                revised_soap = self._apply_patches(revised_soap, patches)
                 revised = True
-                logger.info("LLM字段级修订完成")
+                logger.info(f"LLM字段级修订完成，应用了 {len(patches)} 个补丁")
             else:
-                logger.warning("LLM字段级修订失败，使用原始草稿进入schema校验")
-                revised_soap = dict(draft_emr)
+                logger.warning("LLM字段级修订未返回有效补丁，使用原始草稿进入schema校验")
 
         # ---- schema确定性约束校验 ----
         revised_soap = self._apply_schema_constraints(revised_soap)
@@ -83,25 +83,114 @@ class FieldRevisionStage(PipelineStage):
             "revised": revised,
         }
 
-    # ---- LLM修订调用 ----
-    def _call_llm_revision(
+    # ---- 从核查问题中提取受影响字段 ----
+    @staticmethod
+    def _extract_affected_fields(draft_emr: dict, issues: dict) -> str:
+        """从核查问题清单中定位受影响的SOAP字段，构建精简的上下文。
+
+        只提取与问题相关的字段内容，而非完整SOAP JSON。
+        """
+        affected_parts: List[str] = []
+
+        # 1. unsupported_claims → 定位到对应section的字段
+        for claim in issues.get("unsupported_claims", []):
+            section_key = claim.get("soap_section", "")
+            field_key = claim.get("soap_field", "")
+            claim_text = claim.get("claim_text", "")
+            # 将A/P缩写映射为完整section名
+            section_map = {"A": "assessment", "P": "plan", "S": "subjective", "O": "objective"}
+            full_section = section_map.get(section_key, section_key) or field_key
+            affected_parts.append(f"[无证据声明] section={full_section}, claim='{claim_text}'")
+
+        # 2. not_addressed_claims
+        for claim in issues.get("not_addressed_claims", []):
+            section_key = claim.get("soap_section", "")
+            claim_text = claim.get("claim_text", "")
+            section_map = {"A": "assessment", "P": "plan", "S": "subjective", "O": "objective"}
+            full_section = section_map.get(section_key, section_key)
+            affected_parts.append(f"[未处理声明] section={full_section}, claim='{claim_text}'")
+
+        # 3. missing_items → 定位到对应section
+        for item in issues.get("missing_items", []):
+            section = item.get("section", "")
+            item_name = item.get("item_name", item.get("item", ""))
+            affected_parts.append(f"[遗漏项] section={section}, item='{item_name}'")
+
+        # 4. hard_rule_violations
+        for violation in issues.get("hard_rule_violations", []):
+            v_type = violation.get("type", "")
+            desc = violation.get("description", "")
+            affected_parts.append(f"[硬规则违规] type={v_type}, desc='{desc}'")
+
+        # 5. certainty_errors → 定位到assessment
+        for error in issues.get("certainty_errors", []):
+            soap_text = error.get("soap_text", "")
+            current_type = error.get("current_diagnosis_type", "")
+            current_certainty = error.get("current_certainty_level", "")
+            correct_type = error.get("correct_diagnosis_type", "")
+            correct_certainty = error.get("correct_certainty_level", "")
+            affected_parts.append(
+                f"[确定性错误] text='{soap_text}', "
+                f"当前: {current_type}/{current_certainty} → "
+                f"应为: {correct_type}/{correct_certainty}"
+            )
+
+        # 提取涉及的section内容（精简版，只包含相关section）
+        involved_sections = set()
+        for part in affected_parts:
+            for section in ["subjective", "objective", "assessment", "plan"]:
+                if section in part.lower():
+                    involved_sections.add(section)
+        # 如果没有明确section，默认包含assessment和plan
+        if not involved_sections:
+            involved_sections = {"assessment", "plan"}
+
+        section_contents: List[str] = []
+        for section_name in sorted(involved_sections):
+            section_data = draft_emr.get(section_name, {})
+            if section_data:
+                section_json = json.dumps(section_data, ensure_ascii=False, indent=2)
+                section_contents.append(f"### {section_name}\n{section_json}")
+
+        header = "## 受影响字段\n" + "\n".join(affected_parts)
+        body = "\n\n## 相关SOAP章节内容\n" + "\n\n".join(section_contents) if section_contents else ""
+        return header + body
+
+    # ---- LLM补丁模式修订调用 ----
+    def _call_llm_patch_revision(
         self,
         ctx: PipelineContext,
-        draft_emr_json: str,
-        issues_json: str,
-    ) -> dict | None:
-        """调用LLM进行字段级修订，返回修订后的SOAP dict或None（失败时）。"""
+        draft_emr: dict,
+        issues: dict,
+    ) -> List[Dict]:
+        """调用LLM进行补丁模式字段级修订，返回补丁列表。"""
+        # 提取受影响字段
+        affected_fields = self._extract_affected_fields(draft_emr, issues)
+
+        # 压缩transcript
+        compressed_transcript, dict_str = ctx.get_compressed_transcript()
+        if dict_str:
+            logger.info(
+                f"字段级修订: transcript已压缩, "
+                f"原文{len(ctx.combined_text)}字符 -> 压缩后{len(compressed_transcript)}字符"
+            )
+        else:
+            logger.info(f"字段级修订: transcript未压缩, 使用原文{len(ctx.combined_text)}字符")
+
+        issues_json = json.dumps(issues, ensure_ascii=False, indent=2)
+
         try:
             prompt = ctx.prompt_manager.render(
-                "field_revision",
-                draft_emr=draft_emr_json,
+                "field_revision_patch",
+                compression_dict=dict_str,
+                affected_fields=affected_fields,
                 issues_json=issues_json,
-                transcript=ctx.combined_text,
+                transcript=compressed_transcript,
             )
-            logger.debug(f"字段级修订提示词长度: {len(prompt)} 字符")
+            logger.debug(f"字段级修订（补丁模式）提示词长度: {len(prompt)} 字符")
         except Exception as e:
             logger.error(f"字段级修订提示词渲染失败: {e}")
-            return None
+            return []
 
         debug_interactor = DebugInteractor(ctx.llm_service)
 
@@ -113,72 +202,114 @@ class FieldRevisionStage(PipelineStage):
                 )
             except Exception as e:
                 logger.error(f"字段级修订Debug交互失败: {e}")
-                return None
+                return []
         else:
             if not ctx.llm_service:
                 logger.warning("LLM服务不可用，跳过字段级修订")
-                return None
+                return []
 
             try:
-                response = ctx.llm_service.generate_stream_to_response(prompt)
-                logger.debug("字段级修订阶段: thinking模式已启用（默认），使用流式处理")
+                response = ctx.llm_service.generate_stream_to_response(
+                    prompt,
+                    thinking_enabled=False,
+                    max_tokens=4096,
+                    compression_dict=dict_str,
+                )
+                logger.debug("字段级修订阶段: thinking模式已禁用，补丁模式使用流式处理")
                 ctx.llm_stats.record_from_response("field_revision", prompt, response)
                 response_text = response.text
             except Exception as e:
                 logger.error(f"字段级修订LLM调用失败: {e}")
-                ctx.llm_stats.record_call("field_revision", len(prompt), 0, success=False, error_message=str(e))
-                return None
-
-        parsed = parse_json_response(response_text, "字段级修订")
-        if not parsed:
-            logger.warning("字段级修订JSON解析失败，使用原始草稿")
-            return None
-
-        logger.debug(f"字段级修订LLM返回keys: {list(parsed.keys())}")
-        return parsed
-
-    # ---- 部分修订处理：缺失字段回填 ----
-    @staticmethod
-    def _backfill_missing_fields(revised: dict, original: dict) -> dict:
-        """如果LLM修订后的SOAP中某个field丢失，从原始draft回填。"""
-        result = dict(revised)
-        # 确保四个section都存在
-        for section in ["subjective", "objective", "assessment", "plan"]:
-            if section not in result or not result[section]:
-                logger.warning(
-                    f"修订后SOAP缺少section '{section}'，从原始草稿回填"
+                ctx.llm_stats.record_call(
+                    "field_revision", len(prompt), 0,
+                    success=False, error_message=str(e)
                 )
-                result[section] = original.get(section, {})
-        return result
+                return []
 
-    # ---- 确保evidence_traces不丢失 ----
+        return self._parse_patches(response_text)
+
+    # ---- 解析补丁响应 ----
     @staticmethod
-    def _preserve_evidence_traces(revised: dict, original: dict) -> dict:
-        """检查修订后每个field是否仍有evidence_traces，没有则从原draft复制。"""
-        sections = ["subjective", "objective", "assessment", "plan"]
-        preserved_count = 0
-        for section_name in sections:
-            revised_section = revised.get(section_name, {})
-            original_section = original.get(section_name, {})
-            if not isinstance(revised_section, dict) or not isinstance(original_section, dict):
+    def _parse_patches(response_text: str) -> List[Dict]:
+        """解析LLM返回的补丁JSON。"""
+        parsed = parse_json_response(response_text, "字段级修订（补丁模式）")
+        if not parsed:
+            logger.warning("字段级修订补丁JSON解析失败")
+            return []
+
+        patches = parsed.get("patches", [])
+        if not isinstance(patches, list):
+            logger.warning(f"补丁格式错误: patches不是数组, type={type(patches)}")
+            return []
+
+        valid_patches = []
+        for patch in patches:
+            if not isinstance(patch, dict):
                 continue
-            for field_name, revised_value in revised_section.items():
-                if not isinstance(revised_value, dict):
-                    continue
-                # 检查修订后是否有evidence_traces
-                if not revised_value.get("evidence_traces"):
-                    original_field = original_section.get(field_name)
-                    if isinstance(original_field, dict) and original_field.get("evidence_traces"):
-                        revised_value["evidence_traces"] = original_field["evidence_traces"]
-                        preserved_count += 1
-                        logger.debug(
-                            f"从原始草稿恢复evidence_traces: "
-                            f"{section_name}.{field_name}, "
-                            f"traces数={len(original_field['evidence_traces'])}"
-                        )
-        if preserved_count > 0:
-            logger.info(f"共恢复 {preserved_count} 个字段的evidence_traces")
-        return revised
+            path = patch.get("path", "")
+            value = patch.get("value")
+            if not path or value is None:
+                logger.warning(f"跳过无效补丁: path='{path}', value={value}")
+                continue
+            valid_patches.append({"path": path, "value": value})
+
+        logger.info(f"解析到 {len(valid_patches)} 个有效补丁")
+        for p in valid_patches:
+            logger.info(f"  补丁: {p['path']}")
+
+        return valid_patches
+
+    # ---- 应用补丁到SOAP ----
+    @staticmethod
+    def _apply_patches(soap: dict, patches: List[Dict]) -> dict:
+        """将补丁列表应用到SOAP草稿上。"""
+        result = copy.deepcopy(soap)
+        applied_count = 0
+
+        for patch in patches:
+            path = patch["path"]
+            value = patch["value"]
+
+            # 解析路径: "section.field" 或 "section.field.subfield"
+            parts = path.split(".")
+            if len(parts) < 2:
+                logger.warning(f"补丁路径格式无效: {path}，跳过")
+                continue
+
+            section_name = parts[0]
+            field_path = parts[1:]
+
+            # 导航到目标位置
+            target = result.get(section_name)
+            if not isinstance(target, dict):
+                logger.warning(f"补丁目标section不存在或非dict: {section_name}，跳过")
+                continue
+
+            # 逐层导航到倒数第二层
+            current = target
+            for key in field_path[:-1]:
+                if isinstance(current, dict) and key in current:
+                    current = current[key]
+                else:
+                    logger.warning(f"补丁路径导航失败: {path}，在key='{key}'处中断，跳过")
+                    break
+            else:
+                # 成功导航到倒数第二层
+                final_key = field_path[-1]
+                if isinstance(current, dict):
+                    old_value = current.get(final_key)
+                    current[final_key] = value
+                    applied_count += 1
+                    logger.info(
+                        f"应用补丁: {path}, "
+                        f"旧值类型={type(old_value).__name__}, "
+                        f"新值类型={type(value).__name__}"
+                    )
+                else:
+                    logger.warning(f"补丁目标非dict，无法设置: {path}，跳过")
+
+        logger.info(f"成功应用 {applied_count}/{len(patches)} 个补丁")
+        return result
 
     # ---- schema确定性约束校验 ----
     def _apply_schema_constraints(self, soap: dict) -> dict:
@@ -190,7 +321,6 @@ class FieldRevisionStage(PipelineStage):
                 soap[section] = {}
 
         # 2. 高风险字段检查
-        # assessment.diagnosis.value 为空时设为 "unknown"
         assessment = soap.get("assessment", {})
         if isinstance(assessment, dict):
             diagnosis = assessment.get("diagnosis")
@@ -202,7 +332,6 @@ class FieldRevisionStage(PipelineStage):
                 logger.warning("schema约束: assessment.diagnosis 为空，初始化占位")
                 soap["assessment"]["diagnosis"] = {"value": "unknown", "evidence_traces": []}
 
-        # plan.treatment.value 为空时设为 "unknown"
         plan = soap.get("plan", {})
         if isinstance(plan, dict):
             treatment = plan.get("treatment")
@@ -214,9 +343,7 @@ class FieldRevisionStage(PipelineStage):
                 logger.warning("schema约束: plan.treatment 为空，初始化占位")
                 soap["plan"]["treatment"] = {"value": "unknown", "evidence_traces": []}
 
-        # 3. 否定一致性快速检查
-        # 如果S/O中明确否认的症状出现在A中作为诊断依据，记录日志
-        # 此检查为非阻塞，不修改数据
+        # 3. 否定一致性快速检查（非阻塞）
         for section_name in ["subjective", "objective"]:
             section = soap.get(section_name, {})
             if not isinstance(section, dict):
