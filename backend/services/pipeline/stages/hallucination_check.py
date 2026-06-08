@@ -259,6 +259,7 @@ class HallucinationCheckStage(PipelineStage):
             for fact_item in unsupported:
                 fact_entry = {
                     "fact": fact_item.get("fact", ""),
+                    "field_name": fact_item.get("field_name", ""),
                     "section": section_name,
                     "is_supported": False,
                     "evidence_text": "",

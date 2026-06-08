@@ -6,58 +6,6 @@ def get_quality_check_templates_zh() -> dict:
     """获取中文质量核查模板"""
     templates = {}
 
-    templates["claim_verification"] = PromptTemplate(
-        template="""你是一个医疗病历审核专家。请对以下SOAP病历草稿的A（评估）和P（计划）部分做**逐claim原子核查**。
-
-## 原始对话
-$transcript
-
-## SOAP草稿
-$draft_emr
-
-## 预识别的无依据事实（来自幻觉检查阶段）
-以下事实已在幻觉检查阶段被识别为无对话依据，请直接将其标记为unsupported，无需再次核查：
-$preidentified_unsupported
-
-## 核查任务
-1. 提取A和P部分中的每一条**原子陈述（atomic claim）**
-2. 在原始对话中逐条检索证据
-3. 对每条claim做出判定
-
-## 判定标准
-- **supported**：对话中有明确的原句支持该陈述
-- **unsupported**：对话中没有相应依据，或与对话明确矛盾
-- **not_addressed**：对话中部分涉及但信息不足以确认
-
-## 输出格式
-请严格按照以下JSON格式输出：
-{
-  "claims": [
-    {
-      "claim_text": "从SOAP中提取的原子陈述",
-      "soap_section": "A或P",
-      "soap_field": "soap中的字段路径，如assessment.diagnosis或plan.treatment",
-      "verdict": "supported|unsupported|not_addressed",
-      "evidence_text": "对话中的原文依据（unsupported时可为空）",
-      "reasoning": "判定推理过程（简要说明为何做此判定）"
-    }
-  ],
-  "summary": {
-    "total": N,
-    "supported": N,
-    "unsupported": N,
-    "not_addressed": N
-  }
-}
-
-## 注意事项
-- claim_text必须是原子级别的，一条claim只陈述一个事实
-- 如果A或P部分为空，对应claims数组为空，summary中相应计数为0
-- 判定需严格，不确定的情况应归为not_addressed而非强行判定
-- **如果预识别列表中的事实出现在SOAP中，请直接将其标记为unsupported，无需再次核查**""",
-        required_vars=["transcript", "draft_emr", "preidentified_unsupported"]
-    )
-
     templates["checklist_verification"] = PromptTemplate(
         template="""你是一个医疗病历审核专家。请检查以下SOAP病历草稿是否遗漏了对话中的**关键信息**。
 
@@ -207,22 +155,34 @@ $transcript
 
 ## 修订规则
 
-### 1. unsupported claim → 删除或改弱措辞
-- 如果claim在对话中完全无依据：将该字段value清空为空字符串，source_turn_indices清空为[]
-- 如果claim的确定性被高估：改为更弱的措辞（如"确诊XXX"改为"考虑XXX"）
+### 1. unsupported claim → 区分两种情况处理
+
+#### 1a. 完全无依据（对话中找不到任何相关内容）→ 必须清空
+- 将该字段的value设为空字符串""，source_turn_indices设为[]
+- **禁止**编造新内容填入清空后的字段
+- **禁止**否定翻转（如将"未去医院"改为"曾去医院"是严重错误）
+- 如果同一字段中既有有依据的内容又有无依据的内容，只保留有依据的部分，删除无依据的部分
+
+#### 1b. 确定性被高估（对话中有相关内容但表述被强化）→ 弱化为对话原文的强度
+- 如果对话中说"考虑XXX"但病历写了"确诊XXX"，应改为"考虑XXX"
+- 如果对话中说"可能是XXX"但病历写了"XXX"，应改为"可能XXX"
+- 弱化时必须使用对话中的原文表述，不得自行编造弱化措辞
 
 ### 2. missing item → 如果对话有依据则补充
 - 从对话中找到对应原文，填入对应字段的value
+- 补充的内容应与对话原文一致，不得推断或编造对话中未提及的内容
 - source_turn_indices填入对话中的turn序号
 - 如果对话中确实没有依据，则不输出该字段的补丁
 
 ### 3. 确定性错误 → 降级
 - 将diagnosis_type降级：explicit_diagnosis → suspected_diagnosis → symptom_based_assessment
 - 将certainty_level降级：high → medium → low
-- 如果需要修改assessment_items中的某一项，输出该项的完整修订内容
+- 降级时只修改diagnosis_type和certainty_level字段，**不要修改诊断文本本身**
+- 如果需要修改assessment_items中的某一项，只改diagnosis_type和certainty_level，其余字段原样保留
 
 ### 4. hard_rule_violation → 根据描述修正
 - 按违规描述修正对应字段
+- 修正时同样不得引入对话中没有的新内容
 
 ## 输出格式
 只输出需要修改的字段补丁，格式为JSON数组。每个补丁包含path（字段路径）和value（新值）：
@@ -231,12 +191,16 @@ $transcript
 {
   "patches": [
     {
+      "path": "subjective.past_history",
+      "value": {"value": "", "source_turn_indices": []}
+    },
+    {
       "path": "assessment.diagnosis",
-      "value": {"value": "考虑婴儿大便偏少", "source_turn_indices": [2]}
+      "value": {"value": "考虑上呼吸道感染", "source_turn_indices": [13]}
     },
     {
       "path": "assessment.assessment_items",
-      "value": [{"text": "考虑婴儿大便偏少", "certainty_level": "medium", "source_turn_indices": [2], "diagnosis_type": "symptom_based_assessment"}]
+      "value": [{"text": "考虑上呼吸道感染", "certainty_level": "medium", "source_turn_indices": [13], "diagnosis_type": "suspected_diagnosis"}]
     }
   ]
 }
@@ -250,6 +214,7 @@ $transcript
 ### 注意事项
 - 只输出需要修改的字段，未涉及的字段不要输出
 - value的格式必须与SOAP草稿中对应字段的格式一致（含value和source_turn_indices）
+- 完全无依据的内容必须清空value，不得编造新内容；确定性被高估的内容弱化为对话原文表述
 - 如果某个问题不需要修改（如对话中确实没有依据补充遗漏项），则不输出对应补丁
 - 如果没有任何需要修改的字段，输出空数组：{"patches": []}""",
         required_vars=["affected_fields", "issues_json", "transcript"]

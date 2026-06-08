@@ -13,32 +13,24 @@ $transcript
 ## 待评估病历
 $emr_content
 
-你是一个医疗病历质量评估专家。请评估病历中的内容是否被原始对话支持。
+你是一个医疗病历质量评估专家。请评估病历中已写的内容是否被原始对话支持（即幻觉检查）。
 
 ## 评估任务
-请对病历中的每个关键事实进行二值判断：该事实是否能在原始对话中找到依据？
+从病历中提取所有原子事实，逐条判断每个事实是否能在原始对话中找到依据。
 
-关键事实包括：
-1. 主诉症状及持续时间
-2. 伴随症状
-3. 既往史
-4. 过敏史
-5. 体格检查结果
-6. 辅助检查结果
-7. 诊断结论
-8. 治疗药物
-9. 医嘱建议
+**核心原则：只检查病历中已经写了的内容是否有依据，不检查病历是否遗漏了对话中的信息。**
 
-## 重要评估原则
-**仅评估原始对话中实际涉及的内容**：
-- 如果原始对话中**未提及**既往史，则不将"未提及既往史"作为评估项，跳过此项评估
-- 如果原始对话中**未提及**过敏史，则不将"未提及过敏史"作为评估项，跳过此项评估
-- 如果原始对话中**未提及**辅助检查，则不将"未行辅助检查"作为评估项，跳过此项评估
-- 只有当原始对话中明确涉及某类信息，而病历中缺失或矛盾时，才将其标记为不支持
+具体规则：
+1. 从病历文本中提取原子事实（如：症状、诊断、药物、检查结果等）
+2. 对每个提取出的事实，判断原始对话中是否有对应依据
+3. **病历中没写的内容不算幻觉**——遗漏是完整性问题，不是一致性问题
+4. 只有病历中写了但原始对话中找不到依据的，才标记为不支持（幻觉）
+5. 原始对话中有但病历中没写的，不纳入本次评估
 
-**证据为"无"的情况不作为扣分依据**：
-- 当某类信息在原始对话中完全未出现时，病历中是否记录该信息不纳入一致性评估
-- 仅评估原始对话中存在明确信息的事实项
+**示例**：
+- 病历写了"诊断为上呼吸道感染"，对话中有此诊断依据 → 支持
+- 病历写了"诊断为肺炎"，但对话中无此诊断依据 → 不支持（幻觉）
+- 对话中提到"发热38.5度"，但病历中没写体温 → 不评估（遗漏，非幻觉）
 
 ## 输出格式（JSON）
 请严格按照以下格式输出，不要添加任何额外内容：
@@ -62,62 +54,6 @@ $emr_content
         required_vars=["transcript", "emr_content"]
     )
 
-    templates["consistency_check_from_facts"] = PromptTemplate(
-        template="""## 关键事实清单（从原始对话中提取）
-$key_facts
-
-## 待评估病历
-$emr_content
-
-你是一个医疗病历质量评估专家。请评估病历中的内容是否被关键事实清单支持。
-
-## 评估任务
-请对病历中的每个关键事实进行二值判断：该事实是否能在关键事实清单中找到依据？
-
-关键事实包括：
-1. 主诉症状及持续时间
-2. 伴随症状
-3. 既往史
-4. 过敏史
-5. 体格检查结果
-6. 辅助检查结果
-7. 诊断结论
-8. 治疗药物
-9. 医嘱建议
-
-## 重要评估原则
-**仅评估关键事实清单中实际涉及的内容**：
-- 如果关键事实清单中**未提及**既往史，则不将"未提及既往史"作为评估项，跳过此项评估
-- 如果关键事实清单中**未提及**过敏史，则不将"未提及过敏史"作为评估项，跳过此项评估
-- 如果关键事实清单中**未提及**辅助检查，则不将"未行辅助检查"作为评估项，跳过此项评估
-- 只有当关键事实清单中明确涉及某类信息，而病历中缺失或矛盾时，才将其标记为不支持
-
-**证据为"无"的情况不作为扣分依据**：
-- 当某类信息在关键事实清单中完全未出现时，病历中是否记录该信息不纳入一致性评估
-- 仅评估关键事实清单中存在明确信息的事实项
-
-## 输出格式（JSON）
-请严格按照以下格式输出，不要添加任何额外内容：
-{
-  "facts": [
-    {
-      "fact": "从病历中提取的原子事实",
-      "section": "subjective|objective|assessment|plan",
-      "is_supported": true或false,
-      "evidence_text": "关键事实清单中支持该事实的原文（如果is_supported为true，否则为空字符串）",
-      "reasoning": "判断理由（简要说明为什么支持或不支持）"
-    }
-  ],
-  "summary": {
-    "total_facts": 事实总数（整数）,
-    "supported_count": 支持的事实数（整数）,
-    "unsupported_count": 不支持的事实数（整数）,
-    "support_rate": 支持率（0.0-1.0的小数）
-  }
-}""",
-        required_vars=["key_facts", "emr_content"]
-    )
-
     templates["consistency_check_section"] = PromptTemplate(
         template="""## 对话片段（仅包含与该章节相关的轮次）
 $transcript_section
@@ -125,20 +61,19 @@ $transcript_section
 ## 待评估病历【$section_name】章节
 $emr_section
 
-你是医疗病历质量评估专家。请评估【$section_name】章节中哪些事实无法被对话支持。
+你是医疗病历质量评估专家。请评估【$section_name】章节中哪些事实无法被对话支持（即幻觉检查）。
 
 ## 评估任务
-逐条检查病历中每个事实，判断是否能在对话中找到依据。
+从病历该章节中提取所有原子事实，逐条判断每个事实是否能在对话中找到依据。
 
-## 重要评估原则
-**仅评估对话中实际涉及的内容**：
-- 如果对话中未提及既往史，则不将"未提及既往史"作为评估项，跳过此项评估
-- 如果对话中未提及过敏史，则不将"未提及过敏史"作为评估项，跳过此项评估
-- 只有当对话中明确涉及某类信息，而病历中缺失或矛盾时，才将其标记为不支持
+**核心原则：只检查病历中已经写了的内容是否有依据，不检查病历是否遗漏了对话中的信息。**
 
-**证据为"无"的情况不作为扣分依据**：
-- 当某类信息在对话中完全未出现时，病历中是否记录该信息不纳入一致性评估
-- 仅评估对话中存在明确信息的事实项
+具体规则：
+1. 从病历该章节文本中提取原子事实
+2. 对每个提取出的事实，判断对话中是否有对应依据
+3. **病历中没写的内容不算幻觉**——遗漏是完整性问题，不是一致性问题
+4. 只有病历中写了但对话中找不到依据的，才标记为不支持（幻觉）
+5. 对话中有但病历中没写的，不纳入本次评估
 
 ## 输出格式（JSON）
 只输出不支持的事实，支持的事实不需要列出。
@@ -147,12 +82,15 @@ reasoning必须简短，不超过30字，不要展开推理过程：
   "unsupported_facts": [
     {
       "fact": "不支持的事实",
+      "field_name": "该事实对应的病历字段名（如chief_complaint、diagnosis、treatment等）",
       "reasoning": "简短原因（不超过30字）"
     }
   ],
   "total_facts_in_section": 该章节事实总数（整数）,
   "supported_count": 支持的事实数（整数）
-}""",
+}
+
+**field_name说明**：对应病历输入中的字段名（即"  - 字段名: 值"中的字段名），如chief_complaint、history_present_illness、physical_examination、diagnosis、treatment等。""",
         required_vars=["transcript_section", "emr_section", "section_name"]
     )
 
@@ -417,24 +355,22 @@ $emr_content
 
 你是一个医疗病历质量评估专家。请同时完成以下两项评估任务。
 
-## 任务一：事实一致性检查
-请对病历中的每个关键事实进行二值判断：该事实是否能在关键事实清单中找到依据？
+## 任务一：事实一致性检查（幻觉检查）
+从病历中提取所有原子事实，逐条判断每个事实是否被关键事实清单支持。
 
-关键事实包括：
-1. 主诉症状及持续时间
-2. 伴随症状
-3. 既往史
-4. 过敏史
-5. 体格检查结果
-6. 辅助检查结果
-7. 诊断结论
-8. 治疗药物
-9. 医嘱建议
+**核心原则：只检查病历中已经写了的内容是否有依据，不检查病历是否遗漏了关键事实。**
 
-**重要评估原则**：
-- 仅评估关键事实清单中实际涉及的内容，未提及的不作为评估项
-- 证据为"无"的情况不作为扣分依据
-- 只有当关键事实清单中明确涉及某类信息，而病历中缺失或矛盾时，才标记为不支持
+具体规则：
+1. 从病历文本中提取原子事实（如：症状、诊断、药物、检查结果等）
+2. 对每个提取出的事实，判断关键事实清单中是否有对应依据
+3. **病历中没写的内容不算幻觉**——遗漏是完整性问题，不是一致性问题
+4. 只有病历中写了但关键事实清单中找不到依据的，才标记为不支持（幻觉）
+5. 关键事实清单中有但病历中没写的，不纳入本次评估
+
+**示例**：
+- 病历写了"诊断为上呼吸道感染"，关键事实清单中有此诊断 → 支持
+- 病历写了"诊断为肺炎"，但关键事实清单中无此诊断 → 不支持（幻觉）
+- 关键事实清单中有"发热38.5度"，但病历中没写体温 → 不评估（遗漏，非幻觉）
 
 ## 任务二：内部一致性检查
 检查病历内部是否存在自相矛盾：
@@ -495,32 +431,24 @@ $transcript
 ## Medical record to evaluate
 $emr_content
 
-You are a medical record quality assessment expert. Please evaluate whether the content in the medical record is supported by the original conversation.
+You are a medical record quality assessment expert. Please evaluate whether content WRITTEN in the medical record is supported by the original conversation (i.e., hallucination check).
 
 ## Assessment task
-Please make a binary judgment for each key fact in the medical record: can this fact find basis in the original conversation?
+Extract all atomic facts from the medical record, then judge whether each fact is supported by the original conversation.
 
-Key facts include:
-1. Chief complaint symptoms and duration
-2. Associated symptoms
-3. Past medical history
-4. Allergy history
-5. Physical examination results
-6. Auxiliary examination results
-7. Diagnosis conclusions
-8. Treatment medications
-9. Medical advice
+**Core Principle: Only check whether content WRITTEN in the medical record has supporting evidence. Do NOT check whether the medical record has omitted information from the conversation.**
 
-## Important Assessment Principles
-**Only evaluate content actually mentioned in the original conversation**:
-- If past medical history is **not mentioned** in the original conversation, do not include "past medical history not mentioned" as an evaluation item, skip this assessment
-- If allergy history is **not mentioned** in the original conversation, do not include "allergy history not mentioned" as an evaluation item, skip this assessment
-- If auxiliary examination is **not mentioned** in the original conversation, do not include "auxiliary examination not performed" as an evaluation item, skip this assessment
-- Only mark as unsupported when the original conversation clearly involves certain information but the medical record is missing or contradictory
+Specific rules:
+1. Extract atomic facts from the medical record text (e.g., symptoms, diagnoses, medications, examination results)
+2. For each extracted fact, determine if the original conversation contains corresponding evidence
+3. **Content NOT written in the medical record is NOT hallucination** — omissions are a completeness issue, not a consistency issue
+4. Only mark as unsupported (hallucination) when the medical record states something that cannot be found in the original conversation
+5. Information present in the conversation but absent from the medical record should NOT be included in this evaluation
 
-**Evidence being "none" is not a basis for deduction**:
-- When certain information does not appear at all in the original conversation, whether the medical record records it is not included in consistency evaluation
-- Only evaluate facts where explicit information exists in the original conversation
+**Examples**:
+- Medical record states "diagnosed with upper respiratory infection", conversation has evidence for this → Supported
+- Medical record states "diagnosed with pneumonia", but conversation has no such evidence → Unsupported (hallucination)
+- Conversation mentions "fever 38.5°C", but medical record does not mention temperature → Not evaluated (omission, not hallucination)
 
 ## Output format (JSON)
 Please strictly follow this format, do not add any extra content:
@@ -544,62 +472,6 @@ Please strictly follow this format, do not add any extra content:
         required_vars=["transcript", "emr_content"]
     )
 
-    templates["consistency_check_from_facts"] = PromptTemplate(
-        template="""## Key fact list (extracted from original conversation)
-$key_facts
-
-## Medical record to evaluate
-$emr_content
-
-You are a medical record quality assessment expert. Please evaluate whether the content in the medical record is supported by the key fact list.
-
-## Assessment task
-Please make a binary judgment for each key fact in the medical record: can this fact find basis in the key fact list?
-
-Key facts include:
-1. Chief complaint symptoms and duration
-2. Associated symptoms
-3. Past medical history
-4. Allergy history
-5. Physical examination results
-6. Auxiliary examination results
-7. Diagnosis conclusions
-8. Treatment medications
-9. Medical advice
-
-## Important Assessment Principles
-**Only evaluate content actually mentioned in the key fact list**:
-- If past medical history is **not mentioned** in the key fact list, do not include "past medical history not mentioned" as an evaluation item, skip this assessment
-- If allergy history is **not mentioned** in the key fact list, do not include "allergy history not mentioned" as an evaluation item, skip this assessment
-- If auxiliary examination is **not mentioned** in the key fact list, do not include "auxiliary examination not performed" as an evaluation item, skip this assessment
-- Only mark as unsupported when the key fact list clearly involves certain information but the medical record is missing or contradictory
-
-**Evidence being "none" is not a basis for deduction**:
-- When certain information does not appear at all in the key fact list, whether the medical record records it is not included in consistency evaluation
-- Only evaluate facts where explicit information exists in the key fact list
-
-## Output format (JSON)
-Please strictly follow this format, do not add any extra content:
-{
-  "facts": [
-    {
-      "fact": "atomic fact extracted from medical record",
-      "section": "subjective|objective|assessment|plan",
-      "is_supported": true or false,
-      "evidence_text": "original text in key fact list supporting this fact (if is_supported is true, otherwise empty string)",
-      "reasoning": "judgment rationale (briefly explain why supported or not supported)"
-    }
-  ],
-  "summary": {
-    "total_facts": total number of facts (integer),
-    "supported_count": number of supported facts (integer),
-    "unsupported_count": number of unsupported facts (integer),
-    "support_rate": support rate (decimal 0.0-1.0)
-  }
-}""",
-        required_vars=["key_facts", "emr_content"]
-    )
-
     templates["consistency_check_section"] = PromptTemplate(
         template="""## Conversation snippet (only turns relevant to this section)
 $transcript_section
@@ -607,20 +479,19 @@ $transcript_section
 ## Medical record [$section_name] section to evaluate
 $emr_section
 
-You are a medical record quality assessment expert. Please evaluate which facts in the [$section_name] section are not supported by the conversation.
+You are a medical record quality assessment expert. Please evaluate which facts in the [$section_name] section are not supported by the conversation (i.e., hallucination check).
 
 ## Assessment task
-Check each fact in the medical record to determine if it can find basis in the conversation.
+Extract all atomic facts from this section of the medical record, then judge whether each fact is supported by the conversation.
 
-## Important Assessment Principles
-**Only evaluate content actually mentioned in the conversation**:
-- If past medical history is not mentioned in the conversation, do not include "past medical history not mentioned" as an evaluation item, skip this assessment
-- If allergy history is not mentioned in the conversation, do not include "allergy history not mentioned" as an evaluation item, skip this assessment
-- Only mark as unsupported when the conversation clearly involves certain information but the medical record is missing or contradictory
+**Core Principle: Only check whether content WRITTEN in the medical record has supporting evidence. Do NOT check whether the medical record has omitted information from the conversation.**
 
-**Evidence being "none" is not a basis for deduction**:
-- When certain information does not appear at all in the conversation, whether the medical record records it is not included in consistency evaluation
-- Only evaluate facts where explicit information exists in the conversation
+Specific rules:
+1. Extract atomic facts from the medical record section text
+2. For each extracted fact, determine if the conversation contains corresponding evidence
+3. **Content NOT written in the medical record is NOT hallucination** — omissions are a completeness issue, not a consistency issue
+4. Only mark as unsupported (hallucination) when the medical record states something that cannot be found in the conversation
+5. Information present in the conversation but absent from the medical record should NOT be included in this evaluation
 
 ## Output format (JSON)
 Only output unsupported facts, supported facts do not need to be listed.
@@ -900,24 +771,22 @@ $emr_content
 
 You are a medical record quality assessment expert. Please complete both assessment tasks below simultaneously.
 
-## Task 1: Fact Consistency Check
-Please make a binary judgment for each key fact in the medical record: can this fact find basis in the key fact list?
+## Task 1: Fact Consistency Check (Hallucination Check)
+Extract all atomic facts from the medical record, then judge whether each fact is supported by the key fact list.
 
-Key facts include:
-1. Chief complaint symptoms and duration
-2. Associated symptoms
-3. Past medical history
-4. Allergy history
-5. Physical examination results
-6. Auxiliary examination results
-7. Diagnosis conclusions
-8. Treatment medications
-9. Medical advice
+**Core Principle: Only check whether content WRITTEN in the medical record has supporting evidence. Do NOT check whether the medical record has omitted key facts.**
 
-**Important Assessment Principles**:
-- Only evaluate content actually mentioned in the key fact list, unmentioned items are not assessed
-- Evidence being "none" is not a basis for deduction
-- Only mark as unsupported when the key fact list clearly involves certain information but the medical record is missing or contradictory
+Specific rules:
+1. Extract atomic facts from the medical record text (e.g., symptoms, diagnoses, medications, examination results)
+2. For each extracted fact, determine if the key fact list contains corresponding evidence
+3. **Content NOT written in the medical record is NOT hallucination** — omissions are a completeness issue, not a consistency issue
+4. Only mark as unsupported (hallucination) when the medical record states something that cannot be found in the key fact list
+5. Key facts present in the list but absent from the medical record should NOT be included in this evaluation
+
+**Examples**:
+- Medical record states "diagnosed with upper respiratory infection", key fact list has this diagnosis → Supported
+- Medical record states "diagnosed with pneumonia", but key fact list has no such diagnosis → Unsupported (hallucination)
+- Key fact list has "fever 38.5°C", but medical record does not mention temperature → Not evaluated (omission, not hallucination)
 
 ## Task 2: Internal Consistency Check
 Check for internal contradictions in the medical record:

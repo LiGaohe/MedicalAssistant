@@ -1,5 +1,6 @@
 import copy
 import json
+import re
 import time
 from typing import Dict, Any, List, Optional
 
@@ -7,6 +8,31 @@ from ..base import PipelineContext, PipelineStage
 from ..utils import parse_json_response
 from ..debug_interactor import DebugInteractor
 from ....utils.logger import logger
+
+
+def _clean_text_after_removal(text: str) -> str:
+    """清理删除幻觉文本后产生的多余标点和空格。
+
+    例如："患者为9岁小儿。。今晨" -> "患者为9岁小儿。今晨"
+    例如："患者为9岁小儿。（具体结果未提及）。今晨" -> "患者为9岁小儿。今晨"
+    """
+    # 删除空括号或仅含解释性短语的括号（幻觉删除后的残留）
+    text = re.sub(r'[（(]\s*(具体结果未提及|具体结果不详|未提及|不详)?\s*[）)]', '', text)
+    # 合并连续的中文句号为单个
+    text = re.sub(r'。+', '。', text)
+    # 合并连续的中文逗号为单个
+    text = re.sub(r'，+', '，', text)
+    # 删除句号前的空格
+    text = re.sub(r'\s+。', '。', text)
+    # 删除逗号前的空格
+    text = re.sub(r'\s+，', '，', text)
+    # 删除句号后紧跟逗号的情况
+    text = re.sub(r'。，', '，', text)
+    # 删除逗号后紧跟句号的情况
+    text = re.sub(r'，。', '。', text)
+    # 合并多余空格
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
 
 class FieldRevisionStage(PipelineStage):
@@ -35,12 +61,11 @@ class FieldRevisionStage(PipelineStage):
 
         # 统计各类问题数量
         unsupported_count = len(issues.get("unsupported_claims", []))
-        not_addressed_count = len(issues.get("not_addressed_claims", []))
         missing_count = len(issues.get("missing_items", []))
         hard_rule_count = len(issues.get("hard_rule_violations", []))
         certainty_error_count = len(issues.get("certainty_errors", []))
         total_issues_count = (
-            unsupported_count + not_addressed_count
+            unsupported_count
             + missing_count + hard_rule_count + certainty_error_count
         )
 
@@ -52,7 +77,7 @@ class FieldRevisionStage(PipelineStage):
         else:
             logger.info(
                 f"核查问题清单非空: 无证据={unsupported_count}, "
-                f"未处理={not_addressed_count}, 遗漏={missing_count}, "
+                f"遗漏={missing_count}, "
                 f"硬规则违规={hard_rule_count}, 确定性错误={certainty_error_count}，"
                 f"执行LLM字段级修订（补丁模式）"
             )
@@ -64,6 +89,14 @@ class FieldRevisionStage(PipelineStage):
                 logger.info(f"LLM字段级修订完成，应用了 {len(patches)} 个补丁")
             else:
                 logger.warning("LLM字段级修订未返回有效补丁，使用原始草稿进入schema校验")
+
+            # 基于unsupported_claims同步修正残留幻觉内容
+            revised_soap, cleanup_count = self._cleanup_unsupported_claims(
+                revised_soap, issues
+            )
+            if cleanup_count > 0:
+                revised = True
+                logger.info(f"幻觉残留清理完成，修正了 {cleanup_count} 处")
 
         # ---- schema确定性约束校验 ----
         revised_soap = self._apply_schema_constraints(revised_soap)
@@ -95,34 +128,28 @@ class FieldRevisionStage(PipelineStage):
         # 1. unsupported_claims → 定位到对应section的字段
         for claim in issues.get("unsupported_claims", []):
             section_key = claim.get("soap_section", "")
-            field_key = claim.get("soap_field", "")
+            soap_field = claim.get("soap_field", "")
             claim_text = claim.get("claim_text", "")
             # 将A/P缩写映射为完整section名
             section_map = {"A": "assessment", "P": "plan", "S": "subjective", "O": "objective"}
-            full_section = section_map.get(section_key, section_key) or field_key
-            affected_parts.append(f"[无证据声明] section={full_section}, claim='{claim_text}'")
-
-        # 2. not_addressed_claims
-        for claim in issues.get("not_addressed_claims", []):
-            section_key = claim.get("soap_section", "")
-            claim_text = claim.get("claim_text", "")
-            section_map = {"A": "assessment", "P": "plan", "S": "subjective", "O": "objective"}
             full_section = section_map.get(section_key, section_key)
-            affected_parts.append(f"[未处理声明] section={full_section}, claim='{claim_text}'")
+            # soap_field 格式为 "section.field_name"，提供精确定位
+            field_path = soap_field if soap_field and "." in soap_field else full_section
+            affected_parts.append(f"[无证据声明] section={full_section}, field={field_path}, claim='{claim_text}'")
 
-        # 3. missing_items → 定位到对应section
+        # 2. missing_items → 定位到对应section
         for item in issues.get("missing_items", []):
             section = item.get("section", "")
             item_name = item.get("item_name", item.get("item", ""))
             affected_parts.append(f"[遗漏项] section={section}, item='{item_name}'")
 
-        # 4. hard_rule_violations
+        # 3. hard_rule_violations
         for violation in issues.get("hard_rule_violations", []):
             v_type = violation.get("type", "")
             desc = violation.get("description", "")
             affected_parts.append(f"[硬规则违规] type={v_type}, desc='{desc}'")
 
-        # 5. certainty_errors → 定位到assessment
+        # 4. certainty_errors → 定位到assessment
         for error in issues.get("certainty_errors", []):
             soap_text = error.get("soap_text", "")
             current_type = error.get("current_diagnosis_type", "")
@@ -310,6 +337,98 @@ class FieldRevisionStage(PipelineStage):
 
         logger.info(f"成功应用 {applied_count}/{len(patches)} 个补丁")
         return result
+
+    # ---- 幻觉残留清理 ----
+    @staticmethod
+    def _cleanup_unsupported_claims(
+        revised_soap: dict, issues: dict
+    ) -> tuple:
+        """基于unsupported_claims清理EMR中text汇总字段的残留幻觉内容。
+
+        当幻觉检查发现某条声明不支持时，LLM补丁可能只修正了对应字段，
+        但同一section的text汇总字段中可能仍残留该幻觉内容。
+        此方法只在text字段中删除已确认被补丁修正的字段对应的幻觉片段。
+
+        安全策略：
+        - 只处理text汇总字段（不是value字段），因为text是其他字段的汇总
+        - 只删除unsupported_claims中soap_field对应的幻觉片段
+        - 只在补丁已修正了该soap_field时才清理text
+
+        Returns:
+            (revised_soap, cleanup_count): 修正后的SOAP和清理次数
+        """
+        result = copy.deepcopy(revised_soap)
+        cleanup_count = 0
+
+        unsupported_claims = issues.get("unsupported_claims", [])
+        if not unsupported_claims:
+            return result, cleanup_count
+
+        # 按section分组unsupported_claims
+        section_claims = {}
+        for claim in unsupported_claims:
+            soap_field = claim.get("soap_field", "")
+            claim_text = claim.get("claim_text", "").strip()
+            if not soap_field or not claim_text or len(claim_text) < 2:
+                continue
+            # 解析soap_field: "section.field"
+            parts = soap_field.split(".")
+            if len(parts) < 2:
+                continue
+            section_name = parts[0]
+            field_key = parts[1]
+            if section_name not in section_claims:
+                section_claims[section_name] = []
+            section_claims[section_name].append({
+                "field_key": field_key,
+                "claim_text": claim_text,
+            })
+
+        # 对每个section，检查text字段是否包含幻觉片段
+        for section_name, claims in section_claims.items():
+            section = result.get(section_name, {})
+            if not isinstance(section, dict):
+                continue
+
+            text_value = section.get("text", "")
+            if not isinstance(text_value, str) or not text_value.strip():
+                continue
+
+            modified = False
+            new_text = text_value
+
+            for claim in claims:
+                field_key = claim["field_key"]
+                claim_text = claim["claim_text"]
+
+                # 检查该字段是否已被补丁修正（在revised_soap中与原始不同）
+                # 只清理text中的幻觉片段，且该片段对应的字段已被修正
+                if claim_text in new_text:
+                    # 检查对应的字段是否仍包含该幻觉
+                    field_data = section.get(field_key)
+                    if isinstance(field_data, dict):
+                        field_value = field_data.get("value", "")
+                    else:
+                        field_value = ""
+
+                    # 如果对应字段的value中已不包含该幻觉，说明已被补丁修正
+                    # 此时可以安全地从text中删除
+                    if claim_text not in field_value:
+                        new_text = new_text.replace(claim_text, "")
+                        modified = True
+                        cleanup_count += 1
+                        logger.info(
+                            f"幻觉残留清理: {section_name}.text, "
+                            f"删除幻觉片段 '{claim_text[:50]}'"
+                        )
+
+            if modified:
+                new_text = _clean_text_after_removal(new_text)
+                result[section_name]["text"] = new_text
+
+        if cleanup_count > 0:
+            logger.info(f"幻觉残留清理: 共清理 {cleanup_count} 处残留内容")
+        return result, cleanup_count
 
     # ---- schema确定性约束校验 ----
     def _apply_schema_constraints(self, soap: dict) -> dict:

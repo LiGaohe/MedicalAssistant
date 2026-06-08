@@ -10,10 +10,15 @@ from ....utils.logger import logger
 
 
 class ClaimVerificationStage(PipelineStage):
-    """后置核查阶段：对SOAP草稿进行Claim核查、Checklist核查和硬规则核查。
-    
-    如果幻觉检查阶段已识别 unsupported_facts，则将其转换为 unsupported_claims，
-    避免重复检查 A 和 P 部分的事实。
+    """后置核查阶段：对SOAP草稿进行Checklist核查、硬规则核查和确定性核查。
+
+    幻觉检查阶段已覆盖S/O/A/P全部章节的事实支持检测，
+    本阶段不再重复Claim核查，仅做幻觉检查不覆盖的核查项：
+    - Checklist遗漏核查
+    - 硬规则核查
+    - 确定性核查
+
+    幻觉检查的 unsupported_facts 直接转换为 unsupported_claims 供下游字段修订使用。
     """
 
     def stage_name(self) -> str:
@@ -25,12 +30,12 @@ class ClaimVerificationStage(PipelineStage):
 
         draft_emr = ctx.emr_draft
         combined_text = ctx.combined_text
-        
+
         if not draft_emr:
             logger.error("draft_emr为空，无法进行后置核查")
             ctx.verification_issues = {}
             return {"status": "skipped_empty_draft", "issues_count": 0}
-        
+
         if not combined_text:
             logger.error("combined_text为空，无法进行后置核查")
             ctx.verification_issues = {}
@@ -39,67 +44,50 @@ class ClaimVerificationStage(PipelineStage):
         draft_emr_json = json.dumps(draft_emr, ensure_ascii=False, indent=2)
 
         unsupported_claims: List[Dict] = []
-        not_addressed_claims: List[Dict] = []
         missing_items: List[Dict] = []
         hard_rule_violations: List[Dict] = []
 
-        # ---- 从幻觉检查结果中提取预识别的 unsupported_facts ----
-        preidentified_unsupported: List[Dict] = []
+        # ---- 从幻觉检查结果直接构建 unsupported_claims ----
         hallucination_result = ctx.hallucination_result
         if hallucination_result and hallucination_result.get("unsupported_facts"):
             all_unsupported_facts = hallucination_result.get("unsupported_facts", [])
-            # 只提取 A 和 P 部分的 unsupported_facts（Claim核查只检查这两个部分）
-            ap_sections = ["assessment", "plan"]
-            preidentified_unsupported = [
-                fact for fact in all_unsupported_facts
-                if fact.get("section") in ap_sections
-            ]
-            if preidentified_unsupported:
+            section_to_abbr = {
+                "subjective": "S", "objective": "O",
+                "assessment": "A", "plan": "P",
+            }
+            for fact in all_unsupported_facts:
+                field_name = fact.get("field_name", "")
+                section = fact.get("section", "")
+                soap_field = f"{section}.{field_name}" if field_name else section
+                unsupported_claims.append({
+                    "claim_text": fact.get("fact", ""),
+                    "soap_section": section_to_abbr.get(section, ""),
+                    "soap_field": soap_field,
+                    "verdict": "unsupported",
+                    "evidence_text": "",
+                    "reasoning": fact.get("reasoning", "幻觉检查阶段已识别为无依据"),
+                    "source": "hallucination_check",
+                })
+            if unsupported_claims:
                 logger.info(
-                    f"从幻觉检查结果中提取 {len(preidentified_unsupported)} 条 "
-                    f"A/P部分的预识别unsupported事实，将跳过重复检查"
+                    f"从幻觉检查结果转换 {len(unsupported_claims)} 条 unsupported_claims"
                 )
-                # 转换为 unsupported_claims 格式
-                for fact in preidentified_unsupported:
-                    unsupported_claims.append({
-                        "claim_text": fact.get("fact", ""),
-                        "soap_section": "A" if fact.get("section") == "assessment" else "P",
-                        "soap_field": fact.get("section", ""),
-                        "verdict": "unsupported",
-                        "evidence_text": "",
-                        "reasoning": fact.get("reasoning", "幻觉检查阶段已识别为无依据"),
-                        "source": "hallucination_check",  # 标记来源
-                    })
 
-        # ---- 步骤A: Claim核查 ----
-        logger.info("后置核查 - 步骤A: Claim核查")
-        # 裁剪转写：只发送 A/P 相关对话轮次
-        ap_transcript = self._crop_transcript_for_sections(
-            ctx, draft_emr, ["assessment", "plan"], "Claim核查"
-        )
-        new_unsupported, new_not_addressed = self._step_claim_verification(
-            ctx, ap_transcript, draft_emr_json, preidentified_unsupported
-        )
-        # 合并结果（排除预识别的）
-        unsupported_claims.extend(new_unsupported)
-        not_addressed_claims = new_not_addressed
-
-        # ---- 步骤B: Checklist核查 ----
-        logger.info("后置核查 - 步骤B: Checklist核查")
+        # ---- 步骤A: Checklist核查 ----
+        logger.info("后置核查 - 步骤A: Checklist核查")
         missing_items = self._step_checklist_verification(
             ctx, combined_text, draft_emr_json
         )
 
-        # ---- 步骤C: 硬规则核查 ----
-        logger.info("后置核查 - 步骤C: 硬规则核查")
+        # ---- 步骤B: 硬规则核查 ----
+        logger.info("后置核查 - 步骤B: 硬规则核查")
         hard_rule_violations = self._check_hard_rules(draft_emr)
         logger.info(
             f"硬规则核查完成: 发现 {len(hard_rule_violations)} 条违规"
         )
 
-        # ---- 步骤D: 确定性核查 ----
-        logger.info("后置核查 - 步骤D: 确定性核查")
-        # 裁剪转写：只发送 A 相关对话轮次
+        # ---- 步骤C: 确定性核查 ----
+        logger.info("后置核查 - 步骤C: 确定性核查")
         certainty_transcript = self._crop_transcript_for_sections(
             ctx, draft_emr, ["assessment"], "确定性核查"
         )
@@ -113,7 +101,6 @@ class ClaimVerificationStage(PipelineStage):
         # ---- 汇总 ----
         issues = {
             "unsupported_claims": unsupported_claims,
-            "not_addressed_claims": not_addressed_claims,
             "missing_items": missing_items,
             "hard_rule_violations": hard_rule_violations,
             "certainty_errors": certainty_errors,
@@ -122,15 +109,13 @@ class ClaimVerificationStage(PipelineStage):
 
         total_issues = (
             len(unsupported_claims)
-            + len(not_addressed_claims)
             + len(missing_items)
             + len(hard_rule_violations)
             + len(certainty_errors)
         )
         stage_time = time.time() - stage_start
         logger.info(
-            f"后置核查完成: Claim核查(无证据={len(unsupported_claims)}, "
-            f"未处理={len(not_addressed_claims)}), "
+            f"后置核查完成: 无证据={len(unsupported_claims)}, "
             f"Checklist遗漏={len(missing_items)}, "
             f"硬规则违规={len(hard_rule_violations)}, "
             f"确定性错误={len(certainty_errors)}, "
@@ -143,99 +128,7 @@ class ClaimVerificationStage(PipelineStage):
             "issues_count": total_issues,
         }
 
-    # ---- 步骤A: Claim核查 ----
-    def _step_claim_verification(
-        self,
-        ctx: PipelineContext,
-        transcript: str,
-        draft_emr_json: str,
-        preidentified_unsupported: List[Dict] = None,
-    ) -> tuple:
-        """调用LLM进行逐claim核查，返回 (unsupported_claims, not_addressed_claims)
-        
-        Args:
-            ctx: Pipeline上下文
-            transcript: 对话文本
-            draft_emr_json: SOAP草稿JSON
-            preidentified_unsupported: 预识别的unsupported事实列表（来自幻觉检查）
-        
-        Returns:
-            (unsupported_claims, not_addressed_claims): 新发现的unsupported和not_addressed声明
-        """
-        preidentified_unsupported = preidentified_unsupported or []
-        
-        # 构建预识别事实的文本列表（用于提示词）
-        preidentified_texts = [
-            fact.get("fact", "") for fact in preidentified_unsupported if fact.get("fact")
-        ]
-        
-        # 格式化预识别事实：如果有则列出，否则显示"无"
-        if preidentified_texts:
-            preidentified_str = "\n".join([f"- {text}" for text in preidentified_texts])
-        else:
-            preidentified_str = "无"
-
-        # 压缩transcript（裁剪后的转写）
-        compressed_transcript, dict_str = ctx.compress_text(transcript)
-        if dict_str:
-            logger.info(f"Claim核查: transcript已压缩, 原文{len(transcript)}字符 -> 压缩后{len(compressed_transcript)}字符")
-        else:
-            logger.info(f"Claim核查: transcript未压缩, 使用原文{len(transcript)}字符")
-
-        try:
-            prompt = ctx.prompt_manager.render(
-                "claim_verification",
-                compression_dict=dict_str,
-                transcript=compressed_transcript,
-                draft_emr=draft_emr_json,
-                preidentified_unsupported=preidentified_str,
-            )
-            logger.debug(f"Claim核查提示词长度: {len(prompt)} 字符")
-        except Exception as e:
-            logger.error(f"Claim核查提示词渲染失败: {e}")
-            return [], []
-
-        debug_interactor = DebugInteractor(ctx.llm_service)
-
-        if ctx.debug_mode:
-            try:
-                response_text = debug_interactor.interact(
-                    stage="claim_verification",
-                    prompt=prompt,
-                )
-            except Exception as e:
-                logger.error(f"Claim核查Debug交互失败: {e}")
-                return [], []
-        else:
-            if not ctx.llm_service:
-                logger.warning("LLM服务不可用，跳过Claim核查")
-                return [], []
-
-            try:
-                # 关闭thinking模式：Claim核查是模式匹配任务，不需要深度推理
-                response = ctx.llm_service.generate_stream_to_response(prompt, thinking_enabled=False, compression_dict=dict_str)
-                logger.debug("Claim核查阶段: thinking模式已禁用，使用流式处理")
-                ctx.llm_stats.record_from_response("claim_verification", prompt, response)
-                response_text = response.text
-            except Exception as e:
-                logger.error(f"Claim核查LLM调用失败: {e}")
-                ctx.llm_stats.record_call("claim_verification", len(prompt), 0, success=False, error_message=str(e))
-                return [], []
-
-        parsed = parse_json_response(response_text, "Claim核查")
-        if not parsed:
-            logger.warning("Claim核查JSON解析失败，使用空结果")
-            return [], []
-
-        unsupported = parsed.get("unsupported_claims", [])
-        not_addressed = parsed.get("not_addressed_claims", [])
-        logger.info(
-            f"Claim核查完成: 无证据声明={len(unsupported)}, "
-            f"未处理声明={len(not_addressed)}"
-        )
-        return unsupported, not_addressed
-
-    # ---- 步骤B: Checklist核查 ----
+    # ---- 步骤A: Checklist核查 ----
     def _step_checklist_verification(
         self,
         ctx: PipelineContext,
@@ -298,7 +191,7 @@ class ClaimVerificationStage(PipelineStage):
         logger.info(f"Checklist核查完成: 遗漏项={len(missing)}")
         return missing
 
-    # ---- 步骤C: 硬规则核查（纯Python实现，不调用LLM） ----
+    # ---- 步骤B: 硬规则核查（纯Python实现，不调用LLM） ----
     @staticmethod
     def _check_hard_rules(draft: dict) -> List[Dict]:
         """对SOAP草稿执行确定性硬规则核查，返回violations列表。"""

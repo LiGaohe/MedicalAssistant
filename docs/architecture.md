@@ -1994,17 +1994,16 @@ backend/models/benchmark.py
 ├── BenchmarkLLMCall（LLM调用记录）
 └── BenchmarkSummary（汇总记录）
 
-scripts/run_full_benchmark.py
-├── _is_emr_empty() → 空内容检查
-├── _check_intermediate_results() → 从数据库读取中间结果
-├── _save_benchmark_run() → 保存中间结果到数据库
-├── _build_jsonl_entry() → 构建JSONL输出
-└── run_multi_variant() → 多配置评估主流程
-    ├── 检查数据库中是否有中间结果
-    ├── 复用已有中间结果，跳过process_with_fork
-    ├── 运行process_with_fork后立即保存中间结果
-    ├── 失败时也保存已有的中间结果
-    └── key_facts提取后保存到数据库
+scripts/run_full_benchmark/（包）
+├── configs.py → 实验配置常量（EXPERIMENT_CONFIGS, ABLATION_CONFIGS, CONFIG_STAGE_GROUPS等）
+├── metrics.py → 质量指标计算（is_emr_empty, compute_quality_metrics, compute_llm_stats_for_config等）
+├── db_helper.py → 数据库CRUD操作（check_existing_run, save_benchmark_run, save_benchmark_evaluation等）
+├── pipeline_runner.py → Pipeline执行（run_pipeline, run_evaluation, build_jsonl_entry）
+├── multi_variant.py → 多变量Pipeline逻辑（run_multi_variant及辅助函数）
+├── runner.py → FullBenchmarkRunner主类（run_batch, run_all_configs, run_ablations）
+└── __main__.py → CLI入口（argparse + main函数）
+
+scripts/backfill_evaluations.py → 补充缺失评估记录（检测无有效评估的sample，删除旧错误评估后重新评估）
 ```
 
 ### 复用效果

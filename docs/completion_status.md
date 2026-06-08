@@ -1,5 +1,163 @@
 # 完成状态记录
 
+## 2026-06-08 字段修订阶段新增幻觉残留清理
+
+### 变更
+
+1. **修改** `backend/services/pipeline/stages/field_revision.py`
+   - 新增 `_cleanup_unsupported_claims()` 方法：基于 `unsupported_claims` 清理 text 汇总字段中残留的幻觉片段
+   - 新增 `_clean_text_after_removal()` 辅助函数：清理删除幻觉文本后产生的多余标点、空格、括号残留
+   - 安全策略：只清理 text 汇总字段；只在对应字段的 value 已被补丁修正（不再包含幻觉片段）时才从 text 中删除
+   - 修复问题：幻觉检查发现"曾去医院检查"是幻觉，补丁修正了 `history_present_illness.value`，但 `subjective.text` 中仍残留该幻觉内容
+
+## 2026-06-08 修正术语规范化流程描述
+
+### 变更
+
+1. **修正文档** `docs/管线流程设计与代码实现映射.md` 中术语规范化流程描述
+   - 原描述"正则提取术语"不准确
+   - 实际实现：`_extract_medical_terms_with_llm()` 通过LLM提取医学术语
+   - 正则表达式仅用于解析LLM返回的JSON响应，而非提取术语本身
+
+## 2026-06-08 新增管线流程设计与代码实现映射文档
+
+### 变更
+
+1. **新增文档** `docs/管线流程设计与代码实现映射.md` - 基于structured-dev-workflow的Check阶段，逆向梳理已实现项目的流程设计与代码映射
+   - 管线6阶段详解（转写清洗→草稿生成→草稿结构化→幻觉检查→后置核查→字段修订）
+   - 每阶段的设计流程、分支/异常、代码位置映射表
+   - 核心基础设施说明（PipelineContext、PipelineStage、LLMStatsCollector、JSON解析工具、转写裁剪工具）
+   - 多变量Fork模式、SSE回调模式、后处理独立调用说明
+   - 完整文件清单
+
+## 2026-06-08 修复幻觉检查字段路径与去除重复核查
+
+### 问题
+
+1. 幻觉检查输出 `unsupported_facts` 无字段路径（`field_name`），下游无法精确定位
+2. 核查阶段（`ClaimVerificationStage`）的Step A（Claim核查）与幻觉检查完全重复
+3. `soap_field` 转换使用章节名而非完整字段路径（如 "plan" 而非 "plan.treatment"）
+
+### 变更
+
+1. **evaluation.py** - `consistency_check_section` 提示词增加 `field_name` 输出字段
+2. **hallucination_check.py** - `_merge_section_results` 传递 `field_name` 到 `unsupported_facts`
+3. **claim_verification.py** - 重构：
+   - 删除Step A（Claim核查），幻觉检查已覆盖S/O/A/P全部章节的事实支持检测
+   - 直接从幻觉检查结果转换 `unsupported_claims`，不再调用LLM重复核查
+   - `soap_field` 使用 `section.field_name` 完整路径
+   - 保留Checklist核查、硬规则核查、确定性核查（不与幻觉检查重复）
+   - 删除 `not_addressed_claims`（该分类由幻觉检查的unsupported统一替代）
+4. **quality_check.py** - 删除 `claim_verification` 提示词模板（不再需要）
+5. **field_revision.py** - 利用 `soap_field` 完整路径做字段级精确定位，删除 `not_addressed_claims` 处理
+
+## 2026-06-08 修正字段修订prompt
+
+### 问题
+
+完整管线幻觉率（0.7%）高于去掉幻觉检查的消融实验（0.0%），反直觉。经查证sample 10333432的原始数据：
+
+- 原始对话：医生问"去医院检查过吗？"，患者答"就发烧，头痛，想吐"和"没有"（未去医院）
+- raw_draft就已写"曾去医院检查"——这是**草稿生成阶段的幻觉**，不是字段修订引入的
+- full和no_hallucination管线的`history_present_illness`字段都写了"曾去医院检查"
+- no_hallucination管线的`text`字段正确写了"未去医院检查"，但`history_present_illness`仍错误
+
+因此，字段修订并未引入新幻觉，之前的分析结论有误。但prompt仍有改进空间。
+
+### 变更
+
+修改 `quality_check.py` 中 `field_revision_patch` 模板：
+
+1. **unsupported claim规则**：区分两种情况
+   - 完全无依据（对话中找不到任何相关内容）→ 必须清空，禁止编造新内容
+   - 确定性被高估（对话中有相关内容但表述被强化）→ 弱化为对话原文的强度
+2. **missing item规则**：补充内容应与对话原文一致，不得推断或编造
+3. **确定性错误规则**：降级时只改diagnosis_type和certainty_level，不修改诊断文本
+4. **示例更新**：展示清空（完全无依据）和弱化（确定性被高估）两种情况
+
+## 2026-06-08 修正幻觉率评估逻辑
+
+### 问题
+
+一致性评估prompt将"病历遗漏信息"误判为幻觉（`is_supported=false`），导致幻觉率虚高。幻觉应只指"病历写了但无依据的内容"，遗漏属于完整性问题。
+
+### 变更
+
+1. **修改4个评估prompt**（`evaluation.py`中英文各4个），统一核心原则：只检查病历中写了的内容是否有依据，遗漏不判为幻觉
+   - `consistency_check`：量化评估（无key_facts时）
+   - `consistency_combined_check`：量化评估（有key_facts时）
+   - `consistency_check_section`：管线幻觉检查阶段
+2. **删除未使用模板** `consistency_check_from_facts`（中英文），无代码引用
+3. **修正数据库**：34条遗漏型记录的幻觉率设为0，保留9条真正幻觉记录
+
+### 修正后各管线幻觉率
+
+| 管线 | 幻觉率(%) | 支持率(%) |
+|:---|---:|---:|
+| end_to_end | 1.1 | 98.9 |
+| full | 0.7 | 99.3 |
+| no_hallucination | 0.0 | 100.0 |
+| no_term_norm | 0.4 | 99.6 |
+| no_verification | 0.8 | 99.2 |
+| simplified | 0.0 | 100.0 |
+| standard | 0.0 | 100.0 |
+
+### 真正幻觉样本（9条）
+
+- sample 10333432：病历写"曾去医院检查"，对话中患者说"没有"（run_id 138/139/140/141）
+- sample 10411864：病历写"无打呕"，对话中说"有打呕"（run_id 188/189/193）
+- sample 10333151：新增无依据信息"凌晨十二点入睡""枕秃""注意肚子受凉"（run_id 130）
+- sample 10055819：病历写"停止母乳3天"，对话原文"34天"（run_id 20）
+
+## 2026-06-08 补充缺失评估记录
+
+### 问题
+
+`benchmark.db` 中 full 配置存在评估记录缺失：
+
+- 10条运行记录无评估（其中6个 sample 在其他运行中已有有效评估）
+- 2条评估记录因 LLM JSON 解析失败导致指标为 NULL（sample 10348652、10411864）
+
+### 变更
+
+新增 `scripts/backfill_evaluations.py` 脚本，功能：
+
+- 自动检测 full 配置中真正缺少有效评估的 sample（跳过已有有效评估的）
+- 删除旧的错误评估记录后重新评估
+- 支持 `--dry-run` 预览和 `--sample-ids` 指定样本
+
+### 结果
+
+- 重新评估 10348652（原 ConsistencyEvaluator JSON 解析失败）→ 成功
+- 重新评估 10411864（原 CompletenessEvaluator JSON 解析失败）→ 成功
+- 所有7项指标非空率从 99.3% 提升到 100%
+
+## 2026-06-06 run_full_benchmark.py 重构为包模块
+
+### 背景
+
+`scripts/run_full_benchmark.py` 有1858行代码，单个文件包含配置常量、指标计算、数据库操作、Pipeline执行、多变量逻辑、CLI入口等所有职责，不利于调试和维护。
+
+### 变更
+
+将单文件拆分为 `scripts/run_full_benchmark/` 包，按职责分为7个模块：
+
+| 模块 | 职责 |
+|---|---|
+| `configs.py` | 实验配置常量（EXPERIMENT_CONFIGS, ABLATION_CONFIGS, CONFIG_STAGE_GROUPS等） |
+| `metrics.py` | 质量指标计算（EMR空检查、诊断匹配、LLM统计计算等纯计算逻辑） |
+| `db_helper.py` | 数据库CRUD操作（save_run, save_evaluation, check_existing等） |
+| `pipeline_runner.py` | Pipeline执行（run_pipeline, run_evaluation, build_jsonl_entry） |
+| `multi_variant.py` | 多变量Pipeline核心逻辑（run_multi_variant及辅助函数） |
+| `runner.py` | FullBenchmarkRunner主类（组合各模块，run_batch, run_all_configs等） |
+| `__main__.py` | CLI入口（argparse + main函数） |
+
+### 兼容性
+
+- 原有调用方式 `python scripts/run_full_benchmark.py` 改为 `python -m scripts.run_full_benchmark`
+- 所有命令行参数和功能完全不变
+- 原文件 `scripts/run_full_benchmark.py` 保留未删除
+
 ## 2026-06-06 run_full_benchmark.py 中间结果检查逻辑修复
 
 ### 问题
