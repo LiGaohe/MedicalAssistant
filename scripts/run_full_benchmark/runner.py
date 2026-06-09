@@ -25,8 +25,8 @@ from scripts.run_full_benchmark.configs import (
 )
 from scripts.run_full_benchmark.metrics import compute_quality_metrics
 from scripts.run_full_benchmark.db_helper import (
-    check_existing_run, save_benchmark_run, save_benchmark_evaluation,
-    save_benchmark_summary
+    check_existing_run, check_run_has_evaluation, supplement_evaluation,
+    save_benchmark_run, save_benchmark_evaluation, save_benchmark_summary
 )
 from scripts.run_full_benchmark.pipeline_runner import (
     run_pipeline, run_evaluation, build_jsonl_entry
@@ -164,10 +164,20 @@ class FullBenchmarkRunner:
         existing_run = check_existing_run(benchmark_db, sample_id, config_key)
 
         if existing_run and not self.re_evaluate:
-            logger.info(f"[Skip] 样本已存在且成功 - sample_id={sample_id}, config={config_key}")
-            print(f"SKIP (已存在)", flush=True)
-
-            quality_metrics = compute_quality_metrics(existing_run.emr_result, sample.get("diagnosis", ""))
+            # 检查是否缺少evaluation
+            has_eval = check_run_has_evaluation(benchmark_db, existing_run.id)
+            if not has_eval:
+                logger.info(f"[补充评估] 样本已有run但缺少evaluation - sample_id={sample_id}, config={config_key}")
+                print(f"补充评估...", end=" ", flush=True)
+                quality_metrics = supplement_evaluation(benchmark_db, sample, existing_run, config_key)
+                if quality_metrics:
+                    print(f"OK (评估已补充)", flush=True)
+                else:
+                    print(f"WARN (评估补充失败)", flush=True)
+            else:
+                logger.info(f"[Skip] 样本已存在且成功 - sample_id={sample_id}, config={config_key}")
+                print(f"SKIP (已存在)", flush=True)
+                quality_metrics = compute_quality_metrics(existing_run.emr_result, sample.get("diagnosis", ""))
 
             return build_jsonl_entry(
                 sample=sample,

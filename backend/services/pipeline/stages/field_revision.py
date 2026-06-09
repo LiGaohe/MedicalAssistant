@@ -401,8 +401,6 @@ class FieldRevisionStage(PipelineStage):
                 field_key = claim["field_key"]
                 claim_text = claim["claim_text"]
 
-                # 检查该字段是否已被补丁修正（在revised_soap中与原始不同）
-                # 只清理text中的幻觉片段，且该片段对应的字段已被修正
                 if claim_text in new_text:
                     # 检查对应的字段是否仍包含该幻觉
                     field_data = section.get(field_key)

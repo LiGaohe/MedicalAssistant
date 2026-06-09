@@ -375,6 +375,71 @@ class FullBenchmarkRunner:
         ).order_by(BenchmarkRun.created_at.desc()).first()
         return existing
 
+    def _check_run_has_evaluation(self, benchmark_db, run_id: int) -> bool:
+        """检查run是否至少有1个evaluation记录"""
+        evaluation = benchmark_db.query(BenchmarkEvaluation).filter(
+            BenchmarkEvaluation.run_id == run_id
+        ).first()
+        return evaluation is not None
+
+    def _supplement_evaluation(
+        self,
+        benchmark_db,
+        sample: Dict[str, Any],
+        existing_run: BenchmarkRun,
+        config_key: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        为已有run补充evaluation记录。
+        返回quality_metrics，如果补充失败返回None。
+        """
+        sample_id = sample.get("sample_id", "")
+        emr = existing_run.emr_result
+
+        if not emr or self._is_emr_empty(emr):
+            logger.warning(f"[补充评估] EMR为空，无法补充 - sample_id={sample_id}, config={config_key}")
+            return None
+
+        dialogue_text = sample.get("dialogue_text", "")
+        if not dialogue_text:
+            logger.warning(f"[补充评估] dialogue_text为空 - sample_id={sample_id}, config={config_key}")
+            return None
+
+        # 获取key_facts：优先从当前run获取，其次从full配置run获取，最后重新提取
+        key_facts = existing_run.key_facts
+        if not key_facts:
+            full_run = benchmark_db.query(BenchmarkRun).filter(
+                BenchmarkRun.sample_id == sample_id,
+                BenchmarkRun.config_key == "full"
+            ).order_by(BenchmarkRun.created_at.desc()).first()
+            if full_run and full_run.key_facts:
+                key_facts = full_run.key_facts
+                logger.info(f"[补充评估] 从full配置run获取key_facts - sample_id={sample_id}")
+
+        if not key_facts:
+            db = self._build_main_db_session()
+            try:
+                llm_service = LLMService(db)
+                completeness_eval = LoggedCompletenessEvaluator(llm_service, [])
+                key_facts = completeness_eval.extract_key_facts(dialogue_text)
+                logger.info(f"[补充评估] key_facts提取完成 - sample_id={sample_id}")
+            except Exception as e:
+                logger.error(f"[补充评估] key_facts提取失败 - sample_id={sample_id}, error={e}")
+            finally:
+                db.close()
+
+        # 运行评估
+        eval_result, eval_error = self._run_evaluation(sample, emr, config_key, key_facts=key_facts)
+
+        if eval_result:
+            quality_metrics = self._compute_quality_metrics(emr, sample.get("diagnosis", ""))
+            self._save_benchmark_evaluation(benchmark_db, existing_run, eval_result, quality_metrics, eval_error)
+            logger.info(f"[补充评估] 完成 - sample_id={sample_id}, config={config_key}, support_rate={eval_result.get_support_rate()}")
+            return quality_metrics
+        else:
+            logger.error(f"[补充评估] 评估失败 - sample_id={sample_id}, config={config_key}, error={eval_error}")
+            return None
+
     # 缺失配置与中间结果字段的映射
     CONFIG_EMR_KEY_MAPPING = {
         "end_to_end": "emr_raw_draft",
@@ -916,10 +981,20 @@ class FullBenchmarkRunner:
         existing_run = self._check_existing_run(benchmark_db, sample_id, config_key)
 
         if existing_run and not self.re_evaluate:
-            logger.info(f"[Skip] 样本已存在且成功 - sample_id={sample_id}, config={config_key}")
-            print(f"SKIP (已存在)", flush=True)
-
-            quality_metrics = self._compute_quality_metrics(existing_run.emr_result, sample.get("diagnosis", ""))
+            # 检查是否缺少evaluation
+            has_eval = self._check_run_has_evaluation(benchmark_db, existing_run.id)
+            if not has_eval:
+                logger.info(f"[补充评估] 样本已有run但缺少evaluation - sample_id={sample_id}, config={config_key}")
+                print(f"补充评估...", end=" ", flush=True)
+                quality_metrics = self._supplement_evaluation(benchmark_db, sample, existing_run, config_key)
+                if quality_metrics:
+                    print(f"OK (评估已补充)", flush=True)
+                else:
+                    print(f"WARN (评估补充失败)", flush=True)
+            else:
+                logger.info(f"[Skip] 样本已存在且成功 - sample_id={sample_id}, config={config_key}")
+                print(f"SKIP (已存在)", flush=True)
+                quality_metrics = self._compute_quality_metrics(existing_run.emr_result, sample.get("diagnosis", ""))
 
             return self._build_jsonl_entry(
                 sample=sample,
@@ -1267,17 +1342,33 @@ class FullBenchmarkRunner:
             
             existing_configs = {}
             missing_configs = []
-            
+            configs_needing_eval = []
+
             for config_key in config_output_mapping.keys():
                 existing_run = self._check_existing_run(benchmark_db, sample_id, config_key)
                 if existing_run and not self.re_evaluate:
                     existing_configs[config_key] = existing_run
+                    # 检查是否缺少evaluation
+                    if not self._check_run_has_evaluation(benchmark_db, existing_run.id):
+                        configs_needing_eval.append(config_key)
                 else:
                     missing_configs.append(config_key)
-            
+
+            # 补充缺失的evaluation（不重新运行Pipeline）
+            if configs_needing_eval:
+                logger.info(f"[补充评估] 补充缺失evaluation - sample_id={sample_id}, configs={configs_needing_eval}")
+                for ck in configs_needing_eval:
+                    er = existing_configs[ck]
+                    print(f"  补充评估 {ck}...", end=" ", flush=True)
+                    qm = self._supplement_evaluation(benchmark_db, sample, er, ck)
+                    if qm:
+                        print(f"OK", flush=True)
+                    else:
+                        print(f"WARN (评估补充失败)", flush=True)
+
             if not missing_configs:
                 logger.info(f"[multi_variant] SKIP - 所有配置已存在 - sample_id={sample_id}")
-                print(f"SKIP (所有8个配置已存在)", flush=True)
+                print(f"SKIP (所有{len(config_output_mapping)}个配置已存在)", flush=True)
                 
                 sample_results = {}
                 for config_key, existing_run in existing_configs.items():

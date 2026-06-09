@@ -26,6 +26,77 @@ def check_existing_run(benchmark_db, sample_id: str, config_key: str) -> Optiona
     return existing
 
 
+def check_run_has_evaluation(benchmark_db, run_id: int) -> bool:
+    """检查run是否至少有1个evaluation记录"""
+    evaluation = benchmark_db.query(BenchmarkEvaluation).filter(
+        BenchmarkEvaluation.run_id == run_id
+    ).first()
+    return evaluation is not None
+
+
+def supplement_evaluation(
+    benchmark_db,
+    sample: Dict[str, Any],
+    existing_run: BenchmarkRun,
+    config_key: str
+) -> Optional[Dict[str, Any]]:
+    """
+    为已有run补充evaluation记录。
+    返回quality_metrics，如果补充失败返回None。
+    """
+    from scripts.run_full_benchmark.pipeline_runner import run_evaluation, build_main_db_session
+    from scripts.run_full_benchmark.metrics import compute_quality_metrics
+
+    sample_id = sample.get("sample_id", "")
+    emr = existing_run.emr_result
+
+    if not emr or is_emr_empty(emr):
+        logger.warning(f"[补充评估] EMR为空，无法补充 - sample_id={sample_id}, config={config_key}")
+        return None
+
+    dialogue_text = sample.get("dialogue_text", "")
+    if not dialogue_text:
+        logger.warning(f"[补充评估] dialogue_text为空 - sample_id={sample_id}, config={config_key}")
+        return None
+
+    # 获取key_facts：优先从当前run获取，其次从full配置run获取，最后重新提取
+    key_facts = existing_run.key_facts
+    if not key_facts:
+        full_run = benchmark_db.query(BenchmarkRun).filter(
+            BenchmarkRun.sample_id == sample_id,
+            BenchmarkRun.config_key == "full"
+        ).order_by(BenchmarkRun.created_at.desc()).first()
+        if full_run and full_run.key_facts:
+            key_facts = full_run.key_facts
+            logger.info(f"[补充评估] 从full配置run获取key_facts - sample_id={sample_id}")
+
+    if not key_facts:
+        from backend.services.llm.llm_service import LLMService
+        from backend.services.evaluation.benchmark_evaluator import LoggedCompletenessEvaluator
+        db = build_main_db_session()
+        try:
+            llm_service = LLMService(db)
+            completeness_eval = LoggedCompletenessEvaluator(llm_service, [])
+            key_facts = completeness_eval.extract_key_facts(dialogue_text)
+            logger.info(f"[补充评估] key_facts提取完成 - sample_id={sample_id}")
+        except Exception as e:
+            logger.error(f"[补充评估] key_facts提取失败 - sample_id={sample_id}, error={e}")
+        finally:
+            db.close()
+
+    # 运行评估
+    eval_result, eval_error = run_evaluation(sample, emr, config_key, key_facts=key_facts)
+
+    if eval_result:
+        quality_metrics = compute_quality_metrics(emr, sample.get("diagnosis", ""))
+        save_benchmark_evaluation(benchmark_db, existing_run, eval_result, quality_metrics, eval_error)
+        logger.info(f"[补充评估] 完成 - sample_id={sample_id}, config={config_key}, support_rate={eval_result.get_support_rate()}")
+        return quality_metrics
+    else:
+        logger.error(f"[补充评估] 评估失败 - sample_id={sample_id}, config={config_key}, error={eval_error}")
+        return None
+
+
 def check_intermediate_results(
     benchmark_db,
     sample_id: str,

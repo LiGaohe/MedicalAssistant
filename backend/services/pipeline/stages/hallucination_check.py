@@ -118,6 +118,10 @@ class HallucinationCheckStage(PipelineStage):
 
         # 合并为原格式输出（保持下游兼容）
         result = self._merge_section_results(section_results)
+
+        # 否定性事实保护：通过LLM用未压缩对话原文二次验证
+        result = self._reverify_negative_facts(ctx, result, combined_text)
+
         ctx.hallucination_result = result
 
         stage_time = time.time() - stage_start
@@ -175,21 +179,19 @@ class HallucinationCheckStage(PipelineStage):
         """
         section_label = self.SECTION_LABELS.get(section_name, section_name)
 
-        # 压缩transcript_section
-        compressed_section, section_dict = ctx.compress_text(transcript_section)
-        if section_dict:
-            logger.info(
-                f"章节 {section_name} 幻觉检查: transcript_section已压缩, "
-                f"原文{len(transcript_section)}字符 -> 压缩后{len(compressed_section)}字符"
-            )
-        else:
-            logger.info(f"章节 {section_name} 幻觉检查: transcript_section未压缩, 使用原文{len(transcript_section)}字符")
+        # 方向A：幻觉检查使用未压缩的对话原文
+        # 压缩后的对话片段中否定回答被编码为缩写（如"没有"→"③"），
+        # 导致LLM无法正确关联疑问和否定回答，误判否定性事实为幻觉。
+        # 使用未压缩原文让LLM直接看到否定回答，大幅降低误判概率。
+        logger.info(
+            f"章节 {section_name} 幻觉检查: 使用未压缩原文{len(transcript_section)}字符"
+        )
 
         try:
             prompt = ctx.prompt_manager.render(
                 "consistency_check_section",
-                compression_dict=section_dict,
-                transcript_section=compressed_section,
+                compression_dict=None,
+                transcript_section=transcript_section,
                 emr_section=emr_section,
                 section_name=section_label,
             )
@@ -216,7 +218,8 @@ class HallucinationCheckStage(PipelineStage):
 
             try:
                 # 关闭thinking模式：幻觉检查是模式匹配任务，不需要深度推理
-                response = ctx.llm_service.generate_stream_to_response(prompt, thinking_enabled=False, compression_dict=section_dict)
+                # 使用未压缩原文，不传compression_dict
+                response = ctx.llm_service.generate_stream_to_response(prompt, thinking_enabled=False)
                 logger.debug(f"章节 {section_name} 幻觉检查: thinking模式已禁用，使用流式处理")
                 ctx.llm_stats.record_from_response("hallucination_check", prompt, response)
                 response_text = response.text
@@ -312,6 +315,170 @@ class HallucinationCheckStage(PipelineStage):
             return "medium"
         else:
             return "low"
+
+    def _reverify_negative_facts(
+        self, ctx: PipelineContext, result: Dict[str, Any], combined_text: str
+    ) -> Dict[str, Any]:
+        """通过LLM用未压缩对话原文二次验证否定性事实。
+
+        当幻觉检查将否定性事实（如"未去医院检查"）标记为不支持时，
+        调用LLM用未压缩的对话原文判断该否定性事实是否确实不支持。
+        如果LLM判断对话原文支持该否定性事实，则从unsupported_facts中移除。
+
+        Args:
+            ctx: 管线上下文
+            result: 幻觉检查结果
+            combined_text: 原始对话文本（未压缩）
+
+        Returns:
+            修正后的幻觉检查结果
+        """
+        if not combined_text or not result.get("unsupported_facts"):
+            return result
+
+        # 筛选可能是否定性事实的unsupported条目
+        negative_candidates = []
+        other_facts = []
+        for fact_item in result["unsupported_facts"]:
+            fact_text = fact_item.get("fact", "").strip()
+            if self._is_likely_negative_fact(fact_text):
+                negative_candidates.append(fact_item)
+            else:
+                other_facts.append(fact_item)
+
+        if not negative_candidates:
+            return result
+
+        logger.info(
+            f"否定性事实二次验证: 发现 {len(negative_candidates)} 个否定性事实候选，"
+            f"调用LLM用未压缩对话原文验证"
+        )
+
+        # 构建验证提示词
+        verified_negative = self._call_llm_reverify(ctx, negative_candidates, combined_text)
+
+        # 合并结果：verified_negative中LLM确认支持的从unsupported中移除
+        still_unsupported = []
+        restored_count = 0
+        for fact_item in negative_candidates:
+            fact_text = fact_item.get("fact", "").strip()
+            if fact_text in verified_negative:
+                # LLM确认对话原文支持该否定性事实，恢复为支持状态
+                restored_count += 1
+                logger.info(
+                    f"否定性事实二次验证恢复: '{fact_text}' 经LLM确认有对话依据，"
+                    f"从幻觉列表中移除"
+                )
+            else:
+                still_unsupported.append(fact_item)
+
+        if restored_count > 0:
+            result["unsupported_facts"] = other_facts + still_unsupported
+            result["summary"]["unsupported_count"] -= restored_count
+            result["summary"]["supported_count"] += restored_count
+            total = result["summary"]["total_facts"]
+            supported = result["summary"]["supported_count"]
+            result["summary"]["support_rate"] = round(supported / total, 4) if total > 0 else 1.0
+            result["has_hallucination"] = len(result["unsupported_facts"]) > 0
+            result["severity"] = HallucinationCheckStage._determine_severity(
+                result["summary"]["support_rate"],
+                result["summary"]["unsupported_count"]
+            )
+            logger.info(
+                f"否定性事实二次验证完成: 恢复 {restored_count} 个否定性事实，"
+                f"仍不支持 {len(still_unsupported)} 个"
+            )
+
+        return result
+
+    @staticmethod
+    def _is_likely_negative_fact(fact_text: str) -> bool:
+        """判断事实文本是否可能是否定性事实。
+
+        不使用词表匹配，而是通过LLM在二次验证中判断。
+        这里只做初步筛选，将可能是否定性的条目挑出。
+        """
+        if not fact_text:
+            return False
+        # 否定性事实通常以否定词开头，或包含"否认"、"无"等模式
+        # 这是一个宽松的筛选，宁可多选不可漏选
+        negative_indicators = ["未", "没有", "无", "否认", "不曾", "未曾", "从未", "暂无", "不伴", "无其他"]
+        return any(fact_text.startswith(ind) for ind in negative_indicators)
+
+    def _call_llm_reverify(
+        self, ctx: PipelineContext, candidates: List[Dict], combined_text: str
+    ) -> set:
+        """调用LLM用未压缩对话原文验证否定性事实是否被支持。
+
+        Returns:
+            被LLM确认有对话依据的否定性事实文本集合
+        """
+        if not ctx.llm_service or ctx.debug_mode:
+            logger.warning("LLM服务不可用或调试模式，跳过否定性事实二次验证")
+            return set()
+
+        # 构建待验证事实列表
+        facts_text = "\n".join(
+            f"{i+1}. {item.get('fact', '')}"
+            for i, item in enumerate(candidates)
+        )
+
+        # 截取对话原文（避免过长）
+        transcript_for_verify = combined_text
+        max_transcript_len = 8000
+        if len(transcript_for_verify) > max_transcript_len:
+            transcript_for_verify = transcript_for_verify[:max_transcript_len]
+            logger.info(f"否定性事实二次验证: 对话原文过长，截取前{max_transcript_len}字符")
+
+        prompt = f"""## 原始对话（未压缩）
+{transcript_for_verify}
+
+## 以下否定性事实被标记为"不支持"（即幻觉）
+{facts_text}
+
+请判断上述每个否定性事实是否能在原始对话中找到依据。
+
+**关键规则**：
+- 患者的否定回答（如"没有"、"没去过"、"不疼"等）是否定性事实的依据
+- 如果对话中医生询问了某事，患者给出了否定回答，则对应的否定性事实有依据
+- 只需判断否定性事实是否有依据，不需要判断肯定性事实
+
+请输出JSON格式：
+{{
+  "verified_supported": [
+    "有依据的否定性事实原文（与输入列表中的文本完全一致）"
+  ]
+}}
+
+如果没有有依据的否定性事实，verified_supported为空数组。"""
+
+        try:
+            response = ctx.llm_service.generate_stream_to_response(
+                prompt, thinking_enabled=False, max_tokens=2048
+            )
+            ctx.llm_stats.record_from_response("negative_fact_reverify", prompt, response)
+            response_text = response.text
+            parsed = parse_json_response(response_text, "否定性事实二次验证")
+
+            if not parsed:
+                logger.warning("否定性事实二次验证: JSON解析失败，跳过验证")
+                return set()
+
+            verified = parsed.get("verified_supported", [])
+            if not isinstance(verified, list):
+                logger.warning(f"否定性事实二次验证: verified_supported格式错误, type={type(verified)}")
+                return set()
+
+            logger.info(f"否定性事实二次验证: LLM确认 {len(verified)} 个否定性事实有对话依据")
+            return set(str(v).strip() for v in verified)
+
+        except Exception as e:
+            logger.error(f"否定性事实二次验证LLM调用失败: {e}")
+            ctx.llm_stats.record_call(
+                "negative_fact_reverify", len(prompt), 0,
+                success=False, error_message=str(e),
+            )
+            return set()
 
     @staticmethod
     def _empty_result() -> Dict[str, Any]:

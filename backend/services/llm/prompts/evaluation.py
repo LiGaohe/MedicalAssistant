@@ -74,6 +74,7 @@ $emr_section
 3. **病历中没写的内容不算幻觉**——遗漏是完整性问题，不是一致性问题
 4. 只有病历中写了但对话中找不到依据的，才标记为不支持（幻觉）
 5. 对话中有但病历中没写的，不纳入本次评估
+6. **否定性事实的特殊处理**：当病历中记录了否定性事实（如"未去医院检查"、"否认XX"、"无XX"）时，必须仔细检查对话中是否有对应的否定回答（如"没有"、"没去过"、"不疼"等）。患者的否定回答是否定性事实的依据，不得将否定性事实误判为幻觉。注意对话中编码缩写可能代表否定回答（如编码字典中"没有"对应的编码），需按编码字典解读。
 
 ## 输出格式（JSON）
 只输出不支持的事实，支持的事实不需要列出。
@@ -492,6 +493,7 @@ Specific rules:
 3. **Content NOT written in the medical record is NOT hallucination** — omissions are a completeness issue, not a consistency issue
 4. Only mark as unsupported (hallucination) when the medical record states something that cannot be found in the conversation
 5. Information present in the conversation but absent from the medical record should NOT be included in this evaluation
+6. **Special handling for negative facts**: When the medical record contains negative facts (e.g., "has not been to hospital", "denies XX", "no XX"), carefully check if the conversation has corresponding negative responses (e.g., "no", "haven't been", "doesn't hurt"). A patient's negative response IS supporting evidence for a negative fact — do NOT misjudge negative facts as hallucinations. Note that encoded abbreviations in the conversation may represent negative responses (e.g., the code for "no" in the encoding dictionary); interpret them according to the encoding dictionary.
 
 ## Output format (JSON)
 Only output unsupported facts, supported facts do not need to be listed.

@@ -1,5 +1,134 @@
 # 完成状态记录
 
+## 2026-06-09 extract_benchmark_results.py IQR异常值过滤
+
+### 问题
+
+`no_term_norm`配置出现9853s极端延迟（约2.7小时），远超其他配置最大值1621s，拉高均值和标准差。`compute_config_summary`无异常值过滤。
+
+### 变更
+
+1. **修改** `scripts/extract_benchmark_results.py`
+   - `compute_config_summary()`中`elapsed_list`统计前新增IQR过滤逻辑
+   - 样本数>=4时启用：Q1=前半中位数，Q3=后半中位数，IQR=Q3-Q1
+   - 保留范围`[Q1-1.5*IQR, Q3+1.5*IQR]`，超出剔除
+   - 剔除时输出日志：剔除数量、上下界、被剔除值
+
+### 数据问题排查结论
+
+1. **no_hallucination与standard指标相同**：设计如此，两者是同一配置
+2. **recall+omission≠1**：不是bug，partial覆盖在recall中算0.5权重，omission不计partial，差距=0.5*partial/total
+3. **total_tokens≠prompt+completion**：设计问题，prompt/completion仅统计evaluation阶段，不含generation阶段token
+
+## 2026-06-09 评估补充逻辑：SKIP前检查evaluation完整性
+
+### 问题
+
+数据库中10个样本的`full`配置`BenchmarkRun`缺少对应的`BenchmarkEvaluation`记录。根因：SKIP逻辑只检查`BenchmarkRun`是否存在，不检查是否有evaluation。`python -m scripts.run_full_benchmark`使用包目录`scripts/run_full_benchmark/`，非单文件。
+
+### 变更
+
+1. **修改** `scripts/run_full_benchmark/db_helper.py`
+   - 新增 `check_run_has_evaluation()`：检查run是否至少有1个evaluation记录
+   - 新增 `supplement_evaluation()`：为已有run补充evaluation，获取key_facts（优先从当前run → full配置run → 重新提取），调用`run_evaluation`并保存结果
+
+2. **修改** `scripts/run_full_benchmark/runner.py`
+   - 导入新增的 `check_run_has_evaluation`, `supplement_evaluation`
+   - 修改 `run_single_sample()` SKIP路径：先检查evaluation，缺失则补充后再返回
+
+3. **修改** `scripts/run_full_benchmark/multi_variant.py`
+   - 导入新增的 `check_run_has_evaluation`, `supplement_evaluation`
+   - 修改 `run_multi_variant()` SKIP路径：遍历已有run检查evaluation，缺失的先补充再SKIP；修正提示信息"8个配置"→动态显示实际配置数
+
+## 2026-06-09 数据检查脚本修正与论文数据填充
+
+### 变更
+
+1. **修改** `scripts/check_benchmark_data.py`
+   - 删除"一致性评估矛盾"检查（检查7）：跳过幻觉检查的配置也应有support_rate/hallucination_rate，评估器对所有配置执行consistency评估是正确的
+   - 修复重复清理逻辑：`--fix-duplicates` 改为保留最近一条运行（原保留最早一条）
+   - 检查项从9项调整为8项
+
+2. **修改** `docs/提交/论文/量化实验结果.md`
+   - 表二（病历生成质量）：填充所有配置的实际数据，删除"未检测²"和"[待填充]⁶"标记
+   - 表三（消融实验）：填充所有消融配置数据，删除"未检测²"和"[待填充]"标记
+   - 表四（LLM调用效率）：更新为21条样本的实际数据
+   - 实验运行记录：更新为21条样本的统计
+   - 指标填充状态：筛选阶段指标标记为"已填充"
+
+3. **修改** `docs/量化评估模块/检查数据库指令.md`
+   - 检查项从9项调整为8项，删除"一致性评估矛盾"说明
+   - 修复用法说明：保留最近一条
+
+## 2026-06-09 Benchmark数据完整性检查与清理
+
+### 变更
+
+1. **新建** `scripts/check_benchmark_data.py`
+   - 8项数据完整性检查：样本量、重复运行、评估缺失、指标缺失、延迟异常、失败运行、阶段完整性、论文就绪度
+   - 支持 `--fix-duplicates` 清理重复运行（保留最近一条）
+   - 支持 `--config` 指定配置、`--latency-threshold` 自定义阈值、`--output` 保存JSON报告
+
+2. **更新** `docs/量化评估模块/检查数据库指令.md`
+   - 写入脚本用法、8项检查说明、当前数据状态、待解决问题
+
+### 执行结果
+
+- 清理104条重复运行记录（sample_id=10333432重复最多，full配置22次）
+- 清理后各配置均为21个唯一样本，无重复运行
+- full配置9/20个已完成运行缺少评估记录
+- full配置1个失败运行（sample_id=10348652, parse_error）
+- 延迟异常：sample_id=10368724耗时9854s（field_revision阶段9708s）
+
+## 2026-06-09 否定性事实遗漏修复（方向A+B）
+
+### 问题
+
+样本10333432 no_term_norm路径遗漏"未去医院检查"否定性事实。三层根因：
+
+1. 草稿生成LLM随机性：有时跳过否定性事实
+2. 幻觉检查误判：压缩对话中"没有"→"③"，LLM无法关联疑问与否定回答
+3. 字段修订删除否定性事实后无恢复机制
+
+### 变更
+
+1. **修改** `backend/services/pipeline/stages/hallucination_check.py`
+   - 方向A：`_check_section()` 跳过压缩，直接使用未压缩对话原文，LLM可看到"没有"而非"③"
+   - 方向B：新增 `_reverify_negative_facts()` 方法，幻觉检查后用LLM+未压缩原文二次验证否定性事实
+   - 新增 `_is_likely_negative_fact()` 初筛方法
+   - 新增 `_call_llm_reverify()` LLM调用方法
+   - 移除 `_protect_negative_facts()` 规则方案（硬编码否定前缀词表、否定回答词表、疑问关键词词表）
+
+2. **修改** `backend/services/pipeline/stages/field_revision.py`
+   - `_cleanup_unsupported_claims()` 移除 `combined_text` 参数和否定反转检测逻辑
+   - 移除 `_detect_negation_reversal_from_transcript()` 函数（规则方案）
+   - 移除 `_NEGATION_RESPONSES`、`_QUESTION_KEYWORDS` 常量（规则方案）
+   - 保留 `_clean_text_after_removal()` 通用文本清理函数
+
+3. **保留** `backend/services/llm/prompts/soap_generation.py` 和 `evaluation.py` 中的提示词修改
+
+### 验证结果
+
+- 样本10333432 full路径：`past_history: "未去医院检查过"` 正确记录
+- 否定性事实二次验证触发：发现2个否定性事实候选，LLM确认2个均有对话依据
+  - "未去医院检查过" 恢复
+  - "否认咽喉炎" 恢复
+
+## 2026-06-08 强化提示词反幻觉约束
+
+### 变更
+
+1. **修改** `backend/services/llm/prompts/soap_generation.py`
+   - `direct_soap_generation` 提示词：新增5条反幻觉约束（不得推断、否定性陈述须有原文依据、药物规格不得编造、诊断不得自行推断、不确定信息留空）
+   - `free_soap_generation` 提示词：新增3条约束（否定性陈述须有原文依据、药物规格不得编造、诊断确定性不得升级）
+   - `soap_structuring` 提示词：新增2条约束（否定性内容须草稿中有出现、药物检查数值须与草稿一致）
+
+### 验证结果
+
+- 样本10333432 full配置：幻觉率从0.125降至0.0，事实支持率从0.875升至1.0
+- 消除2条幻觉："曾去医院检查"、"不要上呼吸道感染"
+- 剩余3条幻觉（"暂无咽喉炎"、"上呼吸道感染"、"抗病毒药物规格"）属更深层问题，需模型能力提升
+
 ## 2026-06-08 字段修订阶段新增幻觉残留清理
 
 ### 变更

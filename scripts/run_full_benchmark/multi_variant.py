@@ -28,7 +28,8 @@ from scripts.run_full_benchmark.metrics import (
     compute_quality_metrics, compute_llm_stats_for_config, is_emr_empty
 )
 from scripts.run_full_benchmark.db_helper import (
-    check_existing_run, check_intermediate_results, save_benchmark_run,
+    check_existing_run, check_run_has_evaluation, supplement_evaluation,
+    check_intermediate_results, save_benchmark_run,
     save_benchmark_evaluation, save_benchmark_summary
 )
 from scripts.run_full_benchmark.pipeline_runner import (
@@ -413,17 +414,33 @@ def run_multi_variant(
         # 检查已有配置
         existing_configs = {}
         missing_configs = []
+        configs_needing_eval = []
 
         for config_key in CONFIG_OUTPUT_MAPPING.keys():
             existing_run = check_existing_run(benchmark_db, sample_id, config_key)
             if existing_run and not re_evaluate:
                 existing_configs[config_key] = existing_run
+                # 检查是否缺少evaluation
+                if not check_run_has_evaluation(benchmark_db, existing_run.id):
+                    configs_needing_eval.append(config_key)
             else:
                 missing_configs.append(config_key)
 
+        # 补充缺失的evaluation（不重新运行Pipeline）
+        if configs_needing_eval:
+            logger.info(f"[补充评估] 补充缺失evaluation - sample_id={sample_id}, configs={configs_needing_eval}")
+            for ck in configs_needing_eval:
+                er = existing_configs[ck]
+                print(f"  补充评估 {ck}...", end=" ", flush=True)
+                qm = supplement_evaluation(benchmark_db, sample, er, ck)
+                if qm:
+                    print(f"OK", flush=True)
+                else:
+                    print(f"WARN (评估补充失败)", flush=True)
+
         if not missing_configs:
             logger.info(f"[multi_variant] SKIP - 所有配置已存在 - sample_id={sample_id}")
-            print(f"SKIP (所有8个配置已存在)", flush=True)
+            print(f"SKIP (所有{len(CONFIG_OUTPUT_MAPPING)}个配置已存在)", flush=True)
             sample_results = _process_existing_configs(sample, existing_configs)
             all_results[sample_id] = sample_results
             continue

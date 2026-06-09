@@ -102,6 +102,12 @@
       "skillPath": "skills/executing-plans/SKILL.md",
       "computedHash": "b41c919caf1bb07fbacb0e29899ac513f9eb11cd4dd695975ad352c2c03cc4d7"
     },
+    "feynman": {
+      "source": "neurofoo/agent-skills",
+      "sourceType": "github",
+      "skillPath": "feynman/SKILL.md",
+      "computedHash": "bb8b5fcb5ab907780da8182a890a7ccb5193daa068e5d087adb907651ec3f857"
+    },
     "finishing-a-development-branch": {
       "source": "obra/superpowers",
       "sourceType": "github",

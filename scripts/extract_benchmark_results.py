@@ -195,6 +195,22 @@ class BenchmarkResultExtractor:
         llm_call_list = [r.llm_call_count for r in success_runs]
         char_count_list = [r.char_count for r in success_runs]
 
+        # IQR 异常值过滤：剔除延迟极端值
+        if len(elapsed_list) >= 4:
+            sorted_elapsed = sorted(elapsed_list)
+            q1 = statistics.median(sorted_elapsed[:len(sorted_elapsed)//2])
+            q3 = statistics.median(sorted_elapsed[(len(sorted_elapsed)+1)//2:])
+            iqr = q3 - q1
+            lower_bound = q1 - 1.5 * iqr
+            upper_bound = q3 + 1.5 * iqr
+            filtered_elapsed = [v for v in elapsed_list if lower_bound <= v <= upper_bound]
+            removed_count = len(elapsed_list) - len(filtered_elapsed)
+            if removed_count > 0:
+                logger.info(f"配置 {config_key}: IQR过滤剔除 {removed_count} 个异常延迟值，"
+                            f"范围 [{lower_bound:.1f}, {upper_bound:.1f}]s，"
+                            f"剔除值: {[round(v, 1) for v in elapsed_list if v < lower_bound or v > upper_bound]}")
+            elapsed_list = filtered_elapsed
+
         metrics["avg_elapsed_seconds"] = statistics.mean(elapsed_list) if elapsed_list else None
         metrics["std_elapsed_seconds"] = statistics.stdev(elapsed_list) if len(elapsed_list) > 1 else None
         metrics["min_elapsed_seconds"] = min(elapsed_list) if elapsed_list else None
