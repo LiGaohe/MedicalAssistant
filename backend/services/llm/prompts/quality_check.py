@@ -34,6 +34,29 @@ $draft_emr
 - 医生明确要求的复诊安排是否记录？
 - 医生明确给出的健康教育/注意事项是否记录？
 
+### 4. 既往就诊与用药史
+- 对话中提及的既往就诊次数是否记录？
+- 既往用药名称及疗效评价是否记录？
+- 既往对某种药物无效的陈述是否记录？
+
+### 5. 体温与量化数据
+- 对话中提及的体温数值是否记录？
+- 发热持续时间是否记录？
+- 呕吐/腹泻次数和性状是否记录？
+
+### 6. 否定性事实
+- 患者明确否认的症状是否记录到denied_symptoms？
+- 患者明确否认的过敏史是否记录？
+- 外院检查结果正常（否定性结果）是否记录？
+
+### 7. 外院检查与体格检查
+- 对话中提及的外院检查结果是否记录？
+- 对话中提及的体格检查发现是否记录？
+
+### 8. 进食与营养状况
+- 对话中提及的进食情况是否记录？
+- 对话中提及的饮食变化是否记录？
+
 ## 输出格式
 请严格按照以下JSON格式输出：
 {
@@ -144,6 +167,8 @@ $transcript
         template="""你是一个医疗病历修订专家。请根据核查问题清单，对SOAP病历草稿做**定点修订**。
 你只需要输出需要修改的字段（补丁），不需要输出完整的SOAP。
 
+**注意：无证据声明（unsupported_claims）已由程序自动删除，你不需要处理。你只需处理以下三类问题。**
+
 ## 需要修订的字段（从核查问题中定位）
 $affected_fields
 
@@ -155,32 +180,19 @@ $transcript
 
 ## 修订规则
 
-### 1. unsupported claim → 区分两种情况处理
-
-#### 1a. 完全无依据（对话中找不到任何相关内容）→ 必须清空
-- 将该字段的value设为空字符串""，source_turn_indices设为[]
-- **禁止**编造新内容填入清空后的字段
-- **禁止**否定翻转（如将"未去医院"改为"曾去医院"是严重错误）
-- 如果同一字段中既有有依据的内容又有无依据的内容，只保留有依据的部分，删除无依据的部分
-
-#### 1b. 确定性被高估（对话中有相关内容但表述被强化）→ 弱化为对话原文的强度
-- 如果对话中说"考虑XXX"但病历写了"确诊XXX"，应改为"考虑XXX"
-- 如果对话中说"可能是XXX"但病历写了"XXX"，应改为"可能XXX"
-- 弱化时必须使用对话中的原文表述，不得自行编造弱化措辞
-
-### 2. missing item → 如果对话有依据则补充
+### 1. missing item → 如果对话有依据则补充
 - 从对话中找到对应原文，填入对应字段的value
 - 补充的内容应与对话原文一致，不得推断或编造对话中未提及的内容
 - source_turn_indices填入对话中的turn序号
 - 如果对话中确实没有依据，则不输出该字段的补丁
 
-### 3. 确定性错误 → 降级
+### 2. 确定性错误 → 降级
 - 将diagnosis_type降级：explicit_diagnosis → suspected_diagnosis → symptom_based_assessment
 - 将certainty_level降级：high → medium → low
 - 降级时只修改diagnosis_type和certainty_level字段，**不要修改诊断文本本身**
 - 如果需要修改assessment_items中的某一项，只改diagnosis_type和certainty_level，其余字段原样保留
 
-### 4. hard_rule_violation → 根据描述修正
+### 3. hard_rule_violation → 根据描述修正
 - 按违规描述修正对应字段
 - 修正时同样不得引入对话中没有的新内容
 
@@ -190,14 +202,6 @@ $transcript
 ```json
 {
   "patches": [
-    {
-      "path": "subjective.past_history",
-      "value": {"value": "", "source_turn_indices": []}
-    },
-    {
-      "path": "assessment.diagnosis",
-      "value": {"value": "考虑上呼吸道感染", "source_turn_indices": [13]}
-    },
     {
       "path": "assessment.assessment_items",
       "value": [{"text": "考虑上呼吸道感染", "certainty_level": "medium", "source_turn_indices": [13], "diagnosis_type": "suspected_diagnosis"}]
@@ -214,9 +218,10 @@ $transcript
 ### 注意事项
 - 只输出需要修改的字段，未涉及的字段不要输出
 - value的格式必须与SOAP草稿中对应字段的格式一致（含value和source_turn_indices）
-- 完全无依据的内容必须清空value，不得编造新内容；确定性被高估的内容弱化为对话原文表述
 - 如果某个问题不需要修改（如对话中确实没有依据补充遗漏项），则不输出对应补丁
-- 如果没有任何需要修改的字段，输出空数组：{"patches": []}""",
+- 如果没有任何需要修改的字段，输出空数组：{"patches": []}
+- **严禁重写整份SOAP，只做最小化定点修订**
+- **严禁引入对话中没有的新内容**""",
         required_vars=["affected_fields", "issues_json", "transcript"]
     )
 

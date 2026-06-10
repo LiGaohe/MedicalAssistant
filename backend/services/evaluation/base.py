@@ -74,8 +74,13 @@ class BaseEvaluator(ABC):
         return True
         
     def _format_emr_content(self, emr_content: Dict[str, Any]) -> str:
+        """将EMR JSON格式化为评估器可读的文本。
+
+        同时输出章节概要(text)和各子字段的详细内容(value)，
+        确保评估器能看到完整信息，避免因只看到概要而误判遗漏。
+        """
         sections = []
-        
+
         section_configs = {
             "subjective": {
                 "label": "【主观资料(S)】",
@@ -94,30 +99,30 @@ class BaseEvaluator(ABC):
                 "subfields": ["treatment", "advice"]
             }
         }
-        
+
         for section_key, config in section_configs.items():
             if section_key not in emr_content:
                 continue
-                
+
             sec = emr_content[section_key]
             if not isinstance(sec, dict):
                 continue
-            
+
+            lines = [config["label"]]
+
+            # 输出章节概要（如有）
             text = sec.get("text", "")
-            
-            if not text:
-                lines = [config["label"]]
-                has_content = False
-                for subfield in config["subfields"]:
-                    if subfield in sec and isinstance(sec[subfield], dict):
-                        val = sec[subfield].get("value", "")
-                        if val and isinstance(val, str) and val.strip():
-                            lines.append(f"  [{subfield}]: {val.strip()}")
-                            has_content = True
-                if has_content:
-                    sections.append("\n".join(lines))
-            else:
-                if text.strip():
-                    sections.append(f"{config['label']}\n{text.strip()}")
-        
+            if text and isinstance(text, str) and text.strip():
+                lines.append(f"  [概要]: {text.strip()}")
+
+            # 始终输出各子字段的详细内容
+            for subfield in config["subfields"]:
+                if subfield in sec and isinstance(sec[subfield], dict):
+                    val = sec[subfield].get("value", "")
+                    if val and isinstance(val, str) and val.strip():
+                        lines.append(f"  [{subfield}]: {val.strip()}")
+
+            if len(lines) > 1:
+                sections.append("\n".join(lines))
+
         return "\n\n".join(sections)

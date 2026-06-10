@@ -13,12 +13,14 @@ class ClaimVerificationStage(PipelineStage):
     """后置核查阶段：对SOAP草稿进行Checklist核查、硬规则核查和确定性核查。
 
     幻觉检查阶段已覆盖S/O/A/P全部章节的事实支持检测，
+    并在检查后立刻程序化删除了幻觉内容。
     本阶段不再重复Claim核查，仅做幻觉检查不覆盖的核查项：
     - Checklist遗漏核查
     - 硬规则核查
     - 确定性核查
+    - 幻觉删除遗漏补充检查
 
-    幻觉检查的 unsupported_facts 直接转换为 unsupported_claims 供下游字段修订使用。
+    幻觉检查的 unsupported_claims 仅用于记录，不再触发删除（已提前完成）。
     """
 
     def stage_name(self) -> str:
@@ -409,3 +411,5 @@ class ClaimVerificationStage(PipelineStage):
             f"转写长度 {len(cropped)} 字符 (完整转写 {len(ctx.combined_text)} 字符)"
         )
         return cropped
+
+

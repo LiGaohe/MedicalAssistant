@@ -1,38 +1,13 @@
 import copy
 import json
-import re
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Set
 
 from ..base import PipelineContext, PipelineStage
 from ..utils import parse_json_response
 from ..debug_interactor import DebugInteractor
+from ..stages.hallucination_check import _delete_unsupported_from_emr
 from ....utils.logger import logger
-
-
-def _clean_text_after_removal(text: str) -> str:
-    """清理删除幻觉文本后产生的多余标点和空格。
-
-    例如："患者为9岁小儿。。今晨" -> "患者为9岁小儿。今晨"
-    例如："患者为9岁小儿。（具体结果未提及）。今晨" -> "患者为9岁小儿。今晨"
-    """
-    # 删除空括号或仅含解释性短语的括号（幻觉删除后的残留）
-    text = re.sub(r'[（(]\s*(具体结果未提及|具体结果不详|未提及|不详)?\s*[）)]', '', text)
-    # 合并连续的中文句号为单个
-    text = re.sub(r'。+', '。', text)
-    # 合并连续的中文逗号为单个
-    text = re.sub(r'，+', '，', text)
-    # 删除句号前的空格
-    text = re.sub(r'\s+。', '。', text)
-    # 删除逗号前的空格
-    text = re.sub(r'\s+，', '，', text)
-    # 删除句号后紧跟逗号的情况
-    text = re.sub(r'。，', '，', text)
-    # 删除逗号后紧跟句号的情况
-    text = re.sub(r'，。', '。', text)
-    # 合并多余空格
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
 
 
 class FieldRevisionStage(PipelineStage):
@@ -40,6 +15,12 @@ class FieldRevisionStage(PipelineStage):
 
     使用补丁模式：LLM只输出需要修改的字段（补丁），而非完整SOAP JSON。
     代码将补丁应用到原始SOAP上，避免LLM重复输出未变更字段。
+
+    处理流程：
+    1. unsupported_claims二次验证：用完整转写验证疑似幻觉，确认后才删除
+    2. missing_items补充：LLM补丁模式补充遗漏内容
+    3. hard_rule_violations、certainty_errors修正
+    4. schema确定性约束校验
     """
 
     # SOAP必须存在的四个section
@@ -54,6 +35,7 @@ class FieldRevisionStage(PipelineStage):
 
         draft_emr = ctx.emr_draft
         issues = ctx.verification_issues or {}
+        combined_text = ctx.combined_text
 
         if not draft_emr:
             logger.error("draft_emr为空，无法进行字段修订")
@@ -73,30 +55,62 @@ class FieldRevisionStage(PipelineStage):
         revised_soap = copy.deepcopy(draft_emr)
 
         if total_issues_count == 0:
-            logger.info("核查问题清单为空，跳过LLM修订，直接执行schema校验")
+            logger.info("核查问题清单为空，跳过修订，直接执行schema校验")
         else:
-            logger.info(
-                f"核查问题清单非空: 无证据={unsupported_count}, "
-                f"遗漏={missing_count}, "
-                f"硬规则违规={hard_rule_count}, 确定性错误={certainty_error_count}，"
-                f"执行LLM字段级修订（补丁模式）"
+            # ---- Step 1: unsupported_claims二次验证与删除 ----
+            # 用完整转写验证疑似幻觉，确认后才删除
+            if unsupported_count > 0:
+                logger.info(
+                    f"Step 1: 对 {unsupported_count} 条疑似幻觉进行二次验证"
+                )
+                confirmed_unsupported = self._reverify_unsupported_claims(
+                    ctx, issues.get("unsupported_claims", []), combined_text
+                )
+                if confirmed_unsupported:
+                    # 程序化删除确认的幻觉内容
+                    revised_soap, delete_count = _delete_unsupported_from_emr(
+                        revised_soap, confirmed_unsupported
+                    )
+                    if delete_count > 0:
+                        revised = True
+                        logger.info(
+                            f"幻觉二次验证完成: 确认 {len(confirmed_unsupported)} 条幻觉，"
+                            f"已删除 {delete_count} 条内容"
+                        )
+                    # 更新issues中的unsupported_claims为确认后的列表
+                    issues["unsupported_claims"] = confirmed_unsupported
+                else:
+                    logger.info("幻觉二次验证完成: 所有疑似幻觉均有依据，无需删除")
+                    issues["unsupported_claims"] = []
+
+            # ---- Step 2: LLM补丁模式修订（处理非幻觉类问题）----
+            non_hallucination_issues = {
+                "missing_items": issues.get("missing_items", []),
+                "hard_rule_violations": issues.get("hard_rule_violations", []),
+                "certainty_errors": issues.get("certainty_errors", []),
+            }
+            non_hallucination_count = (
+                missing_count + hard_rule_count + certainty_error_count
             )
 
-            patches = self._call_llm_patch_revision(ctx, draft_emr, issues)
-            if patches:
-                revised_soap = self._apply_patches(revised_soap, patches)
-                revised = True
-                logger.info(f"LLM字段级修订完成，应用了 {len(patches)} 个补丁")
+            if non_hallucination_count > 0:
+                logger.info(
+                    f"Step 2: 非幻觉类问题: 遗漏={missing_count}, "
+                    f"硬规则违规={hard_rule_count}, "
+                    f"确定性错误={certainty_error_count}，"
+                    f"执行LLM字段级修订（补丁模式）"
+                )
+                patches = self._call_llm_patch_revision(
+                    ctx, revised_soap, non_hallucination_issues
+                )
+                if patches:
+                    revised_soap = self._apply_patches(revised_soap, patches)
+                    revised = True
+                    logger.info(f"LLM字段级修订完成，应用了 {len(patches)} 个补丁")
+                else:
+                    logger.warning("LLM字段级修订未返回有效补丁，使用当前草稿进入schema校验")
             else:
-                logger.warning("LLM字段级修订未返回有效补丁，使用原始草稿进入schema校验")
-
-            # 基于unsupported_claims同步修正残留幻觉内容
-            revised_soap, cleanup_count = self._cleanup_unsupported_claims(
-                revised_soap, issues
-            )
-            if cleanup_count > 0:
-                revised = True
-                logger.info(f"幻觉残留清理完成，修正了 {cleanup_count} 处")
+                logger.info("Step 2: 无非幻觉类问题，跳过LLM补丁修订")
 
         # ---- schema确定性约束校验 ----
         revised_soap = self._apply_schema_constraints(revised_soap)
@@ -338,96 +352,6 @@ class FieldRevisionStage(PipelineStage):
         logger.info(f"成功应用 {applied_count}/{len(patches)} 个补丁")
         return result
 
-    # ---- 幻觉残留清理 ----
-    @staticmethod
-    def _cleanup_unsupported_claims(
-        revised_soap: dict, issues: dict
-    ) -> tuple:
-        """基于unsupported_claims清理EMR中text汇总字段的残留幻觉内容。
-
-        当幻觉检查发现某条声明不支持时，LLM补丁可能只修正了对应字段，
-        但同一section的text汇总字段中可能仍残留该幻觉内容。
-        此方法只在text字段中删除已确认被补丁修正的字段对应的幻觉片段。
-
-        安全策略：
-        - 只处理text汇总字段（不是value字段），因为text是其他字段的汇总
-        - 只删除unsupported_claims中soap_field对应的幻觉片段
-        - 只在补丁已修正了该soap_field时才清理text
-
-        Returns:
-            (revised_soap, cleanup_count): 修正后的SOAP和清理次数
-        """
-        result = copy.deepcopy(revised_soap)
-        cleanup_count = 0
-
-        unsupported_claims = issues.get("unsupported_claims", [])
-        if not unsupported_claims:
-            return result, cleanup_count
-
-        # 按section分组unsupported_claims
-        section_claims = {}
-        for claim in unsupported_claims:
-            soap_field = claim.get("soap_field", "")
-            claim_text = claim.get("claim_text", "").strip()
-            if not soap_field or not claim_text or len(claim_text) < 2:
-                continue
-            # 解析soap_field: "section.field"
-            parts = soap_field.split(".")
-            if len(parts) < 2:
-                continue
-            section_name = parts[0]
-            field_key = parts[1]
-            if section_name not in section_claims:
-                section_claims[section_name] = []
-            section_claims[section_name].append({
-                "field_key": field_key,
-                "claim_text": claim_text,
-            })
-
-        # 对每个section，检查text字段是否包含幻觉片段
-        for section_name, claims in section_claims.items():
-            section = result.get(section_name, {})
-            if not isinstance(section, dict):
-                continue
-
-            text_value = section.get("text", "")
-            if not isinstance(text_value, str) or not text_value.strip():
-                continue
-
-            modified = False
-            new_text = text_value
-
-            for claim in claims:
-                field_key = claim["field_key"]
-                claim_text = claim["claim_text"]
-
-                if claim_text in new_text:
-                    # 检查对应的字段是否仍包含该幻觉
-                    field_data = section.get(field_key)
-                    if isinstance(field_data, dict):
-                        field_value = field_data.get("value", "")
-                    else:
-                        field_value = ""
-
-                    # 如果对应字段的value中已不包含该幻觉，说明已被补丁修正
-                    # 此时可以安全地从text中删除
-                    if claim_text not in field_value:
-                        new_text = new_text.replace(claim_text, "")
-                        modified = True
-                        cleanup_count += 1
-                        logger.info(
-                            f"幻觉残留清理: {section_name}.text, "
-                            f"删除幻觉片段 '{claim_text[:50]}'"
-                        )
-
-            if modified:
-                new_text = _clean_text_after_removal(new_text)
-                result[section_name]["text"] = new_text
-
-        if cleanup_count > 0:
-            logger.info(f"幻觉残留清理: 共清理 {cleanup_count} 处残留内容")
-        return result, cleanup_count
-
     # ---- schema确定性约束校验 ----
     def _apply_schema_constraints(self, soap: dict) -> dict:
         """对SOAP执行确定性schema约束校验，确保必填字段和安全性约束。"""
@@ -476,3 +400,115 @@ class FieldRevisionStage(PipelineStage):
                         break
 
         return soap
+
+    # ---- 幻觉二次验证 ----
+    def _reverify_unsupported_claims(
+        self,
+        ctx: PipelineContext,
+        unsupported_claims: List[Dict],
+        combined_text: str,
+    ) -> List[Dict]:
+        """用完整转写二次验证疑似幻觉，返回确认的幻觉列表。
+
+        Args:
+            ctx: 管线上下文
+            unsupported_claims: 疑似幻觉列表（从幻觉检查阶段传递）
+            combined_text: 完整对话原文
+
+        Returns:
+            确认的幻觉列表（经LLM验证后确实无依据的事实）
+        """
+        if not unsupported_claims or not combined_text:
+            return []
+
+        if not ctx.llm_service or ctx.debug_mode:
+            logger.warning("LLM服务不可用或调试模式，跳过幻觉二次验证，保留所有疑似幻觉")
+            return unsupported_claims
+
+        # 构建待验证事实列表
+        facts_text = "\n".join(
+            f"{i+1}. [{claim.get('soap_section', '?')}] {claim.get('claim_text', '')}"
+            for i, claim in enumerate(unsupported_claims)
+        )
+
+        # 截取对话原文（避免过长）
+        transcript_for_verify = combined_text
+        max_transcript_len = 8000
+        if len(transcript_for_verify) > max_transcript_len:
+            transcript_for_verify = transcript_for_verify[:max_transcript_len]
+            logger.info(f"幻觉二次验证: 对话原文过长，截取前{max_transcript_len}字符")
+
+        prompt = f"""## 完整对话原文
+{transcript_for_verify}
+
+## 以下事实被标记为"疑似幻觉"（在裁剪后的转写中未找到依据）
+{facts_text}
+
+请判断上述每个事实是否能在完整对话中找到依据。
+
+**关键规则**：
+- 患者的回答（包括否定回答如"没有"、"没去过"、"不疼"等）是事实的依据
+- 医生的诊断判断、用药建议、检查建议等也是事实的依据
+- 如果对话中能找到与事实内容匹配或语义相近的表述，则该事实有依据
+- 只需判断事实是否有依据，不需要判断依据是否充分
+
+请输出JSON格式：
+{{
+  "confirmed_hallucinations": [
+    {{
+      "index": 事实编号（对应输入列表中的序号）,
+      "reasoning": "简短原因（不超过30字）"
+    }}
+  ]
+}}
+
+如果没有确认的幻觉（所有事实均有依据），confirmed_hallucinations为空数组。"""
+
+        try:
+            response = ctx.llm_service.generate_stream_to_response(
+                prompt, thinking_enabled=False, max_tokens=2048
+            )
+            ctx.llm_stats.record_from_response("hallucination_reverify", prompt, response)
+            response_text = response.text
+            parsed = parse_json_response(response_text, "幻觉二次验证")
+
+            if not parsed:
+                logger.warning("幻觉二次验证: JSON解析失败，保留所有疑似幻觉")
+                return unsupported_claims
+
+            confirmed_indices = parsed.get("confirmed_hallucinations", [])
+            if not isinstance(confirmed_indices, list):
+                logger.warning(f"幻觉二次验证: confirmed_hallucinations格式错误, type={type(confirmed_indices)}")
+                return unsupported_claims
+
+            # 提取确认的幻觉
+            confirmed_list = []
+            restored_count = 0
+            for i, claim in enumerate(unsupported_claims):
+                is_confirmed = any(
+                    item.get("index") == i + 1
+                    for item in confirmed_indices
+                    if isinstance(item, dict)
+                )
+                if is_confirmed:
+                    confirmed_list.append(claim)
+                else:
+                    restored_count += 1
+                    logger.info(
+                        f"幻觉二次验证恢复: '{claim.get('claim_text', '')[:50]}' "
+                        f"经LLM确认有对话依据，保留"
+                    )
+
+            logger.info(
+                f"幻觉二次验证完成: 确认 {len(confirmed_list)} 条幻觉，"
+                f"恢复 {restored_count} 条有依据的事实"
+            )
+            return confirmed_list
+
+        except Exception as e:
+            logger.error(f"幻觉二次验证LLM调用失败: {e}")
+            ctx.llm_stats.record_call(
+                "hallucination_reverify", len(prompt), 0,
+                success=False, error_message=str(e),
+            )
+            return unsupported_claims

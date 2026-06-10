@@ -1,5 +1,258 @@
 # 完成状态记录
 
+## 2026-06-10 修复评估器误判 + 增强草稿生成提示词
+
+### 问题根因
+
+遗漏率28.6%中约一半是评估器误判。`_format_emr_content`在`text`非空时只输出`text`概要，不输出subfield详细内容。评估器LLM看不到`history_present_illness.value`中的完整信息，误判为遗漏。
+
+### 修改文件
+
+1. `backend/services/evaluation/base.py` — `_format_emr_content`：始终同时输出`text`概要和subfield详细内容
+2. `backend/services/llm/prompts/soap_generation.py` — `free_soap_generation`和`direct_soap_generation`：增加完整性要求（既往就诊史、体温数据、否定性事实、进食情况等）
+3. `backend/services/llm/prompts/quality_check.py` — `checklist_verification`：检查清单从3项扩展到8项（新增既往就诊与用药史、体温与量化数据、否定性事实、外院检查、进食状况）
+
+### 预期效果
+
+- 评估器误判减少：EMR中已有内容不再被标记为遗漏
+- 草稿生成完整性提升：提示词明确要求覆盖既往就诊史、体温等易遗漏信息
+- 后置核查遗漏检测召回率提升：checklist从3项扩展到8项
+
+## 2026-06-10 幻觉二次验证移至修订阶段 — 测试验证
+
+### 测试结果
+
+sample_id=10368724（之前遗漏率从5.9%上升至38.9%的样本）：
+
+| 指标 | 旧流程 (run_id=302) | 误删问题 (run_id=304) | 新流程 (run_id=306) |
+|---|---|---|---|
+| 幻觉率 | 0.10 | 0.00 | 0.00 |
+| 支持率 | 0.90 | 1.00 | 1.00 |
+| 遗漏率 | 0.059 | 0.389 | 0.286 |
+| 召回率 | 0.853 | 0.528 | 0.690 |
+
+### 二次验证恢复记录
+
+- "每次上呼吸道感染均服用同一种头孢类药物" → 经LLM确认有对话依据，保留
+- "患者已服用思密达和金双歧" → 经LLM确认有对话依据，保留
+
+### 遗漏率仍偏高的原因分析
+
+遗漏率从38.9%降至28.6%是二次验证的功劳，但剩余28.6%**不是幻觉误删导致**，而是草稿生成阶段就没写入。
+
+6条none遗漏事实（草稿未写入）：
+1. 已就诊三次，服用头孢及祛痰药物，效果不佳（high）
+2. 每次感冒均使用头孢，效果不好（medium）
+3. 免疫力差，经常感冒，家中两孩交叉感染（medium）
+4. 否认过敏史（low）
+5. 乡镇医院检查咽喉无异常（medium）
+6. 发烧持续3-4天，体温37.3-38.2度（high）
+7. 进食少，仅喝两次奶粉（medium）
+
+2条partial遗漏：
+- 主诉病史链只写了部分（上火零食→喉咙痛→发烧→拉肚子）
+- 呕吐/腹泻缺少次数和性状
+
+### 结论
+
+幻觉二次验证移至修订阶段的目标已达成：有依据的事实不再被误删。剩余遗漏率是草稿生成阶段的完整性问题，需从生成阶段或后置核查的遗漏补充能力入手。
+
+## 2026-06-10 幻觉二次验证移至修订阶段
+
+### 问题
+
+幻觉检查阶段使用裁剪后的转写文本（基于 `source_turn_indices` + buffer=2），仍可能丢失关键上下文，导致有依据的事实被误判为幻觉并立即删除。
+
+### 修改
+
+1. `backend/services/pipeline/stages/hallucination_check.py`
+   - 将裁剪缓冲区 buffer 从 1 增加到 2
+   - **移除立即删除逻辑**：不再在幻觉检查阶段立即删除 unsupported_facts
+   - **移除二次验证逻辑**：删除 `_reverify_all_unsupported` 和 `_call_llm_reverify` 方法
+   - 只标记 unsupported_facts 并传递给修订阶段
+
+2. `backend/services/pipeline/stages/field_revision.py`
+   - 导入 `_delete_unsupported_from_emr` 函数
+   - 新增 `_reverify_unsupported_claims` 方法：用完整转写二次验证疑似幻觉
+   - 修订阶段流程变更：
+     - Step 1: unsupported_claims 二次验证 → 确认后才删除
+     - Step 2: missing_items 补充 → LLM补丁模式
+     - Step 3: schema约束校验
+
+### 设计决策
+
+将幻觉二次验证移至修订阶段的优势：
+1. **集中处理**：所有"需要验证/修订"的内容都在修订阶段处理
+2. **更完整上下文**：修订阶段使用完整转写而非裁剪后的转写
+3. **避免误删后再补**：之前出现过幻觉删除后遗漏检查又补回的问题
+4. **减少LLM调用**：二次验证可以和遗漏修订合并考虑（虽然目前仍是独立调用）
+
+流程变更：
+- 旧流程：幻觉检查 → 立即删除 → 后置核查 → 修订（只处理遗漏）
+- 新流程：幻觉检查 → 标记疑似幻觉 → 后置核查 → 修订（二次验证+删除+补充遗漏）
+
+## 2026-06-10 修复评估逻辑：consistency_combined_check 添加原始对话证据
+
+### 问题
+
+Benchmark评估中，`consistency_combined_check`模板仅用`key_facts`（摘要）作为证据来源判断事实是否支持。`key_fact_extraction`只提取9类关键事实（主诉、症状、既往史、检查、诊断、治疗等），遗漏饮食细节、安慰性语句、医学常识等类型。导致病历中写了但key_facts未提取的事实被误判为"不支持"。
+
+具体案例：
+- "昨天晚上喝了两次奶粉" — 饮食细节不在9类关键事实中
+- "看症状问题不大，不用太担心" — 安慰性语句不属于诊断/建议
+- "普通腹泻大概需要一周到两周才能好" — 医学常识不属于诊断/治疗
+
+### 修改
+
+1. `backend/services/llm/prompts/evaluation.py`
+   - `consistency_combined_check`中文模板：添加`$transcript`变量，新增"证据来源优先级"规则（先查key_facts，无对应条目时必须查原始对话）
+   - `consistency_combined_check`英文模板：同上
+   - `required_vars`从`["key_facts", "emr_content"]`改为`["transcript", "key_facts", "emr_content"]`
+2. `backend/services/evaluation/benchmark_evaluator.py`
+   - `LoggedConsistencyEvaluator.evaluate()`：`consistency_combined_check`调用添加`transcript=transcript`参数
+
+### 设计决策
+
+- 选择方案A（添加原始对话）而非方案B（拆分两次调用）或方案C（扩展提取类别）
+- 方案A改动最小，直接解决根因：LLM可交叉验证key_facts和原始对话
+- 方案B更准确但多一次LLM调用
+- 方案C无法穷举所有可能类别，治标不治本
+
+## 2026-06-10 移除幻觉删除遗漏检查
+
+### 问题
+
+幻觉删除遗漏检查(`_check_hallucination_deletion_omissions`)将幻觉检查已正确删除的内容误判为"有对话依据的遗漏"，补回missing_items后，field_revision LLM补丁在补充时改写/添加了对话中没有的新内容，导致最终病历产生幻觉。
+
+根因链条：幻觉删除 → 遗漏检查误判"有依据" → missing_items → LLM补丁补充时添加新内容 → 评估检测到幻觉。
+
+证据：样本10368724的past_history被删后，遗漏检查补回，LLM补丁改写为"儿童免疫力比较差，经常会上呼吸道感染"（添加了"免疫力比较差"），评估标记为幻觉。
+
+### 修改
+
+1. `backend/services/pipeline/stages/claim_verification.py`
+   - 移除步骤D `_check_hallucination_deletion_omissions()` 调用
+   - 移除方法 `_check_hallucination_deletion_omissions()`、`_collect_deleted_contents()`、`_llm_check_deletion_omissions()`
+2. `backend/services/pipeline/stages/hallucination_check.py`
+   - 移除 `ctx.emr_before_hallucination_deletion` 快照保存逻辑
+3. `backend/services/pipeline/base.py`
+   - 移除 PipelineContext 的 `emr_before_hallucination_deletion` 字段
+4. `backend/services/llm/prompts/quality_check.py`
+   - 移除 `hallucination_deletion_omission_check` 提示词模板
+
+### 管线流程变更
+
+- 旧：幻觉检查(即时删除) → 后置核查(含遗漏补充检查) → 字段修订(仅补丁)
+- 新：幻觉检查(即时删除) → 后置核查(无遗漏补充检查) → 字段修订(仅补丁)
+
+### 设计决策
+
+- 移除遗漏检查而非修复 → 遗漏检查LLM误判率高，将已正确删除的幻觉内容补回，弊大于利
+- 幻觉检查已有否定性事实二次验证 → 误删概率低，遗漏检查的收益不抵风险
+
+## 2026-06-10 幻觉即时删除+遗漏补充检查
+
+### 问题
+
+unsupported_claims程序化删除在field_revision阶段执行，删除幻觉后可能遗漏有依据事实，且删除时机过晚（下游阶段看到的草稿仍含幻觉）。
+
+### 修改
+
+1. `backend/services/pipeline/stages/hallucination_check.py`
+   - 新增模块级函数 `_delete_unsupported_from_emr()`、`_clean_text_after_removal()`：从field_revision迁移，逻辑不变
+   - `execute()` 末尾：幻觉检查完成后立刻调用 `_delete_unsupported_from_emr` 删除幻觉内容
+   - 保存删除前快照到 `ctx.emr_before_hallucination_deletion`（供下游遗漏检查使用）
+2. `backend/services/pipeline/stages/claim_verification.py`
+   - 新增步骤D `_check_hallucination_deletion_omissions()`：对比删除前后emr，收集变更内容，调用LLM判断是否有有依据事实被误删
+   - 新增 `_collect_deleted_contents()`：对比前后emr收集被删除/缩短的字段
+   - 新增 `_llm_check_deletion_omissions()`：LLM判断被删内容是否有对话依据，有则补充到missing_items
+   - 遗漏项标记 `source: "hallucination_deletion_omission"`，与常规missing_items区分
+3. `backend/services/pipeline/stages/field_revision.py`
+   - 移除 `_delete_unsupported_claims()` 方法（已迁移到hallucination_check）
+   - 移除 `_clean_text_after_removal()` 函数（同上）
+   - Step1改为仅记录unsupported_claims数量（已在幻觉检查阶段删除）
+4. `backend/services/pipeline/base.py`
+   - PipelineContext新增 `emr_before_hallucination_deletion` 字段
+5. `backend/services/llm/prompts/quality_check.py`
+   - 新增 `hallucination_deletion_omission_check` 模板：LLM判断被删内容是否有对话依据
+
+### 管线流程变更
+
+- 旧：幻觉检查 → 后置核查 → 字段修订(删除幻觉+补丁)
+- 新：幻觉检查(即时删除幻觉) → 后置核查(含遗漏补充检查) → 字段修订(仅补丁)
+
+### 设计决策
+
+- 幻觉删除提前到幻觉检查阶段 → 下游阶段看到已清理草稿，避免幻觉内容影响核查判断
+- 遗漏补充检查用LLM而非规则 → 删除内容是否有依据需语义理解，规则无法覆盖
+- 保留unsupported_claims在verification_issues中 → 记录用途，不触发删除
+
+## 2026-06-10 field_revision补丁模式"只删除不添加"修复
+
+### 问题
+
+field_revision LLM补丁模式修复幻觉时重写字段值，引入新无依据事实。导致full幻觉率(4.0%)反超standard(3.1%)。
+
+### 修改
+
+1. `backend/services/pipeline/stages/field_revision.py`
+   - 新增 `_delete_unsupported_claims` 方法：程序化删除幻觉内容（只删除不添加），处理value字段和text汇总字段
+   - 修改 `execute()` 流程：Step1程序化删除unsupported_claims → Step2 LLM补丁仅处理非幻觉类问题（missing_items/certainty_errors/hard_rule_violations）
+   - 移除旧 `_cleanup_unsupported_claims` 方法（功能已被新方法替代）
+2. `backend/services/llm/prompts/quality_check.py`
+   - `field_revision_patch` 提示词移除unsupported_claims处理规则（规则1），仅保留missing_item/确定性错误/hard_rule_violation三类
+   - 添加说明：unsupported_claims已由程序自动删除，LLM不需处理
+
+### 设计决策
+
+- unsupported_claims由代码程序化删除，不经过LLM → 避免LLM重写时引入新无依据事实
+- 删除后清空source_turn_indices → 无法确定剩余内容来源
+- 数组类型字段（如assessment_items）暂不支持程序化删除，记录警告
+
+## 2026-06-10 full幻觉率反常升高排查
+
+### 问题
+
+full配置幻觉率4.0%高于standard 3.1%，与预期矛盾（加入幻觉检查后幻觉率应降低）。
+
+### 排查过程
+
+1. 新建诊断脚本 `scripts/diagnose_hallucination_gap.py`，逐样本对比full和standard的幻觉率
+2. 发现8/25样本full幻觉率高于standard，且全部有EMR差异
+3. 对比 `emr_pre_revision` 和 `emr_result`，确认field_revision阶段修改了EMR字段
+
+### 根因
+
+field_revision补丁模式在修复幻觉时重写EMR字段值，重写过程中引入新的无依据事实。非幻觉检查误判。
+
+数据链路：hallucination_check → unsupported_facts → claim_verification转换为unsupported_claims → field_revision LLM补丁重写字段 → 新增无依据内容 → 评估标记为不支持
+
+### 修复方向
+
+field_revision补丁模式应限制为"只删除不添加"——仅移除幻觉内容，不重写字段值。
+
+## 2026-06-10 extract_benchmark_results.py 去重 + end_to_end补跑
+
+### 问题
+
+1. `full`配置数据库有5条重复记录（10348652、10527216、10621320、10657125、10692346各2条），`get_runs_by_config`未去重，导致full显示29个成功样本（实际25个）
+2. `end_to_end`配置缺少sample `10692346`，只有24条
+
+### 变更
+
+1. **修改** `scripts/extract_benchmark_results.py`
+   - `get_runs_by_config()`新增按`sample_id`去重逻辑
+   - 同一sample_id多条记录时：优先保留`status=completed`的记录，同状态保留更新的
+   - 去重时输出日志：剔除数量、重复sample_id集合
+2. **补跑** `end_to_end`配置的sample `10692346`
+   - 命令：`python scripts/run_full_benchmark.py --config end_to_end --sample-id 10692346 --re-evaluate`
+   - 结果：成功，run.id=299，3.6s，3次LLM调用
+
+### 验证
+
+- `full`配置：去重后25个成功样本（原29），日志输出`去重剔除 5 条重复记录`
+- `end_to_end`配置：补跑后25个成功样本（原24）
+
 ## 2026-06-09 extract_benchmark_results.py IQR异常值过滤
 
 ### 问题

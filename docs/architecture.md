@@ -132,8 +132,8 @@ MedicalAssisstant/
 │   │   │   │   ├── __init__.py
 │   │   │   │   ├── turn_cleaning.py    # 阶段1: 转写清洗与角色纠错
 │   │   │   │   ├── direct_soap_generation.py  # 阶段2: 直接草稿生成
-│   │   │   │   ├── hallucination_check.py    # 阶段2.5: 幻觉检查（按SOAP章节分段核查，利用source_turn_indices裁剪转写减少token消耗）
-│   │   │   │   ├── claim_verification.py    # 阶段3: 后置核查（Claim/Checklist/硬规则/确定性四步核查）
+│   │   │   │   ├── hallucination_check.py    # 阶段2.5: 幻觉检查（按SOAP章节分段核查+即时程序化删除幻觉内容）
+│   │   │   │   ├── claim_verification.py    # 阶段3: 后置核查（Checklist/硬规则/确定性三步核查）
 │   │   │   ├── soap_structuring.py      # 阶段3: 草稿结构化（自由文本草稿→SOAP JSON）
 │   │   │   └── field_revision.py        # 阶段4: 字段级修订与落盘
 │   ├── utils/                 # 工具函数
@@ -1398,9 +1398,9 @@ graph TB
 | 2 | DirectSOAPGenerationStage | combined_text (清洗后全文) | free_text模式: draft_text (自由文本草稿); json模式: emr_draft (完整SOAP草稿，含evidence_traces) | [stages/direct_soap_generation.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/direct_soap_generation.py) |
 | 3 | SoapStructuringStage (free_text模式) | draft_text + combined_text | emr_draft (SOAP JSON，含evidence_traces) | [stages/soap_structuring.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/soap_structuring.py) |
 | 3.5 | _normalize_terms_in_draft (后处理) | emr_draft | emr_draft (术语规范化后，中文路径: colloquial_synonyms预处理+normalize_draft_terms; 英文路径: normalize_draft_terms) | [orchestrator.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/orchestrator.py) |
-| 4 | HallucinationCheckStage | emr_draft + combined_text | hallucination_result (一致性核查结果) | [stages/hallucination_check.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/hallucination_check.py) |
-| 5 | ClaimVerificationStage | emr_draft + combined_text | verification_issues (Claim/Checklist/硬规则/确定性) | [stages/claim_verification.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/claim_verification.py) |
-| 6 | FieldRevisionStage | emr_draft + verification_issues | emr_draft (修订后，覆盖原草稿) | [stages/field_revision.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/field_revision.py) |
+| 4 | HallucinationCheckStage | emr_draft + combined_text | hallucination_result (一致性核查结果) + emr_draft (已删除幻觉内容) | [stages/hallucination_check.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/hallucination_check.py) |
+| 5 | ClaimVerificationStage | emr_draft + combined_text | verification_issues (Checklist/硬规则/确定性) | [stages/claim_verification.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/claim_verification.py) |
+| 6 | FieldRevisionStage | emr_draft + verification_issues | emr_draft (修订后，覆盖原草稿; 仅处理missing_items/certainty_errors/hard_rule_violations) | [stages/field_revision.py](file:///d:/practice/MedicalAssisstant/backend/services/pipeline/stages/field_revision.py) |
 
 #### PipelineStage 接口
 

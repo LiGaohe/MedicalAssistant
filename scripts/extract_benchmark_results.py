@@ -138,7 +138,27 @@ class BenchmarkResultExtractor:
             runs = session.query(BenchmarkRun).filter(
                 BenchmarkRun.config_key == config_key
             ).order_by(BenchmarkRun.created_at).all()
-            return runs
+            # 按 sample_id 去重：同一 sample_id 存在多条记录时，
+            # 优先保留 status=completed 的最新记录，避免重复计数
+            seen = {}
+            for run in runs:
+                sid = run.sample_id
+                if sid not in seen:
+                    seen[sid] = run
+                else:
+                    existing = seen[sid]
+                    # 优先保留 completed，其次保留更新的记录
+                    if run.status == "completed" and existing.status != "completed":
+                        seen[sid] = run
+                    elif run.status == existing.status and run.created_at > existing.created_at:
+                        seen[sid] = run
+            deduped = list(seen.values())
+            if len(deduped) < len(runs):
+                dup_count = len(runs) - len(deduped)
+                dup_ids = [r.sample_id for r in runs if r.sample_id in seen and seen[r.sample_id].id != r.id]
+                logger.info(f"配置 {config_key}: 去重剔除 {dup_count} 条重复记录，"
+                            f"重复 sample_id: {set(dup_ids)}")
+            return deduped
         finally:
             session.close()
 

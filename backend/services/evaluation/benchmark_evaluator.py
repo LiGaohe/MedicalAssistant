@@ -126,6 +126,7 @@ class LoggedConsistencyEvaluator(LoggedEvaluator):
         if key_facts:
             combined_result = self._call_llm_json(
                 "consistency_combined_check",
+                transcript=transcript,
                 key_facts=json.dumps(key_facts, ensure_ascii=False, indent=2),
                 emr_content=emr_text
             )

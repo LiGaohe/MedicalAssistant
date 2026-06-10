@@ -348,7 +348,10 @@ $emr_content
     )
 
     templates["consistency_combined_check"] = PromptTemplate(
-        template="""## 关键事实清单（从原始对话中提取）
+        template="""## 原始对话
+$transcript
+
+## 关键事实清单（从原始对话中提取）
 $key_facts
 
 ## 待评估病历
@@ -357,20 +360,24 @@ $emr_content
 你是一个医疗病历质量评估专家。请同时完成以下两项评估任务。
 
 ## 任务一：事实一致性检查（幻觉检查）
-从病历中提取所有原子事实，逐条判断每个事实是否被关键事实清单支持。
+从病历中提取所有原子事实，逐条判断每个事实是否有依据。
 
 **核心原则：只检查病历中已经写了的内容是否有依据，不检查病历是否遗漏了关键事实。**
 
+**证据来源优先级**：先查关键事实清单，若清单中无对应条目，必须在原始对话中搜索确认。只有关键事实清单和原始对话中均找不到依据时，才标记为不支持。
+
 具体规则：
-1. 从病历文本中提取原子事实（如：症状、诊断、药物、检查结果等）
-2. 对每个提取出的事实，判断关键事实清单中是否有对应依据
-3. **病历中没写的内容不算幻觉**——遗漏是完整性问题，不是一致性问题
-4. 只有病历中写了但关键事实清单中找不到依据的，才标记为不支持（幻觉）
-5. 关键事实清单中有但病历中没写的，不纳入本次评估
+1. 从病历文本中提取原子事实（如：症状、诊断、药物、检查结果、饮食记录、安慰性语句、医学常识陈述等）
+2. 对每个提取出的事实，先在关键事实清单中查找依据
+3. 若关键事实清单中无对应条目，必须在原始对话中搜索是否有依据
+4. **病历中没写的内容不算幻觉**——遗漏是完整性问题，不是一致性问题
+5. 只有病历中写了但关键事实清单和原始对话中均找不到依据的，才标记为不支持（幻觉）
+6. 关键事实清单中有但病历中没写的，不纳入本次评估
 
 **示例**：
 - 病历写了"诊断为上呼吸道感染"，关键事实清单中有此诊断 → 支持
-- 病历写了"诊断为肺炎"，但关键事实清单中无此诊断 → 不支持（幻觉）
+- 病历写了"诊断为肺炎"，但关键事实清单和原始对话中均无此诊断 → 不支持（幻觉）
+- 病历写了"昨晚喝了两次奶粉"，关键事实清单中无此条目，但原始对话中有 → 支持
 - 关键事实清单中有"发热38.5度"，但病历中没写体温 → 不评估（遗漏，非幻觉）
 
 ## 任务二：内部一致性检查
@@ -389,7 +396,7 @@ $emr_content
       "fact": "从病历中提取的原子事实",
       "section": "subjective|objective|assessment|plan",
       "is_supported": true或false,
-      "evidence_text": "关键事实清单中支持该事实的原文（如果is_supported为true，否则为空字符串）",
+      "evidence_text": "关键事实清单或原始对话中支持该事实的原文（如果is_supported为true，否则为空字符串）",
       "reasoning": "判断理由（简要说明为什么支持或不支持）"
     }
   ],
@@ -415,7 +422,7 @@ $emr_content
 }
 
 如果没有发现内部冲突，internal_conflicts数组为空，is_consistent为true，consistency_score为1.0。""",
-        required_vars=["key_facts", "emr_content"]
+        required_vars=["transcript", "key_facts", "emr_content"]
     )
 
     return templates
@@ -765,7 +772,10 @@ If no risks found, risks array is empty, has_high_risk is false, all counts are 
     )
 
     templates["consistency_combined_check"] = PromptTemplate(
-        template="""## Key fact list (extracted from original conversation)
+        template="""## Original conversation
+$transcript
+
+## Key fact list (extracted from original conversation)
 $key_facts
 
 ## Medical record to evaluate
@@ -774,20 +784,24 @@ $emr_content
 You are a medical record quality assessment expert. Please complete both assessment tasks below simultaneously.
 
 ## Task 1: Fact Consistency Check (Hallucination Check)
-Extract all atomic facts from the medical record, then judge whether each fact is supported by the key fact list.
+Extract all atomic facts from the medical record, then judge whether each fact has supporting evidence.
 
 **Core Principle: Only check whether content WRITTEN in the medical record has supporting evidence. Do NOT check whether the medical record has omitted key facts.**
 
+**Evidence source priority**: Check the key fact list first. If no matching entry is found in the list, you MUST search the original conversation to confirm. Only mark as unsupported when NO evidence is found in BOTH the key fact list AND the original conversation.
+
 Specific rules:
-1. Extract atomic facts from the medical record text (e.g., symptoms, diagnoses, medications, examination results)
-2. For each extracted fact, determine if the key fact list contains corresponding evidence
-3. **Content NOT written in the medical record is NOT hallucination** — omissions are a completeness issue, not a consistency issue
-4. Only mark as unsupported (hallucination) when the medical record states something that cannot be found in the key fact list
-5. Key facts present in the list but absent from the medical record should NOT be included in this evaluation
+1. Extract atomic facts from the medical record text (e.g., symptoms, diagnoses, medications, examination results, dietary records, comforting statements, medical common knowledge, etc.)
+2. For each extracted fact, first check the key fact list for supporting evidence
+3. If no matching entry is found in the key fact list, you MUST search the original conversation for evidence
+4. **Content NOT written in the medical record is NOT hallucination** — omissions are a completeness issue, not a consistency issue
+5. Only mark as unsupported (hallucination) when the medical record states something that cannot be found in either the key fact list or the original conversation
+6. Key facts present in the list but absent from the medical record should NOT be included in this evaluation
 
 **Examples**:
 - Medical record states "diagnosed with upper respiratory infection", key fact list has this diagnosis → Supported
-- Medical record states "diagnosed with pneumonia", but key fact list has no such diagnosis → Unsupported (hallucination)
+- Medical record states "diagnosed with pneumonia", but neither key fact list nor original conversation has this diagnosis → Unsupported (hallucination)
+- Medical record states "drank milk twice last night", key fact list has no such entry, but original conversation mentions it → Supported
 - Key fact list has "fever 38.5°C", but medical record does not mention temperature → Not evaluated (omission, not hallucination)
 
 ## Task 2: Internal Consistency Check
@@ -806,7 +820,7 @@ Please strictly follow this format, do not add any extra content:
       "fact": "atomic fact extracted from medical record",
       "section": "subjective|objective|assessment|plan",
       "is_supported": true or false,
-      "evidence_text": "original text in key fact list supporting this fact (if is_supported is true, otherwise empty string)",
+      "evidence_text": "original text from key fact list or original conversation supporting this fact (if is_supported is true, otherwise empty string)",
       "reasoning": "judgment rationale (briefly explain why supported or not supported)"
     }
   ],
@@ -832,7 +846,7 @@ Please strictly follow this format, do not add any extra content:
 }
 
 If no internal conflicts found, internal_conflicts array is empty, is_consistent is true, consistency_score is 1.0.""",
-        required_vars=["key_facts", "emr_content"]
+        required_vars=["transcript", "key_facts", "emr_content"]
     )
 
     return templates

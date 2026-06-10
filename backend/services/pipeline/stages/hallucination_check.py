@@ -1,3 +1,5 @@
+import copy
+import re
 import time
 from typing import Dict, Any, List, Tuple
 
@@ -5,6 +7,109 @@ from ..base import PipelineContext, PipelineStage
 from ..utils import parse_json_response, extract_section_fields, collect_turn_indices, build_section_transcript
 from ..debug_interactor import DebugInteractor
 from ....utils.logger import logger
+
+
+def _clean_text_after_removal(text: str) -> str:
+    """清理删除幻觉文本后产生的多余标点和空格。"""
+    text = re.sub(r'[（(]\s*(具体结果未提及|具体结果不详|未提及|不详)?\s*[）)]', '', text)
+    text = re.sub(r'。+', '。', text)
+    text = re.sub(r'，+', '，', text)
+    text = re.sub(r'\s+。', '。', text)
+    text = re.sub(r'\s+，', '，', text)
+    text = re.sub(r'。，', '，', text)
+    text = re.sub(r'，。', '。', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+
+def _delete_unsupported_from_emr(emr: dict, unsupported_facts: List[Dict]) -> Tuple[dict, int]:
+    """程序化删除幻觉内容（只删除不添加）。
+
+    在幻觉检查后立刻调用，确保下游阶段看到的是已删除幻觉的草稿。
+
+    Args:
+        emr: SOAP草稿
+        unsupported_facts: 幻觉检查输出的unsupported_facts列表
+
+    Returns:
+        (revised_emr, handled_count): 修正后的SOAP和处理的claim数
+    """
+    result = copy.deepcopy(emr)
+    handled_count = 0
+
+    section_to_abbr = {
+        "subjective": "S", "objective": "O",
+        "assessment": "A", "plan": "P",
+    }
+
+    for fact in unsupported_facts:
+        field_name = fact.get("field_name", "")
+        section = fact.get("section", "")
+        claim_text = fact.get("fact", "").strip()
+
+        if not field_name or not claim_text or len(claim_text) < 2:
+            continue
+
+        section_data = result.get(section)
+        if not isinstance(section_data, dict):
+            continue
+
+        claim_handled = False
+
+        # 处理value字段（dict类型，含value和source_turn_indices）
+        field_data = section_data.get(field_name)
+        if isinstance(field_data, dict):
+            field_value = field_data.get("value", "")
+            if isinstance(field_value, str) and claim_text in field_value:
+                new_value = field_value.replace(claim_text, "")
+                new_value = _clean_text_after_removal(new_value)
+                field_data["value"] = new_value
+                field_data["source_turn_indices"] = []
+                claim_handled = True
+                logger.info(
+                    f"幻觉即时删除: {section}.{field_name}.value, "
+                    f"删除 '{claim_text[:50]}'"
+                )
+        elif isinstance(field_data, list):
+            logger.warning(
+                f"幻觉即时删除: {section}.{field_name} 为数组类型，"
+                f"暂不支持程序化删除, claim_text='{claim_text[:50]}'"
+            )
+        elif isinstance(field_data, str) and claim_text in field_data:
+            new_value = field_data.replace(claim_text, "")
+            new_value = _clean_text_after_removal(new_value)
+            section_data[field_name] = new_value
+            claim_handled = True
+            logger.info(
+                f"幻觉即时删除: {section}.{field_name}, 删除 '{claim_text[:50]}'"
+            )
+
+        # 处理text汇总字段
+        text_value = section_data.get("text", "")
+        if isinstance(text_value, str) and claim_text in text_value:
+            new_text = text_value.replace(claim_text, "")
+            new_text = _clean_text_after_removal(new_text)
+            section_data["text"] = new_text
+            claim_handled = True
+            logger.info(
+                f"幻觉即时删除: {section}.text, 删除 '{claim_text[:50]}'"
+            )
+
+        if claim_handled:
+            handled_count += 1
+        else:
+            logger.warning(
+                f"幻觉即时删除: 未能处理, "
+                f"section='{section}', field_name='{field_name}', "
+                f"claim_text='{claim_text[:50]}'"
+            )
+
+    if handled_count > 0:
+        logger.info(
+            f"幻觉即时删除完成: 共处理 "
+            f"{handled_count}/{len(unsupported_facts)} 条unsupported_facts"
+        )
+    return result, handled_count
 
 
 class HallucinationCheckStage(PipelineStage):
@@ -73,11 +178,12 @@ class HallucinationCheckStage(PipelineStage):
                 transcript_section = combined_text
             else:
                 relevant_indices = collect_turn_indices(normal_fields)
+                # buffer=2: 增加上下文范围，减少因裁剪导致的误判
                 transcript_section = build_section_transcript(
-                    ctx.turns, relevant_indices, buffer=1
+                    ctx.turns, relevant_indices, buffer=2
                 )
                 logger.info(
-                    f"章节 {section_name} 使用裁剪转写，"
+                    f"章节 {section_name} 使用裁剪转写（buffer=2），"
                     f"涉及 {len(relevant_indices)} 个对话轮次"
                 )
 
@@ -119,10 +225,11 @@ class HallucinationCheckStage(PipelineStage):
         # 合并为原格式输出（保持下游兼容）
         result = self._merge_section_results(section_results)
 
-        # 否定性事实保护：通过LLM用未压缩对话原文二次验证
-        result = self._reverify_negative_facts(ctx, result, combined_text)
-
         ctx.hallucination_result = result
+
+        # 不在幻觉检查阶段立即删除unsupported_facts
+        # 删除操作移到修订阶段，由修订阶段用完整转写二次验证后再决定是否删除
+        # 这样可以避免裁剪导致的误判，减少误删
 
         stage_time = time.time() - stage_start
         total_facts = result["summary"]["total_facts"]
@@ -134,21 +241,21 @@ class HallucinationCheckStage(PipelineStage):
         logger.info(f"幻觉检查完成 - 耗时: {stage_time:.2f}秒")
         logger.info(f"  - 总事实数: {total_facts}")
         logger.info(f"  - 有依据: {supported_count}")
-        logger.info(f"  - 无依据(幻觉): {unsupported_count}")
+        logger.info(f"  - 疑似幻觉: {unsupported_count}（待修订阶段二次验证）")
         logger.info(f"  - 支持率: {support_rate:.2%}")
         logger.info(f"  - 严重程度: {result['severity']}")
 
         if result["unsupported_facts"]:
-            logger.warning(f"!!! 发现 {unsupported_count} 条疑似幻觉 !!!")
+            logger.warning(f"!!! 发现 {unsupported_count} 条疑似幻觉，待修订阶段验证 !!!")
             for i, fact in enumerate(result["unsupported_facts"][:10]):
                 logger.warning(
-                    f"  幻觉#{i+1}: [{fact.get('section', '?')}] "
+                    f"  疑似幻觉#{i+1}: [{fact.get('section', '?')}] "
                     f"{fact.get('fact', '')[:120]}"
                 )
             if len(result["unsupported_facts"]) > 10:
                 logger.warning(f"  ...还有 {len(result['unsupported_facts']) - 10} 条未显示")
         else:
-            logger.info("未发现幻觉，所有事实均有对话依据")
+            logger.info("未发现疑似幻觉，所有事实均有对话依据")
 
         logger.info("=" * 50)
 
@@ -315,170 +422,6 @@ class HallucinationCheckStage(PipelineStage):
             return "medium"
         else:
             return "low"
-
-    def _reverify_negative_facts(
-        self, ctx: PipelineContext, result: Dict[str, Any], combined_text: str
-    ) -> Dict[str, Any]:
-        """通过LLM用未压缩对话原文二次验证否定性事实。
-
-        当幻觉检查将否定性事实（如"未去医院检查"）标记为不支持时，
-        调用LLM用未压缩的对话原文判断该否定性事实是否确实不支持。
-        如果LLM判断对话原文支持该否定性事实，则从unsupported_facts中移除。
-
-        Args:
-            ctx: 管线上下文
-            result: 幻觉检查结果
-            combined_text: 原始对话文本（未压缩）
-
-        Returns:
-            修正后的幻觉检查结果
-        """
-        if not combined_text or not result.get("unsupported_facts"):
-            return result
-
-        # 筛选可能是否定性事实的unsupported条目
-        negative_candidates = []
-        other_facts = []
-        for fact_item in result["unsupported_facts"]:
-            fact_text = fact_item.get("fact", "").strip()
-            if self._is_likely_negative_fact(fact_text):
-                negative_candidates.append(fact_item)
-            else:
-                other_facts.append(fact_item)
-
-        if not negative_candidates:
-            return result
-
-        logger.info(
-            f"否定性事实二次验证: 发现 {len(negative_candidates)} 个否定性事实候选，"
-            f"调用LLM用未压缩对话原文验证"
-        )
-
-        # 构建验证提示词
-        verified_negative = self._call_llm_reverify(ctx, negative_candidates, combined_text)
-
-        # 合并结果：verified_negative中LLM确认支持的从unsupported中移除
-        still_unsupported = []
-        restored_count = 0
-        for fact_item in negative_candidates:
-            fact_text = fact_item.get("fact", "").strip()
-            if fact_text in verified_negative:
-                # LLM确认对话原文支持该否定性事实，恢复为支持状态
-                restored_count += 1
-                logger.info(
-                    f"否定性事实二次验证恢复: '{fact_text}' 经LLM确认有对话依据，"
-                    f"从幻觉列表中移除"
-                )
-            else:
-                still_unsupported.append(fact_item)
-
-        if restored_count > 0:
-            result["unsupported_facts"] = other_facts + still_unsupported
-            result["summary"]["unsupported_count"] -= restored_count
-            result["summary"]["supported_count"] += restored_count
-            total = result["summary"]["total_facts"]
-            supported = result["summary"]["supported_count"]
-            result["summary"]["support_rate"] = round(supported / total, 4) if total > 0 else 1.0
-            result["has_hallucination"] = len(result["unsupported_facts"]) > 0
-            result["severity"] = HallucinationCheckStage._determine_severity(
-                result["summary"]["support_rate"],
-                result["summary"]["unsupported_count"]
-            )
-            logger.info(
-                f"否定性事实二次验证完成: 恢复 {restored_count} 个否定性事实，"
-                f"仍不支持 {len(still_unsupported)} 个"
-            )
-
-        return result
-
-    @staticmethod
-    def _is_likely_negative_fact(fact_text: str) -> bool:
-        """判断事实文本是否可能是否定性事实。
-
-        不使用词表匹配，而是通过LLM在二次验证中判断。
-        这里只做初步筛选，将可能是否定性的条目挑出。
-        """
-        if not fact_text:
-            return False
-        # 否定性事实通常以否定词开头，或包含"否认"、"无"等模式
-        # 这是一个宽松的筛选，宁可多选不可漏选
-        negative_indicators = ["未", "没有", "无", "否认", "不曾", "未曾", "从未", "暂无", "不伴", "无其他"]
-        return any(fact_text.startswith(ind) for ind in negative_indicators)
-
-    def _call_llm_reverify(
-        self, ctx: PipelineContext, candidates: List[Dict], combined_text: str
-    ) -> set:
-        """调用LLM用未压缩对话原文验证否定性事实是否被支持。
-
-        Returns:
-            被LLM确认有对话依据的否定性事实文本集合
-        """
-        if not ctx.llm_service or ctx.debug_mode:
-            logger.warning("LLM服务不可用或调试模式，跳过否定性事实二次验证")
-            return set()
-
-        # 构建待验证事实列表
-        facts_text = "\n".join(
-            f"{i+1}. {item.get('fact', '')}"
-            for i, item in enumerate(candidates)
-        )
-
-        # 截取对话原文（避免过长）
-        transcript_for_verify = combined_text
-        max_transcript_len = 8000
-        if len(transcript_for_verify) > max_transcript_len:
-            transcript_for_verify = transcript_for_verify[:max_transcript_len]
-            logger.info(f"否定性事实二次验证: 对话原文过长，截取前{max_transcript_len}字符")
-
-        prompt = f"""## 原始对话（未压缩）
-{transcript_for_verify}
-
-## 以下否定性事实被标记为"不支持"（即幻觉）
-{facts_text}
-
-请判断上述每个否定性事实是否能在原始对话中找到依据。
-
-**关键规则**：
-- 患者的否定回答（如"没有"、"没去过"、"不疼"等）是否定性事实的依据
-- 如果对话中医生询问了某事，患者给出了否定回答，则对应的否定性事实有依据
-- 只需判断否定性事实是否有依据，不需要判断肯定性事实
-
-请输出JSON格式：
-{{
-  "verified_supported": [
-    "有依据的否定性事实原文（与输入列表中的文本完全一致）"
-  ]
-}}
-
-如果没有有依据的否定性事实，verified_supported为空数组。"""
-
-        try:
-            response = ctx.llm_service.generate_stream_to_response(
-                prompt, thinking_enabled=False, max_tokens=2048
-            )
-            ctx.llm_stats.record_from_response("negative_fact_reverify", prompt, response)
-            response_text = response.text
-            parsed = parse_json_response(response_text, "否定性事实二次验证")
-
-            if not parsed:
-                logger.warning("否定性事实二次验证: JSON解析失败，跳过验证")
-                return set()
-
-            verified = parsed.get("verified_supported", [])
-            if not isinstance(verified, list):
-                logger.warning(f"否定性事实二次验证: verified_supported格式错误, type={type(verified)}")
-                return set()
-
-            logger.info(f"否定性事实二次验证: LLM确认 {len(verified)} 个否定性事实有对话依据")
-            return set(str(v).strip() for v in verified)
-
-        except Exception as e:
-            logger.error(f"否定性事实二次验证LLM调用失败: {e}")
-            ctx.llm_stats.record_call(
-                "negative_fact_reverify", len(prompt), 0,
-                success=False, error_message=str(e),
-            )
-            return set()
 
     @staticmethod
     def _empty_result() -> Dict[str, Any]:
