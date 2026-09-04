@@ -4,7 +4,7 @@
 
 系统架构：
 
-![](docs/assets/系统架构图v2.drawio.svg)
+![](assets/系统架构图v2.drawio.svg)
 
 ## 功能特性
 
